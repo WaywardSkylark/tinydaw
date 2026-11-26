@@ -233,6 +233,14 @@ int mixer_rate(const Mixer *m);
  * ignoring mute/solo. */
 void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int frames, int only_track, int voices);
 int project_has_tails(const Project *p);        /* any delay or reverb in use */
+/* Each track's loudest sample (left, right) since the last call, after its fader; then resets. */
+void mixer_levels(Mixer *m, float out[][2]);
+
+/* ---- analysis (analysis.c) ---- */
+#define VIS_FFT 4096
+/* Magnitude spectrum in dB (full-scale sine = 0 dB) of n mono samples, n a power of two up to
+ * VIS_FFT, Hann-windowed. Writes n / 2 bins; bin k is k * rate / n Hz. */
+void spectrum_db(const float *mono, int n, float *db);
 
 /* ---- project files (project.c) ---- */
 void project_free(Project *p);                   /* frees sample memory */

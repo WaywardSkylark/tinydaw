@@ -42,6 +42,7 @@ struct Mixer {
     Comb comb[2][NCOMB];
     Allpass ap[2][NAP];
     long tail_left;                                     /* frames the sends keep ringing */
+    float peak[MAX_TRACKS][2];                          /* loudest sample per track since last read */
     float env;                                          /* sidechain envelope */
 };
 
@@ -89,6 +90,15 @@ void mixer_free(Mixer *m)
 }
 
 int mixer_rate(const Mixer *m) { return m ? m->rate : 0; }
+
+void mixer_levels(Mixer *m, float out[][2])
+{
+    for (int t = 0; t < MAX_TRACKS; t++) {
+        out[t][0] = m ? m->peak[t][0] : 0;
+        out[t][1] = m ? m->peak[t][1] : 0;
+        if (m) m->peak[t][0] = m->peak[t][1] = 0;
+    }
+}
 
 int project_has_tails(const Project *p)
 {
@@ -357,6 +367,8 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
                 float L = b[2 * i] * l * dk, R = b[2 * i + 1] * r * dk;
                 o[2 * i] += L;
                 o[2 * i + 1] += R;
+                if (fabsf(L) > m->peak[t][0]) m->peak[t][0] = fabsf(L);
+                if (fabsf(R) > m->peak[t][1]) m->peak[t][1] = fabsf(R);
                 sends_d[2 * i] += L * tr->delay_send;
                 sends_d[2 * i + 1] += R * tr->delay_send;
                 sends_r[2 * i] += L * tr->reverb_send;

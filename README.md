@@ -89,6 +89,19 @@ A synthesized sound transposed on a clip is made again at the new pitch, so it k
 recorded and imported sounds are resampled, so up an octave plays in half the time. Pitched and
 reversed copies don't clutter the library.
 
+## Visualizer
+
+Every track header has a level meter, and the top bar shows the master level when the window is
+wide enough. **Visual** (or F4) opens the analyzer: a spectrum (20 Hz to 20 kHz), the waveform,
+a stereo field display with its correlation (negative means the left and right cancel in mono),
+master meters with peak readouts and clip warnings (click to clear), and a meter per track.
+
+**F11** (or the button at the bottom of that pane) starts the full-screen show: a glowing blob
+for every track that's sounding, in its colour and sized by its level, going round once every
+two bars in time with the song. They swell on the kick, a ring of spectrum bars pulses around
+them, each beat sends out a ripple, and hi-hats make it glitter. Space plays and stops, the pad
+keys still play, and Esc or F11 leaves.
+
 ## Pads and live input
 
 **Pads** in the top bar (or F2) opens the pads pane: 16 pads that play library sounds, and an
@@ -163,6 +176,9 @@ changes the file format, because no detail above 24 kHz exists to keep.
 - `src/fx.c`: the mixer. A state-variable filter, RBJ biquads for the EQ, tanh drive, a
   tempo-synced delay with a damped feedback loop, and a Freeverb-style reverb (8 combs and 4
   allpasses per side, tunings scaled to the project rate).
+- `src/analysis.c`: the FFT (radix-2, Hann window) behind the analyzer and the show. The audio
+  callback copies what it plays into a ring buffer that the UI reads each frame; the mixer
+  keeps each track's peak level.
 - No automation or MIDI output yet.
 
 ## Tests

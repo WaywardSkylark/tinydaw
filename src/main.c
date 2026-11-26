@@ -182,6 +182,9 @@ static struct { int top, left, head, ruler, status, lane_h, tl_x, tl_w, lanes_y,
 #define PANE_W 480
 static int pads_open;                   /* the Pads pane (shares the right-hand slot) */
 static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
+static int vis_open;                    /* the Visualizer pane: spectrum, scope, meters */
+static int show_open;                   /* the full-screen show */
+static Mixer *MX;                       /* the live mixer (see audio_cb) */
 static int sel_track;                   /* the track the Mixer pane shows */
 static int headless;                    /* self-test or screenshot: touch no files */
 static int pads_drop(int sample);
@@ -212,7 +215,7 @@ static void layout(void)
     L.ruler = 28;
     L.status = 26;
     L.tl_x = L.left + L.head;
-    L.pane_w = theory_open || pads_open || mixer_open ? PANE_W : 0;
+    L.pane_w = theory_open || pads_open || mixer_open || vis_open ? PANE_W : 0;
     L.pane_x = W - L.pane_w;
     L.tl_w = W - L.tl_x - L.pane_w;
     L.lanes_y = L.top + L.ruler;
@@ -1703,7 +1706,8 @@ static void pads_pane(void)
 /* Keys go to the pads while the pane is open, unless Ctrl/Alt is held or a dialog is up. */
 static int pads_take_key(SDL_Keysym k)
 {
-    return pads_open && !(k.mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) && !menu_open && !confirm_act && !export_open;
+    return (pads_open || show_open) && !(k.mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) && !menu_open && !confirm_act &&
+           !export_open;
 }
 
 /* ---- File menu and the "save changes?" question */
@@ -2046,6 +2050,418 @@ static void mixer_pane(void)
     if (!inside) lpress = saved_press;
 }
 
+/* ---------------------------------------------------------------- visualizer */
+
+/* The audio callback copies everything it plays into a ring; each frame the UI takes the newest
+ * VIS_FFT frames from it, plus each track's peak level from the mixer. From those come the
+ * meters, the analyzer pane and the full-screen show. */
+#define VIS_RING 16384
+static float vis_ring[2 * VIS_RING];
+static int vis_pos;                     /* written by the audio thread under its lock */
+static float vis_buf[2 * VIS_FFT], vis_mono[VIS_FFT], vis_db[VIS_FFT / 2], vis_smooth[VIS_FFT / 2];
+
+typedef struct { float level, peak; Uint32 peak_at; int clipped; } Meter;
+static Meter track_meter[MAX_TRACKS], master_meter[2];
+#define VIS_PI 3.14159265358979323846
+static void show_toggle(void);
+static float low_energy, low_avg, high_energy, beat_pulse;   /* for the show */
+static Uint32 vis_last;
+
+static float to_db(float v) { return v > 1e-6f ? 20 * log10f(v) : -120; }
+
+/* fast rise, ~24 dB/s fall, peak held 1.5 s, sticky clip light (click to clear) */
+static void meter_feed(Meter *m, float v, float dt)
+{
+    float fall = powf(10, -24 * dt / 20);
+    m->level = v > m->level * fall ? v : m->level * fall;
+    Uint32 now = SDL_GetTicks();
+    if (v >= m->peak || now - m->peak_at > 1500) {
+        m->peak = v;
+        m->peak_at = now;
+    }
+    if (v > 1.0f) m->clipped = 1;
+}
+
+static void vis_update(void)
+{
+    Uint32 now = SDL_GetTicks();
+    float dt = vis_last ? (now - vis_last) / 1000.0f : 0.016f;
+    vis_last = now;
+    float levels[MAX_TRACKS][2];
+    LOCK();
+    int pos = vis_pos;
+    for (int i = 0; i < VIS_FFT; i++) {
+        int k = (pos - VIS_FFT + i + VIS_RING) % VIS_RING;
+        vis_buf[2 * i] = vis_ring[2 * k];
+        vis_buf[2 * i + 1] = vis_ring[2 * k + 1];
+    }
+    mixer_levels(MX, levels);
+    UNLOCK();
+    float pl = 0, pr = 0;
+    for (int i = VIS_FFT - 1024; i < VIS_FFT; i++) {      /* the latest ~20 ms for the master meter */
+        pl = fmaxf(pl, fabsf(vis_buf[2 * i]));
+        pr = fmaxf(pr, fabsf(vis_buf[2 * i + 1]));
+    }
+    meter_feed(&master_meter[0], pl, dt);
+    meter_feed(&master_meter[1], pr, dt);
+    for (int t = 0; t < MAX_TRACKS; t++) meter_feed(&track_meter[t], fmaxf(levels[t][0], levels[t][1]), dt);
+    if (!vis_open && !show_open) return;
+    static int smooth_ready;
+    if (!smooth_ready) {                                  /* start from silence, not full scale */
+        for (int k = 0; k < VIS_FFT / 2; k++) vis_smooth[k] = -140;
+        smooth_ready = 1;
+    }
+    for (int i = 0; i < VIS_FFT; i++) vis_mono[i] = 0.5f * (vis_buf[2 * i] + vis_buf[2 * i + 1]);
+    spectrum_db(vis_mono, VIS_FFT, vis_db);
+    float fall = 60 * dt;                                 /* bars fall 60 dB/s */
+    double bin_hz = (double)SR / VIS_FFT, lo = 0, hi = 0;
+    int nlo = 0, nhi = 0;
+    for (int k = 1; k < VIS_FFT / 2; k++) {
+        vis_smooth[k] = vis_db[k] > vis_smooth[k] - fall ? vis_db[k] : vis_smooth[k] - fall;
+        double f = k * bin_hz;
+        float lin = powf(10, vis_db[k] / 20);
+        if (f >= 30 && f < 150) { lo += lin * lin; nlo++; }
+        if (f >= 4000 && f < 16000) { hi += lin * lin; nhi++; }
+    }
+    low_energy = nlo ? sqrtf((float)(lo / nlo)) * 8 : 0;
+    high_energy = nhi ? sqrtf((float)(hi / nhi)) * 30 : 0;
+    low_avg += (low_energy - low_avg) * fminf(1, dt * 2);
+    if (low_energy > low_avg * 1.35f && low_energy > 0.05f && beat_pulse < 0.3f) beat_pulse = 1;   /* a kick */
+    beat_pulse *= expf(-dt * 6);
+}
+
+static Col meter_col(float db)
+{
+    return db > -0.5f ? (Col){235, 70, 60, 255} : db > -6 ? (Col){240, 190, 70, 255} : (Col){110, 200, 120, 255};
+}
+
+/* A level meter, -60..0 dB, in r: vertical or horizontal. */
+static void meter_draw(SDL_Rect r, const Meter *m, int vertical)
+{
+    fill(r, shade(PANEL, 0.7f));
+    float db = to_db(m->level), pk = to_db(m->peak);
+    float k = (db + 60) / 60, kp = (pk + 60) / 60;
+    k = k < 0 ? 0 : k > 1 ? 1 : k;
+    kp = kp < 0 ? 0 : kp > 1 ? 1 : kp;
+    if (vertical) {
+        int h = (int)(r.h * k), hp = (int)(r.h * kp);
+        fill((SDL_Rect){r.x, r.y + r.h - h, r.w, h}, meter_col(db));
+        if (hp > 1) fill((SDL_Rect){r.x, r.y + r.h - hp, r.w, 2}, meter_col(pk));
+        if (m->clipped) fill((SDL_Rect){r.x, r.y, r.w, 3}, (Col){235, 70, 60, 255});
+    } else {
+        int w = (int)(r.w * k), wp = (int)(r.w * kp);
+        fill((SDL_Rect){r.x, r.y, w, r.h}, meter_col(db));
+        if (wp > 1) fill((SDL_Rect){r.x + wp - 2, r.y, 2, r.h}, meter_col(pk));
+        if (m->clipped) fill((SDL_Rect){r.x + r.w - 4, r.y, 4, r.h}, (Col){235, 70, 60, 255});
+    }
+}
+
+static double freq_x(double f, SDL_Rect r)   /* 20 Hz .. 20 kHz, logarithmic */
+{
+    return r.x + r.w * log(f / 20.0) / log(1000.0);
+}
+
+static void draw_spectrum(SDL_Rect r)
+{
+    fill(r, shade(BG, 0.9f));
+    static const int grid_hz[] = {50, 100, 200, 500, 1000, 2000, 5000, 10000};
+    static const char *grid_lbl[] = {"50", "100", "200", "500", "1k", "2k", "5k", "10k"};
+    for (int i = 0; i < 8; i++) {
+        int x = (int)freq_x(grid_hz[i], r);
+        line(x, r.y, x, r.y + r.h, shade(LINE, 0.7f));
+        text(x + 3, r.y + r.h - font_h - 2, grid_lbl[i], shade(DIM, 0.8f));
+    }
+    for (int db = -12; db >= -84; db -= 24) {
+        int y = r.y + (int)(r.h * (-db) / 96.0);
+        line(r.x, y, r.x + r.w, y, shade(LINE, 0.7f));
+        char b[16];
+        snprintf(b, sizeof b, "%d", db);
+        text(r.x + 3, y + 1, b, shade(DIM, 0.8f));
+    }
+    double bin_hz = (double)SR / VIS_FFT;
+    int prev_y = -1;
+    for (int x = r.x; x < r.x + r.w; x++) {      /* each pixel column: the loudest bin under it */
+        double f0 = 20 * pow(1000.0, (double)(x - r.x) / r.w), f1 = 20 * pow(1000.0, (double)(x + 1 - r.x) / r.w);
+        int k0 = (int)(f0 / bin_hz), k1 = (int)(f1 / bin_hz);
+        if (k1 <= k0) k1 = k0 + 1;
+        float best = -140;
+        for (int k = k0; k < k1 && k < VIS_FFT / 2; k++) best = fmaxf(best, vis_smooth[k]);
+        if (k0 < 1) best = -140;
+        float t = (best + 96) / 96;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        int y = r.y + r.h - (int)(r.h * t);
+        Col c = shade(ACCENT, 0.45f + 0.55f * t);
+        line(x, y, x, r.y + r.h, alpha(c, 150));
+        if (prev_y >= 0) line(x - 1, prev_y, x, y, HEAD);
+        prev_y = y;
+    }
+    outline(r, LINE);
+}
+
+static void draw_scope(SDL_Rect r)
+{
+    fill(r, shade(BG, 0.9f));
+    line(r.x, r.y + r.h / 2, r.x + r.w, r.y + r.h / 2, shade(LINE, 0.7f));
+    int span = 2048, start = VIS_FFT - span - 1;
+    for (int i = VIS_FFT - span - 1; i > VIS_FFT / 2; i--)   /* trigger on a rising zero crossing */
+        if (vis_mono[i - 1] < 0 && vis_mono[i] >= 0) {
+            start = i;
+            break;
+        }
+    if (start + span > VIS_FFT) start = VIS_FFT - span;
+    int py = -1;
+    for (int x = 0; x < r.w; x++) {
+        float v = vis_mono[start + x * span / r.w];
+        v = v > 1 ? 1 : v < -1 ? -1 : v;
+        int y = r.y + r.h / 2 - (int)(v * (r.h / 2 - 2));
+        if (py >= 0) line(r.x + x - 1, py, r.x + x, y, TRACK_COL[4]);
+        py = y;
+    }
+    outline(r, LINE);
+}
+
+static void draw_stereo(SDL_Rect r)              /* goniometer: mono is vertical, wide is spread out */
+{
+    fill(r, shade(BG, 0.9f));
+    int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    line(cx, r.y, cx, r.y + r.h, shade(LINE, 0.7f));
+    line(r.x, cy, r.x + r.w, cy, shade(LINE, 0.7f));
+    SDL_SetRenderDrawColor(ren, TRACK_COL[6].r, TRACK_COL[6].g, TRACK_COL[6].b, 160);
+    double corr_num = 0, el = 0, er = 0;
+    for (int i = VIS_FFT - 1536; i < VIS_FFT; i++) {
+        float L = vis_buf[2 * i], R = vis_buf[2 * i + 1];
+        corr_num += L * R;
+        el += L * L;
+        er += R * R;
+        float sx = (R - L) * 0.7071f, sy = (L + R) * 0.7071f;
+        int x = cx + (int)(sx * r.w * 0.45f), y = cy - (int)(sy * r.h * 0.45f);
+        if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) SDL_RenderDrawPoint(ren, x, y);
+    }
+    double corr = el > 1e-9 && er > 1e-9 ? corr_num / sqrt(el * er) : 1;
+    char b[32];
+    snprintf(b, sizeof b, "corr %+.2f", corr);
+    text(r.x + 4, r.y + 2, b, corr < 0 ? (Col){235, 70, 60, 255} : DIM);
+    outline(r, LINE);
+}
+
+static int vis_content(int x, int y, int w)
+{
+    char buf[64];
+    text(x, y, "SPECTRUM", DIM);
+    y += font_h + 6;
+    draw_spectrum((SDL_Rect){x, y, w, 200});
+    y += 212;
+    text(x, y, "WAVEFORM", DIM);
+    text(x + w / 2 + 6, y, "STEREO", DIM);
+    y += font_h + 6;
+    draw_scope((SDL_Rect){x, y, w / 2 - 6, 150});
+    draw_stereo((SDL_Rect){x + w / 2 + 6, y, w / 2 - 6, 150});
+    y += 162;
+    text(x, y, "MASTER", DIM);
+    y += font_h + 6;
+    for (int c = 0; c < 2; c++) {
+        SDL_Rect mr = {x + 20, y + c * 20, w - 110, 14};
+        text(x, y + c * 20 - 1, c ? "R" : "L", DIM);
+        meter_draw(mr, &master_meter[c], 0);
+        snprintf(buf, sizeof buf, "%5.1f dB", fmaxf(-99, to_db(master_meter[c].peak)));
+        text(x + w - 82, y + c * 20 - 1, buf, master_meter[c].clipped ? (Col){235, 70, 60, 255} : TEXT);
+        if (hit(mr) && lpress) {
+            master_meter[0].clipped = master_meter[1].clipped = 0;
+            for (int t = 0; t < MAX_TRACKS; t++) track_meter[t].clipped = 0;
+            lpress = 0;
+        }
+    }
+    y += 46;
+    text(x, y, "TRACKS", DIM);
+    y += font_h + 6;
+    for (int t = 0; t < P.ntracks; t++) {
+        fill((SDL_Rect){x, y + 3, 4, 10}, TRACK_COL[t]);
+        text_clip((SDL_Rect){x + 8, y, 110, font_h + 2}, x + 10, y, P.tracks[t].name, TEXT);
+        meter_draw((SDL_Rect){x + 124, y + 2, w - 124, 12}, &track_meter[t], 0);
+        y += 18;
+    }
+    y += 10;
+    text(x, y, "Red at the right of a meter means it went over 0 dB.", DIM);
+    text(x, y + font_h + 2, "Click a master meter to clear the clip lights.", DIM);
+    y += 2 * font_h + 14;
+    if (button((SDL_Rect){x, y, w, 32}, "Full-screen show  (F11)", 0)) show_toggle();
+    return y + 44;
+}
+
+static int vis_scroll, vis_content_h;
+
+static void vis_pane(void)
+{
+    SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
+    fill(pane, PANEL);
+    line(pane.x, pane.y, pane.x, pane.y + pane.h, LINE);
+    int inside = hit(pane), saved_press = lpress;
+    if (!inside) lpress = 0;
+    if (inside && wheel_y && drag.kind == D_NONE) {
+        vis_scroll -= wheel_y * 48;
+        wheel_y = 0;
+    }
+    int max_scroll = vis_content_h - pane.h > 0 ? vis_content_h - pane.h : 0;
+    vis_scroll = vis_scroll < 0 ? 0 : vis_scroll > max_scroll ? max_scroll : vis_scroll;
+    SDL_RenderSetClipRect(ren, &pane);
+    int y0 = pane.y + 12 - vis_scroll;
+    int y = vis_content(pane.x + 14, y0, pane.w - 28);
+    vis_content_h = y - y0 + 12;
+    SDL_RenderSetClipRect(ren, NULL);
+    if (!inside) lpress = saved_press;
+}
+
+/* ---- the full-screen show: metaballs, one per sounding track, in its colour, orbiting in time
+ * with the song; they swell on the kick, a spectrum ring pulses around them, beats send out
+ * ripples. Rendered at low resolution into a texture and smoothly scaled up. */
+
+static SDL_Texture *show_tex;
+static int show_w, show_h;
+static Uint32 *show_px;
+static float blob_size[MAX_TRACKS], show_phase, ripple_t[6];
+static int ripple_n;
+static double last_beat = -1;
+
+static void ring(int cx, int cy, int r, Col c);
+
+static void show_draw(void)
+{
+    int tw = 320, th = 320 * H / (W > 0 ? W : 1);
+    if (th < 90) th = 90;
+    if (!show_tex || tw != show_w || th != show_h) {
+        if (show_tex) SDL_DestroyTexture(show_tex);
+        free(show_px);
+        show_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, tw, th);
+        SDL_SetTextureScaleMode(show_tex, SDL_ScaleModeLinear);
+        show_px = malloc((size_t)tw * th * sizeof(Uint32));
+        show_w = tw;
+        show_h = th;
+        if (!show_tex || !show_px) return;
+    }
+    float dt = 1 / 60.0f;
+    /* the song's position: blobs go round once every two bars while it plays */
+    double beats = (double)P.playhead / SR * P.bpm / 60.0;
+    if (P.playing) {
+        show_phase = (float)(beats / 8.0 * 2 * VIS_PI);
+        if (floor(beats) != floor(last_beat) && ripple_n < 6) ripple_t[ripple_n++] = 0;   /* each beat */
+        last_beat = beats;
+    } else {
+        show_phase += dt * 0.15f;
+    }
+    float bf = P.playing ? (float)(beats - floor(beats)) : 1;
+    float pulse = fmaxf(beat_pulse, P.playing ? expf(-bf * 7) * fminf(1, low_energy * 3) : 0);
+
+    /* blobs: active tracks in their colours */
+    float bx[MAX_TRACKS + 1], by[MAX_TRACKS + 1], bs[MAX_TRACKS + 1], br[MAX_TRACKS + 1], bg[MAX_TRACKS + 1], bb[MAX_TRACKS + 1];
+    int n = 0;
+    float aspect = (float)tw / th;
+    for (int t = 0; t < P.ntracks; t++) {
+        float lv = track_meter[t].level;
+        float target = lv > 0.002f ? 0.06f + 0.16f * sqrtf(fminf(lv, 1.5f)) : 0;
+        blob_size[t] += (target - blob_size[t]) * (target > blob_size[t] ? 0.5f : 0.06f);
+        if (blob_size[t] < 0.004f) continue;
+        float a = show_phase + t * 2 * (float)VIS_PI / P.ntracks;
+        float rad = 0.38f + 0.12f * sinf(show_phase * 2 + t);
+        bx[n] = cosf(a) * rad * fminf(aspect, 1.9f);
+        by[n] = sinf(a) * rad;
+        bs[n] = blob_size[t] * (1 + 0.6f * pulse);
+        br[n] = TRACK_COL[t].r / 255.0f;
+        bg[n] = TRACK_COL[t].g / 255.0f;
+        bb[n] = TRACK_COL[t].b / 255.0f;
+        n++;
+    }
+    /* a core in the middle that breathes with the bass */
+    bx[n] = 0;
+    by[n] = 0;
+    bs[n] = 0.05f + 0.12f * fminf(1, low_energy) + 0.06f * pulse;
+    br[n] = 1.0f;
+    bg[n] = 0.82f;
+    bb[n] = 0.45f;
+    n++;
+
+    float sparkle = fminf(1, high_energy);
+    for (int py = 0; py < th; py++) {
+        float y = 1 - 2.0f * py / th;
+        for (int px = 0; px < tw; px++) {
+            float x = (2.0f * px / tw - 1) * aspect;
+            float field = 0, cr = 0, cg = 0, cb = 0;
+            for (int i = 0; i < n; i++) {
+                float dx = x - bx[i], dy = y - by[i];
+                float f = bs[i] * bs[i] / (dx * dx + dy * dy + 1e-4f);
+                field += f;
+                cr += f * br[i];
+                cg += f * bg[i];
+                cb += f * bb[i];
+            }
+            float inv = field > 0 ? 1 / field : 0;
+            float inside = field < 0.9f ? 0 : field > 1.1f ? 1 : (field - 0.9f) * 5;
+            inside = inside * inside * (3 - 2 * inside);
+            float core = fminf(1, (field - 1) * 0.15f);
+            core = core < 0 ? 0 : core;
+            float glow = fminf(field, 1) * fminf(field, 1) * fminf(field, 1) * (0.35f + 0.4f * pulse);
+            float vign = 1 - 0.55f * (x * x / (aspect * aspect) + y * y);
+            float r = (cr * inv) * (inside * (0.75f + 0.5f * core) + glow * (1 - inside)) + 0.03f * vign;
+            float g = (cg * inv) * (inside * (0.75f + 0.5f * core) + glow * (1 - inside)) + 0.035f * vign;
+            float b = (cb * inv) * (inside * (0.75f + 0.5f * core) + glow * (1 - inside)) + 0.06f * vign;
+            if (sparkle > 0.05f && ((px * 7919 + py * 104729 + (int)(SDL_GetTicks() / 70) * 31) % 997) < sparkle * 3) {
+                r += 0.6f * sparkle;                 /* hi-hats glitter */
+                g += 0.6f * sparkle;
+                b += 0.7f * sparkle;
+            }
+            Uint32 R = r > 1 ? 255 : r < 0 ? 0 : (Uint32)(r * 255);
+            Uint32 G = g > 1 ? 255 : g < 0 ? 0 : (Uint32)(g * 255);
+            Uint32 B = b > 1 ? 255 : b < 0 ? 0 : (Uint32)(b * 255);
+            show_px[py * tw + px] = 0xFF000000u | R << 16 | G << 8 | B;
+        }
+    }
+    SDL_UpdateTexture(show_tex, NULL, show_px, tw * (int)sizeof(Uint32));
+    SDL_RenderCopy(ren, show_tex, NULL, NULL);
+
+    /* the spectrum as a ring of bars around the middle */
+    int cx = W / 2, cy = H / 2, r0 = (int)(H * (0.30f + 0.04f * pulse));
+    double bin_hz = (double)SR / VIS_FFT;
+    for (int i = 0; i < 96; i++) {
+        double f0 = 40 * pow(400.0, i / 96.0), f1 = 40 * pow(400.0, (i + 1) / 96.0);
+        float best = -140;
+        for (int k = (int)(f0 / bin_hz); k <= (int)(f1 / bin_hz) && k < VIS_FFT / 2; k++) best = fmaxf(best, vis_smooth[k]);
+        float t = (best + 80) / 80;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        float a = (float)(i / 96.0 * 2 * VIS_PI) - (float)VIS_PI / 2 + show_phase * 0.25f;
+        Col c = TRACK_COL[i * MAX_TRACKS / 96];
+        int len = 4 + (int)(t * H * 0.16f);
+        for (int side = -1; side <= 1; side += 2) {   /* mirrored left and right */
+            float aa = side < 0 ? a : (float)VIS_PI - a;
+            int x0 = cx + (int)(cosf(aa) * r0), y0 = cy + (int)(sinf(aa) * r0);
+            int x1 = cx + (int)(cosf(aa) * (r0 + len)), y1 = cy + (int)(sinf(aa) * (r0 + len));
+            for (int wdt = -1; wdt <= 1; wdt++) line(x0 + wdt, y0, x1 + wdt, y1, alpha(c, (Uint8)(90 + 150 * t)));
+        }
+    }
+    /* beat ripples */
+    for (int i = 0; i < ripple_n; i++) {
+        ripple_t[i] += dt;
+        if (ripple_t[i] > 1.2f) {
+            ripple_t[i--] = ripple_t[--ripple_n];
+            continue;
+        }
+        int rr = r0 + (int)(ripple_t[i] * H * 0.5f);
+        ring(cx, cy, rr, alpha(HEAD, (Uint8)(120 * (1 - ripple_t[i] / 1.2f))));
+    }
+    /* what's playing */
+    char buf[160];
+    double secs = (double)P.playhead / SR;
+    snprintf(buf, sizeof buf, "%.60s   bar %d  beat %d   %.0f BPM   %02d:%02d", proj_path[0] ? base_name(proj_path) : "tinydaw",
+             (int)(beats / 4) + 1, (int)fmod(beats, 4.0) + 1, P.bpm, (int)(secs / 60), (int)fmod(secs, 60.0));
+    text(20, H - font_h - 16, buf, alpha(TEXT, 200));
+    const char *hint = P.playing ? "Esc or F11 to leave the show" : "Space to play  ·  Esc or F11 to leave the show";
+    text(W - text_w(hint) - 20, H - font_h - 16, hint, DIM);
+}
+
+static void show_toggle(void)
+{
+    show_open = !show_open;
+    if (!headless) SDL_SetWindowFullscreen(win, show_open ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+}
+
 /* ---------------------------------------------------------------- panels */
 
 static void top_bar(void)
@@ -2065,34 +2481,39 @@ static void top_bar(void)
     x += 80;
     if (button((SDL_Rect){x, y, 62, h}, "Loop", P.loop)) toggle_loop();
     x += 70;
-    number((SDL_Rect){x, y, 112, h}, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
-    x += 120;
+    number((SDL_Rect){x, y, 100, h}, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
+    x += 106;
     snprintf(buf, sizeof buf, "Snap %s", SNAP_NAMES[snap_i]);
-    if (button((SDL_Rect){x, y, 104, h}, buf, 0)) snap_i = (snap_i + 1) % 6;
-    x += 112;
+    if (button((SDL_Rect){x, y, 96, h}, buf, 0)) snap_i = (snap_i + 1) % 6;
+    x += 102;
     snprintf(buf, sizeof buf, "%g kHz", SR / 1000.0);
-    if (button((SDL_Rect){x, y, 96, h}, buf, 0)) {        /* project rate: cycle */
+    if (button((SDL_Rect){x, y, 84, h}, buf, 0)) {        /* project rate: cycle */
         int next = PROJECT_RATES[0];
         for (int i = 0; i < 6; i++)
             if (PROJECT_RATES[i] == SR) next = PROJECT_RATES[(i + 1) % 6];
         set_rate(next);
     }
-    x += 104;
+    x += 90;
     if (button((SDL_Rect){x, y, 70, h}, "Export", 0)) open_export();
     x += 78;
     if (button((SDL_Rect){x, y, 70, h}, "Theory", theory_open)) {
         theory_open = !theory_open;
-        pads_open = mixer_open = 0;
+        pads_open = mixer_open = vis_open = 0;
     }
     x += 74;
     if (button((SDL_Rect){x, y, 56, h}, "Pads", pads_open)) {
         pads_open = !pads_open;
-        theory_open = mixer_open = 0;
+        theory_open = mixer_open = vis_open = 0;
     }
     x += 60;
     if (button((SDL_Rect){x, y, 62, h}, "Mixer", mixer_open)) {
         mixer_open = !mixer_open;
-        theory_open = pads_open = 0;
+        theory_open = pads_open = vis_open = 0;
+    }
+    x += 66;
+    if (button((SDL_Rect){x, y, 62, h}, "Visual", vis_open)) {
+        vis_open = !vis_open;
+        theory_open = pads_open = mixer_open = 0;
     }
     x += 74;
 
@@ -2103,9 +2524,11 @@ static void top_bar(void)
     snprintf(buf, sizeof buf, "%02d:%06.3f", (int)(secs / 60), fmod(secs, 60.0));
     text(x, y + (h - font_h) / 2, buf, TEXT);
 
-    snprintf(buf, sizeof buf, "%d clips   %d sounds   zoom %.0f px/s", P.nclips, P.nsamples, pps);
-    int w = text_w(buf);
-    if (W - w - 12 > x + 120) text(W - w - 12, y + (h - font_h) / 2, buf, DIM);
+    x += text_w("00:00.000") + 16;
+    if (W - 110 > x) {                          /* master level, when there's room */
+        meter_draw((SDL_Rect){W - 100, y + 6, 88, 7}, &master_meter[0], 0);
+        meter_draw((SDL_Rect){W - 100, y + 17, 88, 7}, &master_meter[1], 0);
+    }
 }
 
 static void left_panel(void)
@@ -2233,6 +2656,7 @@ static void track_headers(void)
         SDL_Rect m = {L.left + L.head - 58, by, 22, bh}, s = {L.left + L.head - 32, by, 22, bh};
         if (button(m, "M", tr->mute)) { LOCK(); tr->mute = !tr->mute; UNLOCK(); }
         if (button(s, "S", tr->solo)) { LOCK(); tr->solo = !tr->solo; UNLOCK(); }
+        meter_draw((SDL_Rect){L.left + L.head - 7, y + 3, 4, L.lane_h - 7}, &track_meter[t], 1);
         SDL_Rect vb = volume_bar(t);
         fill(vb, PANEL3);
         fill((SDL_Rect){vb.x, vb.y, (int)(vb.w * tr->volume), vb.h}, tr->mute ? DIM : TRACK_COL[t]);
@@ -2575,6 +2999,16 @@ static void key(SDL_Keysym k)
         }
         return;
     }
+    if (show_open) {                    /* the show takes the keyboard */
+        if (k.sym == SDLK_ESCAPE || k.sym == SDLK_F11) show_toggle();
+        else if (k.sym == SDLK_SPACE) toggle_play();
+        else if (k.sym == SDLK_HOME) {
+            LOCK();
+            P.playhead = P.loop ? P.loop_start : 0;
+            UNLOCK();
+        }
+        return;
+    }
     if (confirm_act) {                  /* "save changes?" is up */
         if (k.sym == SDLK_ESCAPE) confirm_act = ACT_NONE;
         return;
@@ -2652,16 +3086,21 @@ static void key(SDL_Keysym k)
     case SDLK_ESCAPE: selected = -1; break;
     case SDLK_F1:
         theory_open = !theory_open;
-        pads_open = mixer_open = 0;
+        pads_open = mixer_open = vis_open = 0;
         break;
     case SDLK_F2:
         pads_open = !pads_open;
-        theory_open = mixer_open = 0;
+        theory_open = mixer_open = vis_open = 0;
         break;
     case SDLK_F3:
         mixer_open = !mixer_open;
-        theory_open = pads_open = 0;
+        theory_open = pads_open = vis_open = 0;
         break;
+    case SDLK_F4:
+        vis_open = !vis_open;
+        theory_open = pads_open = mixer_open = 0;
+        break;
+    case SDLK_F11: show_toggle(); break;
     case SDLK_LEFTBRACKET:
     case SDLK_RIGHTBRACKET:             /* transpose the selected clip */
         if (selected >= 0) {
@@ -2717,6 +3156,11 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
     }
     for (int i = 0; i < 2 * frames; i++)
         out[i] = soft_clip(out[i] * P.master);
+    for (int i = 0; i < frames; i++) {          /* for the meters and the visualizer */
+        vis_ring[2 * vis_pos] = out[2 * i];
+        vis_ring[2 * vis_pos + 1] = out[2 * i + 1];
+        vis_pos = (vis_pos + 1) % VIS_RING;
+    }
 }
 
 /* (Re)opens the output at the project rate. SDL converts if the hardware runs at another rate. */
@@ -3304,6 +3748,41 @@ static int selftest(void)
         for (size_t i = 0; i < sizeof bufs / sizeof *bufs; i++) free(bufs[i]);
         project_free(T);
         free(T);
+    }
+
+    /* analysis: a 1 kHz sine at full scale peaks at 0 dB in the right bin */
+    {
+        static float sine[VIS_FFT], db[VIS_FFT / 2];
+        double hz = 1000.0;                            /* need not fall exactly on a bin */
+        for (int i = 0; i < VIS_FFT; i++) sine[i] = (float)sin(2 * VIS_PI * hz * i / SR);
+        spectrum_db(sine, VIS_FFT, db);
+        int best = 1;
+        for (int k = 1; k < VIS_FFT / 2; k++)
+            if (db[k] > db[best]) best = k;
+        double peak_hz = best * (double)SR / VIS_FFT;
+        check(fabs(peak_hz - 1000) < (double)SR / VIS_FFT && db[best] > -1.5 && db[best] < 0.5,
+              "the analyzer shows a full-scale 1 kHz sine at 1 kHz, 0 dB");
+        check(db[best * 3] < db[best] - 60, "and nothing at its third harmonic");
+
+        Project *T = malloc(sizeof *T);
+        project_init(T);
+        GenParams g = {WAVE_SINE, 69, 1.0, 0.5, 2, 2, 440};
+        int si = sample_generate(T, &g);
+        T->clips[T->nclips++] = (Clip){si, 2, 0, 0, T->samples[si].frames, 0, 0, 0};
+        Mixer *m = mixer_new();
+        float buf[2 * 2048] = {0}, lv[MAX_TRACKS][2];
+        mixer_run(m, T, 4096, 1, buf, 2048, -1, 0);
+        mixer_levels(m, lv);
+        check(fabsf(lv[2][0] - 0.5f * T->tracks[2].volume) < 0.02f && lv[0][0] == 0,
+              "track meters read each track's level after its fader");
+        mixer_levels(m, lv);
+        check(lv[2][0] == 0, "and reset once read");
+        mixer_free(m);
+        project_free(T);
+        free(T);
+        Meter mt = {0};
+        meter_feed(&mt, 1.3f, 0.016f);
+        check(mt.clipped && mt.peak > 1.29f, "a meter lights its clip warning above 0 dB");
     }
 
     /* the pitch wheel and mod wheel arrive as continuous MIDI controls, not pad presses */
@@ -4416,7 +4895,7 @@ static void export_dialog(void)
 static void frame(void)
 {
     static int min_for = -1;            /* the pane needs a wider window */
-    int pane = theory_open || pads_open || mixer_open;
+    int pane = theory_open || pads_open || mixer_open || vis_open;
     if (min_for != pane) {
         min_for = pane;
         SDL_SetWindowMinimumSize(win, pane ? 1240 : 900, 560);
@@ -4431,6 +4910,7 @@ static void frame(void)
     }
     SDL_SetRenderDrawColor(ren, BG.r, BG.g, BG.b, 255);
     SDL_RenderClear(ren);
+    vis_update();
 
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
@@ -4440,14 +4920,20 @@ static void frame(void)
         mx = my = -10000;
         lpress = rpress = wheel_x = wheel_y = 0;
     }
-    top_bar();
-    left_panel();
-    track_headers();
-    timeline();
-    if (theory_open) theory_pane();
-    else if (pads_open) pads_pane();
-    else if (mixer_open) mixer_pane();
-    status_bar();
+    if (show_open) {                    /* the show covers everything */
+        lpress = rpress = wheel_x = wheel_y = 0;
+        show_draw();
+    } else {
+        top_bar();
+        left_panel();
+        track_headers();
+        timeline();
+        if (theory_open) theory_pane();
+        else if (pads_open) pads_pane();
+        else if (mixer_open) mixer_pane();
+        else if (vis_open) vis_pane();
+        status_bar();
+    }
     if (modal) {
         mx = smx;
         my = smy;
@@ -4735,6 +5221,29 @@ int main(int argc, char **argv)
             pads_content_h = 2000;
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
+        if (getenv("TINYDAW_SHOT_VIS") || getenv("TINYDAW_SHOT_SHOW")) {   /* fill the meters with the demo */
+            vis_open = getenv("TINYDAW_SHOT_VIS") != NULL;
+            show_open = getenv("TINYDAW_SHOT_SHOW") != NULL;
+            P.playing = 1;
+            long target = (long)(atof(getenv(show_open ? "TINYDAW_SHOT_SHOW" : "TINYDAW_SHOT_VIS")) * beat_frames());
+            for (int f = 0; f < 40; f++) {        /* 40 "frames" of real audio leading up to it */
+                P.playhead = target - (39 - f) * 1024;
+                float tmp[2 * 1024] = {0};
+                LOCK();
+                mixer_run(MX, &P, P.playhead - 1024, 1, tmp, 1024, -1, 1);
+                for (int i = 0; i < 1024; i++) {
+                    vis_ring[2 * vis_pos] = soft_clip(tmp[2 * i] * P.master);
+                    vis_ring[2 * vis_pos + 1] = soft_clip(tmp[2 * i + 1] * P.master);
+                    vis_pos = (vis_pos + 1) % VIS_RING;
+                }
+                UNLOCK();
+                vis_update();
+                if (show_open) show_draw();               /* lets the blobs grow to size */
+            }
+            P.playing = 0;
+            SDL_PauseAudioDevice(dev, 1);
+            P.playing = 1;
+        }
         if (getenv("TINYDAW_SHOT_MIXER")) {
             mixer_open = 1;
             mixer_scroll = atoi(getenv("TINYDAW_SHOT_MIXER"));

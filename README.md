@@ -22,6 +22,11 @@ Arch/CachyOS packages: `sdl2-compat sdl2_ttf libsndfile libsamplerate alsa-lib t
 for the Open/Save dialogs (Debian/Ubuntu: `libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libsamplerate0-dev
 libasound2-dev fonts-dejavu-core zenity`). Without alsa-lib it builds without MIDI. Set `TINYDAW_FONT=/path/to/font.ttf` to use another font.
 
+### Windows
+
+`make dist-windows` cross-compiles a Windows build on Linux and zips it with its DLLs and font:
+see [win/README.md](win/README.md). It behaves the same; projects open on either system.
+
 ## Using it
 
 | Do | How |

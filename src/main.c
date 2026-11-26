@@ -6,6 +6,7 @@
 #include "daw.h"
 #include "theory.h"
 #include "midi.h"
+#include "compat.h"
 
 #include <SDL.h>
 #include <SDL_ttf.h>
@@ -14,9 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 static Project P;
 static SDL_AudioDeviceID dev;
@@ -329,9 +328,8 @@ static char export_base_path[1024];        /* full path without extension */
 static void open_export(void)
 {
     char dir[900], stamp[32];
-    const char *home = getenv("HOME");
-    snprintf(dir, sizeof dir, "%s/Music", home ? home : ".");
-    if (access(dir, W_OK) != 0 && !getcwd(dir, sizeof dir)) snprintf(dir, sizeof dir, ".");
+    user_dir("music", dir, sizeof dir);
+    if (!dir_writable(dir) && !getcwd(dir, sizeof dir)) snprintf(dir, sizeof dir, ".");
     time_t now = time(NULL);
     strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
     snprintf(export_base_path, sizeof export_base_path, "%s/tinydaw-%s", dir, stamp);
@@ -624,40 +622,26 @@ static int is_dirty(void)
     return recovered || P.nsamples != saved_nsamples || !state_same(&saved);
 }
 
-static const char *base_name(const char *path)
-{
-    const char *s = strrchr(path, '/');
-    return s ? s + 1 : path;
-}
+static const char *base_name(const char *path) { return path_base(path); }
 
 static const char *dirname_of(const char *path)
 {
     static char buf[1024];
     snprintf(buf, sizeof buf, "%s", path);
-    char *s = strrchr(buf, '/');
-    if (s == buf) s[1] = 0;
-    else if (s) *s = 0;
-    else snprintf(buf, sizeof buf, ".");
+    char *base = (char *)path_base(buf);
+    if (base == buf) snprintf(buf, sizeof buf, ".");
+    else if (base == buf + 1) buf[1] = 0;      /* "/file" -> "/" */
+    else base[-1] = 0;
     return buf;
 }
 
-static void ensure_dir(const char *path)  /* mkdir -p */
-{
-    char buf[1024];
-    snprintf(buf, sizeof buf, "%s", path);
-    for (char *s = buf + 1; *s; s++) {
-        if (*s != '/') continue;
-        *s = 0;
-        mkdir(buf, 0755);
-        *s = '/';
-    }
-    mkdir(buf, 0755);
-}
+static void ensure_dir(const char *path) { make_dirs(path); }
 
 static void projects_dir(char *buf, size_t n)
 {
-    const char *home = getenv("HOME");
-    snprintf(buf, n, "%s/Music/tinydaw", home ? home : ".");
+    char music[900];
+    user_dir("music", music, sizeof music);
+    snprintf(buf, n, "%.880s/tinydaw", music);
     ensure_dir(buf);
 }
 
@@ -665,17 +649,15 @@ static const char *autosave_file(void)
 {
     static char path[1024];
     if (!path[0]) {
-        const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
         char dir[900];
-        if (xdg && xdg[0]) snprintf(dir, sizeof dir, "%s/tinydaw", xdg);
-        else snprintf(dir, sizeof dir, "%s/.local/share/tinydaw", home ? home : ".");
+        user_dir("data", dir, sizeof dir);
         ensure_dir(dir);
         snprintf(path, sizeof path, "%s/autosave.tdaw", dir);
     }
     return path;
 }
 
-static int autosave_exists(void) { return access(autosave_file(), R_OK) == 0; }
+static int autosave_exists(void) { return file_exists(autosave_file()); }
 
 static void update_title(void)
 {
@@ -696,7 +678,7 @@ static int save_to(const char *path)
         status("Save failed: %s", msg);
         return -1;
     }
-    char *full = realpath(path, NULL);
+    char *full = full_path(path);
     snprintf(proj_path, sizeof proj_path, "%s", full ? full : path);
     free(full);
     mark_saved();
@@ -747,7 +729,7 @@ static int open_project(const char *path, int as_recovery)
         recovered = 1;
         status("Recovered your unsaved work. Save it with Ctrl+S.");
     } else {
-        char *full = realpath(path, NULL);
+        char *full = full_path(path);
         snprintf(proj_path, sizeof proj_path, "%s", full ? full : path);
         free(full);
         status("%s", msg);
@@ -781,8 +763,50 @@ static void autosave_tick(void)
 
 static SDL_atomic_t fd_state;           /* 0 idle, 1 open, 2 finished */
 static int fd_saving;
-static char fd_cmd[4000], fd_result[1024];
+static char fd_result[1024];
+#ifndef _WIN32
+static char fd_cmd[4000];
+#endif
 
+#ifdef _WIN32
+#include <windows.h>
+#include <commdlg.h>
+#include <SDL_syswm.h>
+
+static char fd_start[2100];
+static HWND fd_owner;
+
+/* The standard Windows Open/Save dialog. Paths go in and out as UTF-8. */
+static void win_file_dialog(void)
+{
+    wchar_t file[1024] = L"", dir[1024] = L"";
+    char d[2100], name[512];
+    snprintf(d, sizeof d, "%s", fd_start);
+    for (char *c = d; *c; c++)
+        if (*c == '/') *c = '\\';
+    char *b = (char *)path_base(d);
+    snprintf(name, sizeof name, "%s", b);
+    if (b > d) b[-1] = 0;
+    else d[0] = 0;
+    MultiByteToWideChar(CP_UTF8, 0, name, -1, file, 1024);
+    MultiByteToWideChar(CP_UTF8, 0, d, -1, dir, 1024);
+    OPENFILENAMEW o;
+    memset(&o, 0, sizeof o);
+    o.lStructSize = sizeof o;
+    o.hwndOwner = fd_owner;
+    o.lpstrFilter = L"tinydaw projects (*.tdaw)\0*.tdaw\0All files\0*.*\0";
+    o.lpstrFile = file;
+    o.nMaxFile = 1024;
+    o.lpstrInitialDir = dir[0] ? dir : NULL;
+    o.lpstrDefExt = L"tdaw";
+    o.lpstrTitle = fd_saving ? L"Save project" : L"Open project";
+    o.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
+              (fd_saving ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    BOOL ok = fd_saving ? GetSaveFileNameW(&o) : GetOpenFileNameW(&o);
+    fd_result[0] = 0;
+    if (ok) WideCharToMultiByte(CP_UTF8, 0, file, -1, fd_result, sizeof fd_result, NULL, NULL);
+}
+#else
 static int have_program(const char *name)
 {
     const char *path = getenv("PATH");
@@ -813,17 +837,23 @@ static void shell_quote(char *out, size_t n, const char *s)
     out[k] = 0;
 }
 
+#endif
+
 static void run_action(int act);
 
 static int fd_thread(void *arg)
 {
     (void)arg;
     fd_result[0] = 0;
+#ifdef _WIN32
+    win_file_dialog();
+#else
     FILE *pp = popen(fd_cmd, "r");
     if (pp) {
         if (!fgets(fd_result, sizeof fd_result, pp)) fd_result[0] = 0;
         pclose(pp);
     }
+#endif
     fd_result[strcspn(fd_result, "\r\n")] = 0;
     SDL_AtomicSet(&fd_state, 2);
     return 0;
@@ -839,6 +869,15 @@ static void file_dialog(int saving)
                  proj_path[0] ? base_name(proj_path) : "untitled.tdaw");
     else
         snprintf(start, sizeof start, "%s/", proj_path[0] ? dirname_of(proj_path) : dir);
+    fd_saving = saving;
+#ifdef _WIN32
+    (void)q;
+    snprintf(fd_start, sizeof fd_start, "%s", start);
+    SDL_SysWMinfo wm;
+    SDL_VERSION(&wm.version);
+    fd_owner = SDL_GetWindowWMInfo(win, &wm) ? wm.info.win.window : NULL;
+    if (0) {
+#else
     shell_quote(q, sizeof q, start);
     if (have_program("zenity")) {
         snprintf(fd_cmd, sizeof fd_cmd,
@@ -861,8 +900,8 @@ static void file_dialog(int saving)
         status("No file dialog available (install zenity): drop a .tdaw file on the window, "
                "or run tinydaw file.tdaw");
         return;
+#endif
     }
-    fd_saving = saving;
     SDL_AtomicSet(&fd_state, 1);
     SDL_Thread *t = SDL_CreateThread(fd_thread, "filedialog", NULL);
     if (t) SDL_DetachThread(t);
@@ -961,10 +1000,8 @@ static const char *binds_file(void)
 {
     static char path[1024];
     if (!path[0]) {
-        const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
         char dir[900];
-        if (xdg && xdg[0]) snprintf(dir, sizeof dir, "%s/tinydaw", xdg);
-        else snprintf(dir, sizeof dir, "%s/.config/tinydaw", home ? home : ".");
+        user_dir("config", dir, sizeof dir);
         ensure_dir(dir);
         snprintf(path, sizeof path, "%s/pads.conf", dir);
     }
@@ -1223,8 +1260,6 @@ static void rec_close(Held *h, long end)
     }
 }
 
-static int rec_takes;
-
 static void rec_drain(void)
 {
     RecEv evs[512];
@@ -1252,7 +1287,6 @@ static void rec_drain(void)
             rec_close(h, e->frame);
             if (pd->mode == PAD_ONESHOT) clip_add(s, track, snap(e->frame), 0, P.samples[s].frames);
             else *h = (Held){1, snap(e->frame), s, track, pd->mode == PAD_LOOP};
-            rec_takes++;
         } else if (e->note >= 0 && e->note < 128) {
             Held *h = &held_note[e->note];
             if (!e->down) {
@@ -1266,7 +1300,6 @@ static void rec_drain(void)
             if (s < 0) continue;
             rec_close(h, e->frame);
             *h = (Held){1, snap(e->frame), s, inst_track < P.ntracks ? inst_track : 0, 0};
-            rec_takes++;
         }
     }
     if (!P.playing || !pads_rec) {          /* stopped: finish anything still held */
@@ -2532,9 +2565,9 @@ static int selftest(void)
     check(P.bpm == bpm0, "tempo changes can be undone");
 
     /* saving and opening */
-    char tpath[] = "/tmp/tinydaw-selftest-XXXXXX";
-    int tfd = mkstemp(tpath);
-    if (tfd >= 0) close(tfd);
+    char tpath[1100];
+    const char *tmpdir = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+    snprintf(tpath, sizeof tpath, "%s/tinydaw-selftest-%u.tdaw", tmpdir, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
     P.pads[2] = (Pad){1, PAD_HOLD, 0.5f, 3, 4};
     P.tracks[1].mute = 1;
     frame();
@@ -2694,7 +2727,16 @@ static int selftest(void)
 
 static TTF_Font *open_font(int size)
 {
-    const char *paths[] = {getenv("TINYDAW_FONT"),
+    char beside[1100] = "";                  /* a font shipped next to the program (Windows) */
+    char *exe_dir = SDL_GetBasePath();
+    if (exe_dir) {
+        snprintf(beside, sizeof beside, "%sDejaVuSansMono.ttf", exe_dir);
+        SDL_free(exe_dir);
+    }
+    const char *paths[] = {getenv("TINYDAW_FONT"), beside,
+#ifdef _WIN32
+                           "C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/cour.ttf",
+#endif
                            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
                            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
                            "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
@@ -3709,7 +3751,7 @@ static void export_dialog(void)
              rate != SR ? "  (resampled, best quality)" : "");
     text(lx, y, buf, HEAD);
     y += font_h + 6;
-    const char *home = getenv("HOME");
+    const char *home = home_dir();
     const char *shown = export_base_path;
     char tilde[1100];
     if (home && !strncmp(shown, home, strlen(home))) {
@@ -3823,6 +3865,16 @@ static void frame(void)
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    /* a windowed program has no console; borrow the one it was started from, so --help,
+     * --selftest and --export can print */
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    int redirected = out && out != INVALID_HANDLE_VALUE && GetFileType(out) != FILE_TYPE_UNKNOWN;
+    if (!redirected && AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+    }
+#endif
     const char *export_path = NULL, *shot = NULL, *save_path = NULL;
     int demo = 0, test = 0, format_given = 0;
     const char *beat_arg = NULL;
@@ -3951,7 +4003,8 @@ int main(int argc, char **argv)
     if (export_path) {                  /* headless render, no window */
         char base[1024], msg[1500];
         snprintf(base, sizeof base, "%s", export_path);
-        char *dot = strrchr(base, '.'), *slash = strrchr(base, '/');
+        const char *after = path_base(base);
+        char *dot = strrchr(base, '.'), *slash = after > base ? (char *)after - 1 : NULL;
         if (dot && (!slash || dot > slash)) {
             int ext_fmt = -1;
             for (int k = 0; k < EXP_COUNT; k++)
@@ -3969,8 +4022,8 @@ int main(int argc, char **argv)
 
     if (test) shot = "";
     if (shot) {
-        setenv("SDL_VIDEODRIVER", "offscreen", 1);
-        setenv("SDL_AUDIODRIVER", "dummy", 1);
+        SDL_setenv("SDL_VIDEODRIVER", "offscreen", 1);
+        SDL_setenv("SDL_AUDIODRIVER", "dummy", 1);
     }
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");   /* play pads with the window behind */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
@@ -4009,6 +4062,12 @@ int main(int argc, char **argv)
     } else {
         binds_load();
         midi_ok = midi_start(midi_in, NULL) == 0;
+        if (getenv("TINYDAW_DEBUG_INPUT")) {
+            char names[MIDI_MAX_DEVICES][64];
+            int n = midi_ok ? midi_devices(names, MIDI_MAX_DEVICES) : 0;
+            fprintf(stderr, "midi: %s, %d device%s\n", midi_ok ? "listening" : midi_error(), n, n == 1 ? "" : "s");
+            for (int i = 0; i < n; i++) fprintf(stderr, "  midi device %d: %s\n", i, names[i]);
+        }
         if (!loaded && autosave_exists())
             status("Unsaved work from last time was kept: File > Recover unsaved work");
     }

@@ -1,11 +1,132 @@
-/* tinydaw MIDI input. A thread waits on the ALSA sequencer, connects itself to every MIDI
+/* tinydaw MIDI input. On Linux a thread waits on the ALSA sequencer, connects itself to every MIDI
  * output port (including ones plugged in later) and reports notes and controller presses. */
 #include "midi.h"
 
 #include <stdio.h>
 #include <string.h>
 
-#ifndef HAVE_ALSA
+#if defined(_WIN32)
+
+/* Windows: the built-in MIDI API (winmm). Windows sends no message when a MIDI device is
+ * plugged in, so a thread looks for new devices every two seconds. */
+#include <windows.h>
+#include <mmsystem.h>
+
+static midi_fn callback;
+static void *user;
+static char error[160] = "not started";
+static CRITICAL_SECTION mu;
+static HANDLE watcher;
+static volatile LONG quit;
+static unsigned char cc_down[16][128];
+
+static struct { HMIDIIN h; char name[64]; } devs[MIDI_MAX_DEVICES];
+static int ndevs;
+
+static void CALLBACK on_midi(HMIDIIN h, UINT msg, DWORD_PTR inst, DWORD_PTR p1, DWORD_PTR p2)
+{
+    (void)h;
+    (void)p2;
+    if (msg != MIM_DATA) return;
+    int dev = (int)inst, status = p1 & 0xF0, ch = p1 & 0x0F, d1 = (p1 >> 8) & 0x7F, d2 = (p1 >> 16) & 0x7F;
+    if (status == 0x90) callback(d1, d2, dev, user);           /* velocity 0 = off */
+    else if (status == 0x80) callback(d1, 0, dev, user);
+    else if (status == 0xB0) {
+        int down = d2 >= 64;
+        if (down != cc_down[ch][d1]) {
+            cc_down[ch][d1] = (unsigned char)down;
+            callback(MIDI_CC + d1, down ? d2 : 0, dev, user);
+        }
+    }
+}
+
+static void close_all(void)
+{
+    for (int i = 0; i < ndevs; i++) {
+        midiInStop(devs[i].h);
+        midiInClose(devs[i].h);
+    }
+    ndevs = 0;
+}
+
+static void open_all(void)
+{
+    UINT n = midiInGetNumDevs();
+    for (UINT i = 0; i < n && ndevs < MIDI_MAX_DEVICES; i++) {
+        MIDIINCAPSW caps;
+        HMIDIIN h;
+        if (midiInGetDevCapsW(i, &caps, sizeof caps) != MMSYSERR_NOERROR) continue;
+        int slot = ndevs;
+        if (midiInOpen(&h, i, (DWORD_PTR)on_midi, (DWORD_PTR)slot, CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
+            continue;                         /* usually: another program has it open */
+        devs[slot].h = h;
+        WideCharToMultiByte(CP_UTF8, 0, caps.szPname, -1, devs[slot].name, 64, NULL, NULL);
+        midiInStart(h);
+        ndevs++;
+    }
+}
+
+static UINT seen_count(void) { return midiInGetNumDevs(); }
+
+static DWORD WINAPI watch(LPVOID arg)
+{
+    (void)arg;
+    UINT last = seen_count();
+    while (!quit) {
+        Sleep(2000);
+        UINT now = seen_count();
+        if (now != last) {                      /* plugged in or out: open them all again */
+            EnterCriticalSection(&mu);
+            close_all();
+            open_all();
+            LeaveCriticalSection(&mu);
+            last = now;
+        }
+    }
+    return 0;
+}
+
+int midi_start(midi_fn fn, void *ud)
+{
+    callback = fn;
+    user = ud;
+    InitializeCriticalSection(&mu);
+    EnterCriticalSection(&mu);
+    open_all();
+    LeaveCriticalSection(&mu);
+    watcher = CreateThread(NULL, 0, watch, NULL, 0, NULL);
+    if (!watcher) {
+        snprintf(error, sizeof error, "could not start the MIDI thread");
+        return -1;
+    }
+    return 0;
+}
+
+void midi_stop(void)
+{
+    if (!watcher) return;
+    InterlockedExchange(&quit, 1);
+    WaitForSingleObject(watcher, 3000);
+    CloseHandle(watcher);
+    watcher = NULL;
+    EnterCriticalSection(&mu);
+    close_all();
+    LeaveCriticalSection(&mu);
+}
+
+const char *midi_error(void) { return error; }
+
+int midi_devices(char names[][64], int max)
+{
+    if (!watcher) return 0;
+    EnterCriticalSection(&mu);
+    int n = ndevs < max ? ndevs : max;
+    for (int i = 0; i < n; i++) snprintf(names[i], 64, "%s", devs[i].name);
+    LeaveCriticalSection(&mu);
+    return n;
+}
+
+#elif !defined(HAVE_ALSA)
 
 int midi_start(midi_fn fn, void *ud) { (void)fn; (void)ud; return -1; }
 void midi_stop(void) {}

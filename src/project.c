@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #endif
 #include "daw.h"
+#include "compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +44,7 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "w");
     if (!f) {
-        snprintf(msg, msglen, "can't write %s: %m", path);
+        snprintf(msg, msglen, "can't write %s: %s", path, strerror(errno));
         return -1;
     }
     fprintf(f, MAGIC "\n");
@@ -89,13 +90,13 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
         fprintf(f, "pad %d %d %d %.9g %d %d\n", i, pd->sample, pd->mode, pd->volume, pd->pitch, pd->track);
     }
     int bad = ferror(f);
-    if (fclose(f) != 0 || bad || rename(tmp, path) != 0) {   /* write then rename: never a half-written file */
-        snprintf(msg, msglen, "can't write %s: %m", path);
+    if (fclose(f) != 0 || bad || replace_file(tmp, path) != 0) {   /* write then rename: never a half-written file */
+        snprintf(msg, msglen, "can't write %s: %s", path, strerror(errno));
         remove(tmp);
         return -1;
     }
-    const char *base = strrchr(path, '/');
-    snprintf(msg, msglen, "Saved %s (%d clips, %d sounds)%s", base ? base + 1 : path, p->nclips, p->nsamples,
+    const char *base = path_base(path);
+    snprintf(msg, msglen, "Saved %s (%d clips, %d sounds)%s", base, p->nclips, p->nsamples,
              raw ? " - some sounds have no recipe and will load as silence" : "");
     return 0;
 }
@@ -167,7 +168,7 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
 {
     FILE *f = fopen(path, "r");
     if (!f) {
-        snprintf(msg, msglen, "can't open %s: %m", path);
+        snprintf(msg, msglen, "can't open %s: %s", path, strerror(errno));
         return -1;
     }
     char line[2048];
@@ -288,8 +289,8 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
     if (p->loop_end < p->loop_start) p->loop_end = p->loop_start;
     p->playing = 0;
     p->preview = -1;
-    const char *base = strrchr(path, '/');
-    int n = snprintf(msg, msglen, "Opened %s (%d clips, %d sounds)", base ? base + 1 : path, p->nclips, p->nsamples);
+    const char *base = path_base(path);
+    int n = snprintf(msg, msglen, "Opened %s (%d clips, %d sounds)", base, p->nclips, p->nsamples);
     if (missing && n > 0 && (size_t)n < msglen)
         snprintf(msg + n, msglen - n, " - %d audio file%s missing, playing as silence", missing, missing == 1 ? "" : "s");
     return 0;

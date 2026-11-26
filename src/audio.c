@@ -1,6 +1,7 @@
 /* tinydaw audio engine: sample storage, tone generation, file import, sample-rate changes,
  * mixing and export. libsndfile reads and writes files; libsamplerate converts rates. */
 #include "daw.h"
+#include "compat.h"
 
 #include <math.h>
 #include <samplerate.h>
@@ -520,13 +521,12 @@ int sample_import(Project *p, const char *path, char *err, size_t errlen)
     long n;
     float *d = load_file(path, &n, err, errlen);
     if (!d) return -1;
-    const char *base = strrchr(path, '/');
-    int idx = sample_add(p, base ? base + 1 : path, d, n);
+    int idx = sample_add(p, path_base(path), d, n);
     if (idx < 0) {
         snprintf(err, errlen, "library is full");
         return -1;
     }
-    char *full = realpath(path, NULL);
+    char *full = full_path(path);
     snprintf(p->samples[idx].path, sizeof p->samples[idx].path, "%s", full ? full : path);
     free(full);
     return idx;

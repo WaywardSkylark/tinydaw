@@ -1,0 +1,202 @@
+/* tinydaw: shared types for the audio engine (audio.c) and the UI (main.c). */
+#ifndef DAW_H
+#define DAW_H
+
+#include <stddef.h>
+
+/* The project sample rate. It can change at runtime (project_set_rate), so it is a
+ * variable; SR is kept as a short name for it. */
+extern int g_rate;
+#define SR g_rate
+
+#define MAX_SAMPLES 256
+#define MAX_CLIPS 2048
+#define MAX_TRACKS 16
+#define DEFAULT_TRACKS 8
+#define DRUM_LANES 6        /* kick, snare, clap, closed hat, open hat, percussion */
+#define PEAK_BLOCK 256      /* frames per waveform-overview peak */
+
+enum { WAVE_SINE, WAVE_SQUARE, WAVE_SAW, WAVE_TRIANGLE, WAVE_NOISE,
+       WAVE_KICK, WAVE_SNARE, WAVE_HAT, WAVE_COUNT };
+
+typedef struct {
+    int wave;
+    int note;               /* MIDI note number, 69 = A4 = 440 Hz */
+    double beats;           /* length at the project tempo */
+    double volume;          /* 0..1 */
+    double attack_ms, release_ms;
+    double a4;              /* tuning reference in Hz; 0 = 440 */
+} GenParams;
+
+/* A drum pattern and the kit that plays it. Lane strings use one character per 16th:
+ * 'x' hit, 'X' accent, 'o' ghost (soft), 'r' roll (three quick hits), anything else rest. */
+typedef struct {
+    char lanes[DRUM_LANES][33];
+    int steps;              /* 16 or 32 */
+    double swing;           /* 0..0.5: how late the off-beats land */
+    int swing8;             /* swing the off-beat 8ths (jazz) instead of the off-beat 16ths */
+    double kick_hz, kick_decay, snare_hz, hat_decay, open_decay;
+    double volume;
+} BeatSpec;
+
+/* A sound in the library: interleaved stereo float at the project rate, plus a min/max
+ * overview for drawing. Generated sounds remember their recipe and imported ones their
+ * file, so a rate change can rebuild them at full quality instead of resampling. */
+typedef struct {
+    char name[96];
+    float *data;
+    long frames;
+    float *peak_min, *peak_max;
+    long npeaks;
+    int generated;
+    GenParams gen;
+    double gen_bpm;
+    int chord[6];           /* for generated chords: the MIDI notes (nchord > 0) */
+    int nchord;
+    int is_beat;            /* generated drum loop: rebuilt from beat + beat_mask */
+    BeatSpec beat;
+    int beat_mask;          /* which lanes it contains */
+    char path[1024];
+    int pitched;            /* a pitched copy of sample `src` (pads and instrument recording) */
+    int src, semis;
+} Sample;
+
+/* A placed region on the timeline that plays part of a sample. All positions in frames. */
+typedef struct {
+    int sample, track;
+    long start;             /* timeline position */
+    long offset;            /* first frame of the sample that plays */
+    long length;            /* frames played */
+} Clip;
+
+typedef struct {
+    char name[32];
+    float volume;
+    int mute, solo;
+} Track;
+
+/* ---- pads: library sounds played live from keys, controllers and MIDI ---- */
+
+#define NPADS 16
+#define MAX_VOICES 48
+enum { PAD_ONESHOT, PAD_HOLD, PAD_LOOP, PAD_MODES };
+
+typedef struct {
+    int sample;             /* library index, -1 = empty */
+    int mode;               /* PAD_* */
+    float volume;
+    int pitch;              /* semitones */
+    int track;              /* where recorded hits are placed */
+} Pad;
+
+/* A sound playing live (a pad hit or an instrument note), mixed on top of the song. */
+typedef struct {
+    int active;
+    int sample;
+    int pad, note;          /* who started it: pad index or -1, MIDI note or -1 */
+    double pos, step;       /* step != 1 plays it pitched */
+    float gain;
+    int loop;
+    int fade;               /* frames left of the fade-out once stopped, 0 = not stopping */
+} Voice;
+
+/* The project. The audio thread reads it; the UI changes it only while holding the
+ * audio device lock (see LOCK/UNLOCK in main.c). */
+typedef struct {
+    Sample samples[MAX_SAMPLES];
+    int nsamples;
+    Clip clips[MAX_CLIPS];
+    int nclips;
+    Track tracks[MAX_TRACKS];
+    int ntracks;            /* rows shown; grows up to MAX_TRACKS */
+    double bpm;
+    double a4;              /* tuning reference for new sounds */
+    float master;
+    long playhead;
+    int playing;
+    int loop;
+    long loop_start, loop_end;
+    int preview;            /* library sample being auditioned, or -1 */
+    long preview_pos;
+    Pad pads[NPADS];
+    int inst_sample;        /* the instrument MIDI keys play, -1 = none */
+    int inst_root;          /* the note at which it plays unpitched */
+    Voice voices[MAX_VOICES];
+} Project;
+
+/* ---- export ---- */
+
+enum { EXP_WAV, EXP_AIFF, EXP_FLAC, EXP_OGG, EXP_OPUS, EXP_MP3, EXP_COUNT };
+
+typedef struct {
+    const char *name, *ext;
+    int sf_format;          /* major format (lossless) or major|codec (lossy) */
+    int lossy;
+    int max_rate;           /* 0 = no limit */
+    int fixed_rate;         /* 0 = any */
+    int max_bits;           /* lossless only: highest bit depth (32 = float) */
+} ExportFormat;
+
+typedef struct {
+    int format;             /* EXP_* */
+    int bits;               /* 16, 24 or 32 (32 = float) */
+    int rate;               /* 0 = project rate */
+    double quality;         /* lossy formats: 0..1 */
+    int mono;
+    int loop_only;
+    int normalize;          /* 0 off, 1 = -1 dBFS, 2 = -0.1 dBFS (mixes only) */
+    int dither;             /* TPDF dither for 16-bit */
+    int stems;              /* one file per track instead of the mix */
+} ExportOptions;
+
+extern const ExportFormat EXPORT_FORMATS[EXP_COUNT];
+extern const int PROJECT_RATES[6];
+
+void export_defaults(ExportOptions *o);
+void export_effective(const ExportOptions *o, int *rate, int *bits);  /* after format limits */
+int project_export(const Project *p, const ExportOptions *o, const char *base,
+                   char *msg, size_t msglen);                         /* base = path without extension */
+
+/* ---- project, samples, mixing ---- */
+
+extern const char *WAVE_NAMES[WAVE_COUNT];
+
+void project_init(Project *p);
+long project_end(const Project *p);
+int project_set_rate(Project *p, int rate, char *msg, size_t msglen);
+void note_name(int note, char *buf, size_t n);
+
+int sample_add(Project *p, const char *name, float *data, long frames); /* takes ownership */
+int sample_generate(Project *p, const GenParams *g);
+/* Several notes of the same sound, summed: chords and intervals. */
+float *render_notes(const GenParams *g, double bpm, const int *notes, int n, long *frames);
+int sample_generate_notes(Project *p, const GenParams *g, const int *notes, int n, const char *name);
+/* One pass of a drum pattern (lanes in `mask`) as a seamless loop: tails wrap to the start. */
+float *render_beat(const BeatSpec *b, int mask, double bpm, long *frames);
+int sample_generate_beat(Project *p, const BeatSpec *b, int mask, const char *name);
+int project_add_track(Project *p, const char *name);   /* new row, or -1 when full */
+int sample_import(Project *p, const char *path, char *err, size_t errlen);
+void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);
+
+/* A copy of sample `src` shifted by `semis` semitones; reuses an existing one. */
+int sample_pitched(Project *p, int src, int semis);
+
+/* ---- live voices (call with the audio device locked) ---- */
+int voice_start(Project *p, int sample, double step, float gain, int loop, int pad, int note);
+void voice_stop(Project *p, int pad, int note);  /* fades out voices from that pad or note */
+int voice_playing(const Project *p, int pad);
+void voices_clear(Project *p);
+void voices_mix(Project *p, float *out, int frames);
+
+/* ---- project files (project.c) ---- */
+void project_free(Project *p);                   /* frees sample memory */
+int project_save(const Project *p, const char *path, char *msg, size_t msglen);
+/* Loads into dst (freshly initialised). Sets the project rate to the file's. */
+int project_load(Project *dst, const char *path, char *msg, size_t msglen);
+
+float soft_clip(float v);
+/* Adds the output for [start, start + frames) into out (stereo). only_track < 0 mixes every
+ * track honouring mute/solo; otherwise only that track, ignoring mute/solo (for stems). */
+void mix(const Project *p, long start, float *out, int frames, int only_track);
+
+#endif

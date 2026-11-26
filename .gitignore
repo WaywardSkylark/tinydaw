@@ -1,0 +1,5 @@
+/tinydaw
+*.o
+*.tmp
+*.wav
+*.bmp

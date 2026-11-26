@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2e36"/>
+      <stop offset="1" stop-color="#16171b"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <rect x="9" y="9" width="238" height="238" rx="51" fill="none" stroke="#4a4f5c" stroke-width="2"/>
+  <!-- ruler -->
+  <g fill="#8a909c">
+    <rect x="44" y="40" width="4" height="16" rx="2"/>
+    <rect x="86" y="46" width="4" height="10" rx="2"/>
+    <rect x="128" y="40" width="4" height="16" rx="2" opacity="0"/>
+    <rect x="170" y="46" width="4" height="10" rx="2"/>
+    <rect x="210" y="40" width="4" height="16" rx="2"/>
+  </g>
+  <!-- lanes -->
+  <g fill="#292c34">
+    <rect x="32" y="68" width="192" height="34" rx="8"/>
+    <rect x="32" y="110" width="192" height="34" rx="8"/>
+    <rect x="32" y="152" width="192" height="34" rx="8"/>
+    <rect x="32" y="194" width="192" height="30" rx="8"/>
+  </g>
+  <!-- clips -->
+  <rect x="32"  y="68"  width="80"  height="34" rx="8" fill="#e2685c"/>
+  <rect x="148" y="68"  width="76"  height="34" rx="8" fill="#e2685c"/>
+  <rect x="64"  y="110" width="104" height="34" rx="8" fill="#e89e46"/>
+  <rect x="32"  y="152" width="40"  height="34" rx="8" fill="#76c66e"/>
+  <rect x="88"  y="152" width="40"  height="34" rx="8" fill="#76c66e"/>
+  <rect x="144" y="152" width="40"  height="34" rx="8" fill="#76c66e"/>
+  <rect x="104" y="194" width="120" height="30" rx="8" fill="#5c8ee6"/>
+  <!-- waveforms -->
+  <g fill="none" stroke="#141416" stroke-opacity="0.55" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M42 85 L50 77 L58 93 L66 79 L74 91 L82 81 L90 89 L100 85"/>
+    <path d="M158 85 L166 79 L174 91 L182 77 L190 93 L198 81 L206 89 L214 85"/>
+    <path d="M74 127 Q87 113 100 127 T126 127 T152 127 L158 127"/>
+    <path d="M40 160 L40 178 M56 164 L56 174"/>
+    <path d="M96 160 L96 178 M112 164 L112 174"/>
+    <path d="M152 160 L152 178 M168 164 L168 174"/>
+    <path d="M114 209 L124 201 L124 217 L134 201 L134 217 L144 201 L144 217 L154 201 L154 217 L164 209"/>
+  </g>
+  <!-- playhead -->
+  <rect x="127" y="56" width="6" height="172" rx="3" fill="#ffd65a"/>
+  <path d="M116 36 H144 V48 L130 60 L116 48 Z" fill="#ffd65a"/>
+</svg>

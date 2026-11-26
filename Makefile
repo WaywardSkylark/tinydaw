@@ -1,3 +1,4 @@
+VERSION := $(shell cat VERSION)
 CC      ?= cc
 CFLAGS  ?= -O2 -g
 CFLAGS  += -std=gnu11 -Wall -Wextra
@@ -9,11 +10,13 @@ CFLAGS  += -DHAVE_ALSA
 endif
 CFLAGS  += $(shell pkg-config --cflags $(PKGS))
 LDLIBS   = $(shell pkg-config --libs $(PKGS)) -lm -lpthread
+CFLAGS  += -DTINYDAW_VERSION='"$(VERSION)"'
+VERNUM   = $(subst ., ,$(VERSION))
 
 SRC = src/main.c src/audio.c src/fx.c src/analysis.c src/theory.c src/project.c src/midi.c
 HDR = src/daw.h src/theory.h src/midi.h
 
-tinydaw: $(SRC) $(HDR) src/compat.h
+tinydaw: $(SRC) $(HDR) src/compat.h VERSION
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
 clean:
@@ -31,14 +34,15 @@ WINPKGS   = sdl2 SDL2_ttf sndfile samplerate
 
 windows: win/build/tinydaw.exe
 
-win/build/tinydaw.exe: $(SRC) $(HDR) src/compat.h win/tinydaw.rc win/tinydaw.manifest win/tinydaw.ico
+win/build/tinydaw.exe: $(SRC) $(HDR) src/compat.h VERSION win/tinydaw.rc win/tinydaw.manifest win/tinydaw.ico
 	@test -d $(WINROOT) || { echo "run: python3 -I win/fetch-deps.py"; exit 1; }
 	mkdir -p win/build
-	$(WINRC) -I win win/tinydaw.rc -O coff -o win/build/resources.o
-	$(WINCC) -O2 -std=gnu11 -Wall -Wextra $(shell $(WINPC) --cflags $(WINPKGS)) \
+	$(WINRC) -I win -DVER_STR='\"$(VERSION)\"' -DVER_MAJ=$(word 1,$(VERNUM)) -DVER_MIN=$(word 2,$(VERNUM)) \
+	    -DVER_PAT=$(word 3,$(VERNUM)) win/tinydaw.rc -O coff -o win/build/resources.o
+	$(WINCC) -O2 -std=gnu11 -Wall -Wextra -DTINYDAW_VERSION='"$(VERSION)"' $(shell $(WINPC) --cflags $(WINPKGS)) \
 	    -o $@ $(SRC) win/build/resources.o $(shell $(WINPC) --libs $(WINPKGS)) -lwinmm -lcomdlg32 -mwindows
 
 dist-windows: windows
-	python3 -I win/package.py
+	python3 -I win/package.py $(VERSION)
 
 .PHONY: windows dist-windows

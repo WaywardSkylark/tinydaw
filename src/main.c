@@ -163,7 +163,7 @@ static SDL_Keymod mods;
 static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h; }
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
-       D_FADEIN, D_FADEOUT };
+       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
 static void place_beat(int genre, long start, int first_track);
 
@@ -197,7 +197,8 @@ static float *scratch;
 static long scratch_len, scratch_pos;
 static double view_start = 0;           /* seconds at the left edge of the timeline */
 static double pps = 110;                /* pixels per second */
-static int selected = -1;
+static int selected = -1;              /* the clip clicked last (the Mixer pane edits it) */
+static unsigned char csel[MAX_CLIPS];   /* every selected clip; selected is always one of them */
 static int lib_scroll = 0;
 static SDL_Rect lib_rects[MAX_SAMPLES];  /* where each library row was drawn (used by --selftest) */
 static GenParams G = {WAVE_SAW, 45, 1.0, 0.6, 5, 60, 440};
@@ -292,7 +293,40 @@ static int clip_add(int sample, int track, long start, long offset, long length)
     P.clips[P.nclips] = (Clip){sample, track, start, offset, length, 0, 0, 0};
     P.nclips++;
     UNLOCK();
+    csel[P.nclips - 1] = 0;
     return P.nclips - 1;
+}
+
+/* ---- the selection */
+
+static void sel_clear(void)
+{
+    memset(csel, 0, sizeof csel);
+    selected = -1;
+}
+
+static void sel_only(int i)
+{
+    sel_clear();
+    if (i >= 0 && i < P.nclips) {
+        csel[i] = 1;
+        selected = i;
+    }
+}
+
+static int sel_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < P.nclips; i++) n += csel[i];
+    return n;
+}
+
+static void sel_fix_primary(void)       /* keep `selected` pointing at a selected clip */
+{
+    if (selected >= 0 && selected < P.nclips && csel[selected]) return;
+    selected = -1;
+    for (int i = P.nclips - 1; i >= 0 && selected < 0; i--)
+        if (csel[i]) selected = i;
 }
 
 static void clip_delete(int i)
@@ -301,8 +335,129 @@ static void clip_delete(int i)
     memmove(&P.clips[i], &P.clips[i + 1], (size_t)(P.nclips - i - 1) * sizeof(Clip));
     P.nclips--;
     UNLOCK();
+    memmove(&csel[i], &csel[i + 1], (size_t)(P.nclips - i));
+    csel[P.nclips] = 0;
     if (selected == i) selected = -1;
     else if (selected > i) selected--;
+    sel_fix_primary();
+}
+
+static int delete_selection(void)       /* returns how many went */
+{
+    int n = 0;
+    for (int i = P.nclips - 1; i >= 0; i--)
+        if (csel[i]) {
+            clip_delete(i);
+            n++;
+        }
+    sel_clear();
+    return n;
+}
+
+/* Copies of the selected clips, `shift` frames later; the copies become the selection. */
+static int duplicate_selection(long shift)
+{
+    int idx[MAX_CLIPS], n = 0, made = 0, count = P.nclips;
+    for (int i = 0; i < count; i++)
+        if (csel[i]) idx[n++] = i;
+    sel_clear();
+    for (int k = 0; k < n; k++) {
+        Clip c = P.clips[idx[k]];
+        int m = clip_add(c.sample, c.track, c.start + shift, c.offset, c.length);
+        if (m < 0) break;
+        LOCK();
+        P.clips[m] = c;
+        P.clips[m].start = c.start + shift;
+        UNLOCK();
+        csel[m] = 1;
+        selected = m;
+        made++;
+    }
+    return made;
+}
+
+static void selection_span(long *a, long *b)
+{
+    *a = -1;
+    *b = 0;
+    for (int i = 0; i < P.nclips; i++)
+        if (csel[i]) {
+            if (*a < 0 || P.clips[i].start < *a) *a = P.clips[i].start;
+            if (P.clips[i].start + P.clips[i].length > *b) *b = P.clips[i].start + P.clips[i].length;
+        }
+    if (*a < 0) *a = 0;
+}
+
+/* the clipboard: clips relative to the earliest one */
+static Clip clipboard[MAX_CLIPS];
+static int nclipboard;
+
+static void copy_selection(void)
+{
+    long a, b;
+    selection_span(&a, &b);
+    nclipboard = 0;
+    for (int i = 0; i < P.nclips; i++)
+        if (csel[i]) {
+            clipboard[nclipboard] = P.clips[i];
+            clipboard[nclipboard++].start -= a;
+        }
+}
+
+static int paste_at(long at)
+{
+    sel_clear();
+    int made = 0;
+    for (int k = 0; k < nclipboard; k++) {
+        Clip c = clipboard[k];
+        if (c.track >= P.ntracks || c.sample >= P.nsamples) continue;
+        int m = clip_add(c.sample, c.track, at + c.start, c.offset, c.length);
+        if (m < 0) break;
+        LOCK();
+        P.clips[m] = c;
+        P.clips[m].start = at + c.start;
+        UNLOCK();
+        csel[m] = 1;
+        selected = m;
+        made++;
+    }
+    return made;
+}
+
+/* Moves every selected clip by df frames and dt tracks, as far as they can all go. */
+static long g_start[MAX_CLIPS];
+static unsigned char band_base[MAX_CLIPS];  /* the selection when a box drag began (Shift adds) */
+static int g_track[MAX_CLIPS];
+
+static void group_remember(void)
+{
+    for (int i = 0; i < P.nclips; i++) {
+        g_start[i] = P.clips[i].start;
+        g_track[i] = P.clips[i].track;
+    }
+}
+
+static void group_place(long df, int dt)
+{
+    long min_start = -1;
+    int min_t = MAX_TRACKS, max_t = -1;
+    for (int i = 0; i < P.nclips; i++)
+        if (csel[i]) {
+            if (min_start < 0 || g_start[i] < min_start) min_start = g_start[i];
+            if (g_track[i] < min_t) min_t = g_track[i];
+            if (g_track[i] > max_t) max_t = g_track[i];
+        }
+    if (min_start < 0) return;
+    if (min_start + df < 0) df = -min_start;
+    if (min_t + dt < 0) dt = -min_t;
+    if (max_t + dt > P.ntracks - 1) dt = P.ntracks - 1 - max_t;
+    LOCK();
+    for (int i = 0; i < P.nclips; i++)
+        if (csel[i]) {
+            P.clips[i].start = g_start[i] + df;
+            P.clips[i].track = g_track[i] + dt;
+        }
+    UNLOCK();
 }
 
 static void preview(int sample)
@@ -405,6 +560,51 @@ static int button2(SDL_Rect r, const char *label, int on, int enabled)
 }
 
 static int button(SDL_Rect r, const char *label, int on) { return button2(r, label, on, 1); }
+
+/* A scrollbar down the right of `area` for content_h pixels of content: a handle to drag, a
+ * track to click for a page at a time, and shading at the edges whenever there's more above or
+ * below, with a "more" marker at the bottom. */
+static void scrollbar(SDL_Rect area, int *scroll, int content_h)
+{
+    int max = content_h - area.h;
+    if (max <= 0) {
+        *scroll = 0;
+        return;
+    }
+    if (*scroll > max) *scroll = max;
+    int sw = 8, shade_h = 22;
+    SDL_Rect trk = {area.x + area.w - sw - 3, area.y + 3, sw, area.h - 6};
+    int th = trk.h * area.h / content_h;
+    if (th < 30) th = 30;
+    int ty = trk.y + (int)((long)(trk.h - th) * *scroll / max);
+    SDL_Rect thumb = {trk.x, ty, sw, th};
+    for (int i = 0; i < shade_h; i++) {          /* soft edges: there's more this way */
+        Uint8 a = (Uint8)(150 * (shade_h - i) / shade_h);
+        if (*scroll > 0) line(area.x, area.y + i, trk.x - 3, area.y + i, alpha(DARK, a));
+        if (*scroll < max) line(area.x, area.y + area.h - 1 - i, trk.x - 3, area.y + area.h - 1 - i, alpha(DARK, a));
+    }
+    if (*scroll == 0) {                          /* until it's first scrolled: say there's more */
+        const char *more = "more ▾";
+        int mw = text_w(more) + 12;
+        SDL_Rect pill = {trk.x - mw - 6, area.y + area.h - font_h - 8, mw, font_h + 4};
+        fill(pill, alpha(ACCENT, 200));
+        text_center(pill, more, DARK);
+    }
+    int dragging = drag.kind == D_SCROLL && drag.inum == scroll;
+    int hov = drag.kind == D_NONE && hit((SDL_Rect){trk.x - 3, trk.y, trk.w + 6, trk.h});
+    fill(trk, alpha(PANEL3, 140));
+    fill(thumb, dragging ? ACCENT : hov && hit(thumb) ? shade(DIM, 1.1f) : shade(DIM, 0.75f));
+    if (hov && lpress) {
+        if (hit((SDL_Rect){thumb.x - 3, thumb.y, thumb.w + 6, thumb.h})) {
+            drag = (typeof(drag)){.kind = D_SCROLL, .inum = scroll, .iorig = *scroll, .imax = max, .sy = my,
+                                  .nstep = (double)max / (trk.h - th > 1 ? trk.h - th : 1)};
+        } else {                                 /* click above or below the handle: a page */
+            *scroll += (my < ty ? -1 : 1) * area.h * 9 / 10;
+            *scroll = *scroll < 0 ? 0 : *scroll > max ? max : *scroll;
+        }
+        lpress = 0;
+    }
+}
 
 static void number_box(SDL_Rect r, const char *label, const char *value, int active)
 {
@@ -663,7 +863,7 @@ static void undo_redo(int redo)
     state_restore(&target);
     committed = target;
     committed.label[0] = 0;
-    selected = -1;
+    sel_clear();
     edit_serial++;
     status("%s: %s   (%d more to undo, %d to redo)", redo ? "Redo" : "Undo", target.label, nundo, nredo);
 }
@@ -759,7 +959,7 @@ static void update_title(void)
 {
     static char last[1100];
     char t[1100];
-    snprintf(t, sizeof t, "%s%s - tinydaw", is_dirty() ? "* " : "",
+    snprintf(t, sizeof t, "%s%s - tinydaw " TINYDAW_VERSION, is_dirty() ? "* " : "",
              proj_path[0] ? base_name(proj_path) : recovered ? "recovered work" : "untitled");
     if (strcmp(t, last)) {
         snprintf(last, sizeof last, "%s", t);
@@ -799,7 +999,7 @@ static void replace_project(Project *np)
     project_free(old);
     free(old);
     free(np);
-    selected = -1;
+    sel_clear();
     view_start = 0;
     lib_scroll = 0;
     drag.kind = D_NONE;
@@ -1695,10 +1895,8 @@ static void pads_pane(void)
     int y0 = pane.y + 12 - pads_scroll;
     int y = pads_content(pane.x + 14, y0, pane.w - 28);
     pads_content_h = y - y0 + 12;
-    if (max_scroll > 0) {
-        int bar_h = pane.h * pane.h / pads_content_h;
-        fill((SDL_Rect){pane.x + pane.w - 5, pane.y + (pane.h - bar_h) * pads_scroll / max_scroll, 3, bar_h}, PANEL3);
-    }
+    (void)max_scroll;
+    scrollbar(pane, &pads_scroll, pads_content_h);
     SDL_RenderSetClipRect(ren, NULL);
     if (!inside) lpress = saved_press;
 }
@@ -1730,7 +1928,7 @@ static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int en
 static void file_menu(void)
 {
     int w = 250, ih = 30, n = 5;
-    SDL_Rect m = {file_btn.x, file_btn.y + file_btn.h + 2, w, n * ih + 8};
+    SDL_Rect m = {file_btn.x, file_btn.y + file_btn.h + 2, w, n * ih + 8 + font_h + 10};
     fill(m, PANEL);
     outline(m, LINE);
     int y = m.y + 4, rec = autosave_exists();
@@ -1744,6 +1942,9 @@ static void file_menu(void)
     if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, "Save As...", "Ctrl+Shift+S", 1)) act = 3;
     y += ih;
     if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, "Recover unsaved work", NULL, rec)) act = 4;
+    y += ih + 4;
+    line(m.x + 8, y, m.x + w - 8, y, LINE);
+    text(m.x + 12, y + 5, "tinydaw " TINYDAW_VERSION, DIM);
     if (act >= 0 || lpress || rpress) menu_open = 0;   /* any click closes it */
     lpress = rpress = 0;
     switch (act) {
@@ -1856,18 +2057,35 @@ static int mixer_content(int x, int y, int w)
     char buf[160], b2[48];
     int hw = (w - 8) / 2, tw = (w - 16) / 3, rh = 34;
 
-    /* the selected clip */
+    /* the selected clips: the one clicked last shows its values; a change applies to all of them */
     y = section(x, y, w, "CLIP");
     if (selected >= 0 && selected < P.nclips) {
         Clip *c = &P.clips[selected];
-        text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, P.samples[sample_base(&P, c->sample)].name, TEXT);
+        int many = sel_count();
+        if (many > 1) snprintf(buf, sizeof buf, "%d clips selected: changes apply to all", many);
+        else snprintf(buf, sizeof buf, "%s", P.samples[sample_base(&P, c->sample)].name);
+        text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, many > 1 ? HEAD : TEXT);
         y += font_h + 8;
+        float g0 = c->gain_db;
         fnumber((SDL_Rect){x, y, hw, 26}, "Gain", &c->gain_db, -36, 12, 0.05, "%+.1f dB");
+        if (c->gain_db != g0 && many > 1) {     /* move every selected clip's gain by the same amount */
+            float d = c->gain_db - g0;
+            LOCK();
+            for (int i = 0; i < P.nclips; i++)
+                if (csel[i] && i != selected) {
+                    float v = P.clips[i].gain_db + d;
+                    P.clips[i].gain_db = v < -36 ? -36 : v > 12 ? 12 : v;
+                }
+            UNLOCK();
+        }
         static double semis;
         if (!(drag.kind == D_NUM && drag.num == &semis)) semis = clip_semis(c);
         number((SDL_Rect){x + hw + 8, y, hw, 26}, "Pitch", &semis, -24, 24, 0.08, "%+.0f st");
-        if (drag.kind != D_NUM && (int)lround(semis) != clip_semis(c)) clip_variant(selected, (int)lround(semis), clip_rev(c));
+        if (drag.kind != D_NUM && (int)lround(semis) != clip_semis(c))
+            for (int i = 0; i < P.nclips; i++)
+                if (csel[i]) clip_variant(i, (int)lround(semis), clip_rev(&P.clips[i]));
         y += rh;
+        c = &P.clips[selected];
         double fin = (double)c->fade_in / SR * 1000, fout = (double)c->fade_out / SR * 1000;
         double maxms = (double)c->length / SR * 1000;
         static double din, dout;
@@ -1876,20 +2094,28 @@ static int mixer_content(int x, int y, int w)
         number((SDL_Rect){x, y, tw, 26}, "In", &din, 0, maxms, 2, "%.0f ms");
         number((SDL_Rect){x + tw + 8, y, tw, 26}, "Out", &dout, 0, maxms, 2, "%.0f ms");
         if (din != fin || dout != fout) {
-            long a = (long)llround(din / 1000 * SR), b = (long)llround(dout / 1000 * SR);
-            if (a + b > c->length) b = c->length - a;
             LOCK();
-            c->fade_in = a;
-            c->fade_out = b < 0 ? 0 : b;
+            for (int i = 0; i < P.nclips; i++) {
+                if (!csel[i]) continue;
+                Clip *ci = &P.clips[i];
+                long a = (long)llround(din / 1000 * SR), b = (long)llround(dout / 1000 * SR);
+                if (a > ci->length) a = ci->length;
+                if (a + b > ci->length) b = ci->length - a;
+                if (din != fin) ci->fade_in = a;
+                if (dout != fout) ci->fade_out = b < 0 ? 0 : b;
+            }
             UNLOCK();
         }
-        if (button((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Reverse", clip_rev(c)))
-            clip_variant(selected, clip_semis(c), !clip_rev(c));
+        if (button((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Reverse", clip_rev(c))) {
+            int rev = !clip_rev(c);
+            for (int i = 0; i < P.nclips; i++)
+                if (csel[i]) clip_variant(i, clip_semis(&P.clips[i]), rev);
+        }
         y += rh;
         text(x, y, "Drag the squares on a clip's top corners to fade it", DIM);
         y += font_h + 14;
     } else {
-        text(x, y, "Click a clip on the timeline to edit it", DIM);
+        text(x, y, "Click a clip, or drag a box around several", DIM);
         y += font_h + 14;
     }
 
@@ -2042,10 +2268,8 @@ static void mixer_pane(void)
     int y0 = pane.y + 12 - mixer_scroll;
     int y = mixer_content(pane.x + 14, y0, pane.w - 28);
     mixer_content_h = y - y0 + 12;
-    if (max_scroll > 0) {
-        int bar_h = pane.h * pane.h / mixer_content_h;
-        fill((SDL_Rect){pane.x + pane.w - 5, pane.y + (pane.h - bar_h) * mixer_scroll / max_scroll, 3, bar_h}, PANEL3);
-    }
+    (void)max_scroll;
+    scrollbar(pane, &mixer_scroll, mixer_content_h);
     SDL_RenderSetClipRect(ren, NULL);
     if (!inside) lpress = saved_press;
 }
@@ -2307,6 +2531,7 @@ static void vis_pane(void)
     int y0 = pane.y + 12 - vis_scroll;
     int y = vis_content(pane.x + 14, y0, pane.w - 28);
     vis_content_h = y - y0 + 12;
+    scrollbar(pane, &vis_scroll, vis_content_h);
     SDL_RenderSetClipRect(ren, NULL);
     if (!inside) lpress = saved_press;
 }
@@ -2616,11 +2841,14 @@ static void left_panel(void)
             lpress = 0;
         }
     }
-    if (max_scroll > 0) {                       /* scroll indicator */
-        int track_h = visible * item_h;
-        int bar_h = track_h * visible / nvis;
-        int bar_y = y + (track_h - bar_h) * lib_scroll / max_scroll;
-        fill((SDL_Rect){x + w + 4, bar_y, 3, bar_h}, PANEL3);
+    if (max_scroll > 0) {                       /* a scrollbar in pixels, the list in whole rows */
+        static int lib_px;
+        if (!(drag.kind == D_SCROLL && drag.inum == &lib_px)) lib_px = lib_scroll * item_h;
+        SDL_Rect area = {x, y, w + 12, visible * item_h};
+        SDL_RenderSetClipRect(ren, &(SDL_Rect){0, area.y, L.left - 1, area.h});
+        scrollbar(area, &lib_px, nvis * item_h);
+        SDL_RenderSetClipRect(ren, NULL);
+        lib_scroll = (lib_px + item_h / 2) / item_h;
     }
 }
 
@@ -2749,14 +2977,14 @@ static void timeline(void)
             if (c->fade_in > 0) line(r.x, r.y + r.h - 1, hin.x + 4, r.y + 1, TEXT);
             if (c->fade_out > 0) line(hout.x + 4, r.y + 1, r.x + r.w - 1, r.y + r.h - 1, TEXT);
             if (i == selected || (drag.kind == D_NONE && hit(r)) || drag.kind == D_FADEIN || drag.kind == D_FADEOUT) {
-                if (i == selected || drag.clip == i || hit(r)) {
+                if (i == selected || (drag.kind != D_NONE && drag.clip == i) || hit(r)) {
                     fill(hin, hit(hin) ? HEAD : TEXT);
                     fill(hout, hit(hout) ? HEAD : TEXT);
                 }
             }
         }
-        outline(r, i == selected ? TEXT : shade(col, 0.95f));
-        if (i == selected) outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, TEXT);
+        outline(r, csel[i] ? TEXT : shade(col, 0.95f));
+        if (csel[i]) outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, i == selected ? HEAD : TEXT);
         if (drag.kind == D_NONE && hit(r)) {
             int edge = r.w / 3 < 6 ? r.w / 3 : 6;
             if (mx < r.x + edge || mx >= r.x + r.w - edge) hover_edge = 1;
@@ -2783,6 +3011,12 @@ static void timeline(void)
         }
     }
 
+    if (drag.kind == D_BAND) {          /* the selection box */
+        SDL_Rect band = {mx < drag.sx ? mx : drag.sx, my < drag.sy ? my : drag.sy, abs(mx - drag.sx), abs(my - drag.sy)};
+        fill(band, alpha(HEAD, 30));
+        outline(band, alpha(HEAD, 200));
+    }
+
     /* playhead */
     int phx = (int)frame_to_x(P.playhead);
     if (phx >= L.tl_x && phx < W) {
@@ -2805,11 +3039,16 @@ static void timeline(void)
         for (int i = P.nclips - 1; i >= 0 && over < 0 && (mods & KMOD_ALT); i--)
             if (hit(clip_rect(&P.clips[i]))) over = i;
         if (over >= 0) {
-            float gdb = P.clips[over].gain_db + wheel_y * ((mods & KMOD_SHIFT) ? 0.1f : 1.0f);
+            float step = wheel_y * ((mods & KMOD_SHIFT) ? 0.1f : 1.0f);
+            int all = csel[over];               /* over a selected clip: the whole selection */
             LOCK();
-            P.clips[over].gain_db = gdb < -36 ? -36 : gdb > 12 ? 12 : gdb;
+            for (int i = 0; i < P.nclips; i++)
+                if (i == over || (all && csel[i])) {
+                    float gdb = P.clips[i].gain_db + step;
+                    P.clips[i].gain_db = gdb < -36 ? -36 : gdb > 12 ? 12 : gdb;
+                }
             UNLOCK();
-            status("Clip gain %+.1f dB", P.clips[over].gain_db);
+            status("Clip gain %+.1f dB%s", P.clips[over].gain_db, all && sel_count() > 1 ? " (all selected)" : "");
         } else if (mods & KMOD_CTRL) {
             zoom(pow(1.25, wheel_y), mx);
         } else {
@@ -2840,27 +3079,54 @@ static void timeline(void)
             }
         for (int i = P.nclips - 1; i >= 0 && found < 0; i--)
             if (hit(clip_rect(&P.clips[i]))) { found = i; break; }
-        if (found >= 0 && rpress) {
-            status("Deleted clip \"%s\"", P.samples[P.clips[found].sample].name);
-            clip_delete(found);
-        } else if (found >= 0 && lpress && !(mods & KMOD_CTRL) && fade_hit(found) != D_NONE) {
-            selected = found;
+        if (found >= 0 && rpress) {             /* right-click: delete it, or the whole selection it's in */
+            if (csel[found] && sel_count() > 1) {
+                status("Deleted %d clips", delete_selection());
+            } else {
+                status("Deleted clip \"%s\"", P.samples[P.clips[found].sample].name);
+                clip_delete(found);
+            }
+        } else if (found >= 0 && lpress && !(mods & (KMOD_CTRL | KMOD_SHIFT)) && fade_hit(found) != D_NONE) {
+            sel_only(found);
             drag = (typeof(drag)){.kind = fade_hit(found), .clip = found};
+        } else if (found >= 0 && lpress && (mods & KMOD_SHIFT) && !(mods & KMOD_CTRL)) {
+            csel[found] = !csel[found];             /* Shift+click: add to or take out of the selection */
+            if (csel[found]) {
+                selected = found;
+                group_remember();
+                drag = (typeof(drag)){.kind = D_MOVE, .clip = found, .a = P.clips[found].start,
+                                      .track = P.clips[found].track, .sx = mx, .sy = my,
+                                      .grab = (long)x_to_frame_raw(mx) - P.clips[found].start};
+            } else {
+                sel_fix_primary();
+            }
+            status("%d clip%s selected", sel_count(), sel_count() == 1 ? "" : "s");
         } else if (found >= 0 && lpress) {
-            if (mods & KMOD_CTRL) {            /* Ctrl+drag: copy */
-                Clip c = P.clips[found];
-                int n = clip_add(c.sample, c.track, c.start, c.offset, c.length);
-                if (n >= 0) found = n;
+            if (!csel[found]) sel_only(found);
+            if (mods & KMOD_CTRL) {            /* Ctrl+drag: copy the clip, or the whole selection */
+                long off = P.clips[found].start;
+                int before = P.nclips;
+                duplicate_selection(0);
+                for (int i = before; i < P.nclips; i++)    /* follow the copy of the clip under the mouse */
+                    if (P.clips[i].start == off && P.clips[i].track == P.clips[found].track &&
+                        P.clips[i].sample == P.clips[found].sample)
+                        found = i;
+                selected = found;
             }
             selected = found;
             Clip *c = &P.clips[found];
             SDL_Rect r = clip_rect(c);
             int edge = r.w / 3 < 6 ? r.w / 3 : 6;
             int kind = mx < r.x + edge ? D_TRIML : mx >= r.x + r.w - edge ? D_TRIMR : D_MOVE;
-            drag = (typeof(drag)){.kind = kind, .clip = found, .a = c->start, .b = c->offset,
-                                  .c = c->length, .grab = (long)x_to_frame_raw(mx) - c->start};
-        } else if (lpress) {
-            selected = -1;
+            if (kind != D_MOVE) sel_only(found);   /* trimming is one clip at a time */
+            group_remember();
+            drag = (typeof(drag)){.kind = kind, .clip = found, .a = c->start, .b = c->offset, .c = c->length,
+                                  .track = c->track, .sx = mx, .sy = my,
+                                  .grab = (long)x_to_frame_raw(mx) - c->start};
+        } else if (lpress) {                    /* empty space: drag a box to select */
+            if (!(mods & KMOD_SHIFT)) sel_clear();
+            memcpy(band_base, csel, sizeof band_base);
+            drag = (typeof(drag)){.kind = D_BAND, .sx = mx, .sy = my};
         }
         lpress = rpress = 0;
     }
@@ -2888,12 +3154,24 @@ static void update_drag(void)
     case D_LIBPEND:
         if (abs(mx - drag.sx) + abs(my - drag.sy) > 4) drag.kind = D_LIB;
         break;
-    case D_MOVE: {
+    case D_MOVE: {                      /* the clip under the mouse snaps; the rest keep their places */
         long f = snap((long)x_to_frame_raw(mx) - drag.grab);
-        LOCK();
-        P.clips[drag.clip].start = f < 0 ? 0 : f;
-        P.clips[drag.clip].track = lane_at(my);
-        UNLOCK();
+        group_place(f - drag.a, lane_at(my) - drag.track);
+        break;
+    }
+    case D_BAND: {
+        SDL_Rect band = {mx < drag.sx ? mx : drag.sx, my < drag.sy ? my : drag.sy, abs(mx - drag.sx) + 1,
+                         abs(my - drag.sy) + 1};
+        for (int i = 0; i < P.nclips; i++) {
+            SDL_Rect r = clip_rect(&P.clips[i]), o;
+            csel[i] = band_base[i] || SDL_IntersectRect(&band, &r, &o);
+        }
+        sel_fix_primary();
+        break;
+    }
+    case D_SCROLL: {                    /* a scrollbar thumb */
+        int v = drag.iorig + (int)((my - drag.sy) * drag.nstep);
+        *drag.inum = v < 0 ? 0 : v > drag.imax ? drag.imax : v;
         break;
     }
     case D_TRIMR: {
@@ -2979,6 +3257,12 @@ static void end_drag(void)
         }
     } else if (drag.kind == D_LIBPEND) {
         preview(drag.sample);
+    } else if (drag.kind == D_MOVE && abs(mx - drag.sx) + abs(my - drag.sy) < 3 && !(mods & (KMOD_SHIFT | KMOD_CTRL))) {
+        sel_only(drag.clip);            /* a click on one clip of a selection picks just that one */
+    } else if (drag.kind == D_BAND) {
+        int n = sel_count();
+        if (n) status("%d clip%s selected   Delete, arrows, Ctrl+D, Ctrl+C/V, [ ], Ctrl+R act on all of them", n,
+                      n == 1 ? "" : "s");
     } else if (drag.kind == D_BEAT && hit(area)) {
         place_beat(drag.sample, snap(x_to_frame(mx)), lane_at(my));
     }
@@ -3030,11 +3314,33 @@ static void key(SDL_Keysym k)
         case SDLK_s: save_project(shift != 0); return;
         case SDLK_o: request(ACT_OPEN, NULL); return;
         case SDLK_n: request(ACT_NEW, NULL); return;
-        case SDLK_r:
+        case SDLK_r:                    /* reverse: every selected clip follows the one clicked last */
             if (selected >= 0) {
-                clip_variant(selected, clip_semis(&P.clips[selected]), !clip_rev(&P.clips[selected]));
-                status(clip_rev(&P.clips[selected]) ? "Clip reversed" : "Clip plays forwards");
+                int rev = !clip_rev(&P.clips[selected]);
+                for (int i = 0; i < P.nclips; i++)
+                    if (csel[i]) clip_variant(i, clip_semis(&P.clips[i]), rev);
+                status(rev ? "Reversed %d clip%s" : "%d clip%s play forwards", sel_count(), sel_count() == 1 ? "" : "s");
             }
+            return;
+        case SDLK_a:
+            for (int i = 0; i < P.nclips; i++) csel[i] = 1;
+            sel_fix_primary();
+            status("All %d clips selected", P.nclips);
+            return;
+        case SDLK_c:
+            if (sel_count()) {
+                copy_selection();
+                status("Copied %d clip%s: Ctrl+V pastes them at the playhead", nclipboard, nclipboard == 1 ? "" : "s");
+            }
+            return;
+        case SDLK_x:
+            if (sel_count()) {
+                copy_selection();
+                status("Cut %d clip%s", delete_selection(), nclipboard == 1 ? "" : "s");
+            }
+            return;
+        case SDLK_v:
+            if (nclipboard) status("Pasted %d clip%s", paste_at(snap(P.playhead)), nclipboard == 1 ? "" : "s");
             return;
         }
     }
@@ -3048,13 +3354,16 @@ static void key(SDL_Keysym k)
         break;
     case SDLK_DELETE:
     case SDLK_BACKSPACE:
-        if (selected >= 0) clip_delete(selected);
+        if (sel_count()) {
+            int n = delete_selection();
+            status("Deleted %d clip%s", n, n == 1 ? "" : "s");
+        }
         break;
-    case SDLK_d:
-        if (ctrl && selected >= 0) {
-            Clip c = P.clips[selected];
-            int n = clip_add(c.sample, c.track, c.start + c.length, c.offset, c.length);
-            if (n >= 0) selected = n;
+    case SDLK_d:                        /* Ctrl+D: the selection again, straight after itself */
+        if (ctrl && sel_count()) {
+            long a, b;
+            selection_span(&a, &b);
+            duplicate_selection(b - a);
         }
         break;
     case SDLK_l: toggle_loop(); break;
@@ -3063,27 +3372,23 @@ static void key(SDL_Keysym k)
         break;
     case SDLK_LEFT:
     case SDLK_RIGHT:
-        if (selected >= 0) {
-            long f = P.clips[selected].start + (k.sym == SDLK_LEFT ? -nudge : nudge);
-            LOCK();
-            P.clips[selected].start = f < 0 ? 0 : f;
-            UNLOCK();
+        if (sel_count()) {
+            group_remember();
+            group_place(k.sym == SDLK_LEFT ? -nudge : nudge, 0);
         }
         break;
     case SDLK_UP:
     case SDLK_DOWN:
-        if (selected >= 0) {
-            int t = P.clips[selected].track + (k.sym == SDLK_UP ? -1 : 1);
-            LOCK();
-            P.clips[selected].track = t < 0 ? 0 : t >= P.ntracks ? P.ntracks - 1 : t;
-            UNLOCK();
+        if (sel_count()) {
+            group_remember();
+            group_place(0, k.sym == SDLK_UP ? -1 : 1);
         }
         break;
     case SDLK_EQUALS:
     case SDLK_KP_PLUS: zoom(1.25, L.tl_x + L.tl_w / 2); break;
     case SDLK_MINUS:
     case SDLK_KP_MINUS: zoom(0.8, L.tl_x + L.tl_w / 2); break;
-    case SDLK_ESCAPE: selected = -1; break;
+    case SDLK_ESCAPE: sel_clear(); break;
     case SDLK_F1:
         theory_open = !theory_open;
         pads_open = mixer_open = vis_open = 0;
@@ -3101,13 +3406,26 @@ static void key(SDL_Keysym k)
         theory_open = pads_open = mixer_open = 0;
         break;
     case SDLK_F11: show_toggle(); break;
+    case SDLK_PAGEUP:
+    case SDLK_PAGEDOWN: {               /* scroll the open pane, or the library */
+        int *sc = theory_open ? &th_scroll : pads_open ? &pads_scroll : mixer_open ? &mixer_scroll
+                : vis_open ? &vis_scroll : NULL;
+        int page = (H - L.top - L.status) * 9 / 10, dir = k.sym == SDLK_PAGEUP ? -1 : 1;
+        if (sc) *sc += dir * page;          /* clamped when the pane is drawn */
+        else lib_scroll += dir * 8;
+        break;
+    }
     case SDLK_LEFTBRACKET:
-    case SDLK_RIGHTBRACKET:             /* transpose the selected clip */
-        if (selected >= 0) {
-            Clip *c = &P.clips[selected];
-            int st = clip_semis(c) + (k.sym == SDLK_RIGHTBRACKET ? 1 : -1);
-            if (st >= -24 && st <= 24) clip_variant(selected, st, clip_rev(c));
-            status("Clip pitch %+d semitones", clip_semis(&P.clips[selected]));
+    case SDLK_RIGHTBRACKET:             /* transpose the selected clips */
+        if (sel_count()) {
+            int step = k.sym == SDLK_RIGHTBRACKET ? 1 : -1;
+            for (int i = 0; i < P.nclips; i++) {
+                if (!csel[i]) continue;
+                int st = clip_semis(&P.clips[i]) + step;
+                if (st >= -24 && st <= 24) clip_variant(i, st, clip_rev(&P.clips[i]));
+            }
+            if (selected >= 0) status("Clip pitch %+d semitones%s", clip_semis(&P.clips[selected]),
+                                      sel_count() > 1 ? " (all selected moved by one)" : "");
         }
         break;
     }
@@ -3479,7 +3797,7 @@ static int selftest(void)
     check(P.nclips == n0, "undo removes the clip just added");
     undo_redo(1);
     check(P.nclips == n0 + 1, "redo puts it back");
-    selected = -1;
+    sel_clear();
     view_start = 0;
     frame();
     Clip before_drag = P.clips[P.nclips - 1];
@@ -3805,6 +4123,99 @@ static int selftest(void)
           "transposing a clip keeps the same stretch of sound, as one undo step");
     undo_redo(0);
     check(clip_semis(&P.clips[ci]) == 0 && P.clips[ci].length == len0, "and undo brings the original back");
+
+    /* multiselect: box, shift-click, group moves, delete, duplicate, copy and paste */
+    {
+        theory_open = pads_open = mixer_open = vis_open = 0;
+        LOCK();
+        P.nclips = 0;
+        P.playing = 0;
+        UNLOCK();
+        sel_clear();
+        view_start = 0;
+        snap_i = 3;
+        frame();
+        long bt = beat_frames();
+        clip_add(0, 0, 1 * bt, 0, bt);
+        clip_add(0, 1, 2 * bt, 0, bt);
+        clip_add(0, 2, 6 * bt, 0, bt);
+        frame();
+        int bx0 = (int)frame_to_x(0) + 3, bx1 = (int)frame_to_x(4 * bt);
+        sim_drag(bx0, lane_y(0) - L.lane_h / 2 + 3, bx1, lane_y(1) + 10, 0);
+        check(sel_count() == 2 && csel[0] && csel[1] && !csel[2], "dragging a box over empty space selects the clips in it");
+        SDL_Rect r3 = clip_rect(&P.clips[2]);
+        sim(r3.x + r3.w / 2, r3.y + r3.h / 2, 1, 0, 0, KMOD_SHIFT);
+        sim(r3.x + r3.w / 2, r3.y + r3.h / 2, 0, 1, 0, KMOD_SHIFT);
+        check(sel_count() == 3 && csel[2], "Shift+click adds a clip to the selection");
+        sim(r3.x + r3.w / 2, r3.y + r3.h / 2, 1, 0, 0, KMOD_SHIFT);
+        sim(r3.x + r3.w / 2, r3.y + r3.h / 2, 0, 1, 0, KMOD_SHIFT);
+        check(sel_count() == 2 && !csel[2], "and Shift+click again takes it out");
+        frame();
+        int u1 = nundo;
+        SDL_Rect r1 = clip_rect(&P.clips[0]);
+        int bpx = (int)(60.0 / P.bpm * pps);
+        sim_drag(r1.x + r1.w / 2, r1.y + r1.h / 2, r1.x + r1.w / 2 + 2 * bpx, r1.y + r1.h / 2 + L.lane_h, 0);
+        check(P.clips[0].start == 3 * bt && P.clips[1].start == 4 * bt && P.clips[0].track == 1 && P.clips[1].track == 2 &&
+                  P.clips[2].start == 6 * bt, "dragging one selected clip moves them all, the others stay");
+        check(nundo == u1 + 1, "a group move is one undo step");
+        SDL_Keysym kk = {0};
+        kk.sym = SDLK_LEFT;
+        for (int i = 0; i < 6; i++) key(kk);
+        check(P.clips[0].start == 0 && P.clips[1].start == bt, "nudging stops when the first clip reaches the start");
+        kk.sym = SDLK_d;
+        kk.mod = KMOD_CTRL;
+        key(kk);
+        check(P.nclips == 5 && sel_count() == 2 && csel[3] && csel[4] && P.clips[3].start == 2 * bt,
+              "Ctrl+D copies the selection to just after itself and selects the copies");
+        kk.sym = SDLK_c;
+        key(kk);
+        LOCK();
+        P.playhead = 10 * bt + 5;
+        UNLOCK();
+        kk.sym = SDLK_v;
+        key(kk);
+        check(P.nclips == 7 && P.clips[5].start == 10 * bt && P.clips[6].start == 11 * bt,
+              "Ctrl+C then Ctrl+V pastes the selection at the playhead");
+        kk.sym = SDLK_DELETE;
+        kk.mod = 0;
+        key(kk);
+        check(P.nclips == 5 && sel_count() == 0, "Delete removes every selected clip");
+        kk.sym = SDLK_a;
+        kk.mod = KMOD_CTRL;
+        key(kk);
+        check(sel_count() == 5, "Ctrl+A selects everything");
+        SDL_Rect rr = clip_rect(&P.clips[2]);
+        sim(rr.x + rr.w / 2, rr.y + rr.h / 2, 1, 0, 0, 0);
+        sim(rr.x + rr.w / 2, rr.y + rr.h / 2, 0, 1, 0, 0);
+        check(sel_count() == 1 && selected == 2, "a plain click on one of them selects just that one");
+
+        /* scrollbars */
+        mixer_open = 1;
+        mixer_scroll = 0;
+        frame();
+        frame();
+        SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
+        int sx = pane.x + pane.w - 7;
+        check(mixer_content_h > pane.h, "the mixer pane is taller than the window here");
+        sim(sx, pane.y + pane.h - 20, 1, 0, 0, 0);
+        sim(sx, pane.y + pane.h - 20, 0, 1, 0, 0);
+        check(mixer_scroll > 0, "clicking the scrollbar below its handle scrolls down a page");
+        int before_drag = mixer_scroll;
+        mixer_scroll = 0;
+        frame();
+        sim(sx, pane.y + 20, 1, 0, 0, 0);
+        for (int i = 1; i <= 6; i++) sim(sx, pane.y + 20 + i * 15, 0, 0, 0, 0);
+        sim(sx, pane.y + 110, 0, 1, 0, 0);
+        check(mixer_scroll > 0 && drag.kind == D_NONE, "dragging the handle scrolls");
+        (void)before_drag;
+        kk.sym = SDLK_PAGEDOWN;
+        kk.mod = 0;
+        mixer_scroll = 0;
+        key(kk);
+        frame();
+        check(mixer_scroll > 0, "Page Down scrolls the open pane");
+        mixer_open = 0;
+    }
 
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
     int vj = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 4, 12, 1);
@@ -4768,10 +5179,8 @@ static void theory_pane(void)
     case 6: y = tab_genres(x, y, w); break;
     }
     th_content_h = y - y0 + 10;
-    if (max_scroll > 0) {                       /* scroll indicator */
-        int bar_h = pane.h * pane.h / th_content_h;
-        fill((SDL_Rect){pane.x + pane.w - 5, pane.y + (pane.h - bar_h) * th_scroll / max_scroll, 3, bar_h}, PANEL3);
-    }
+    (void)max_scroll;
+    scrollbar(pane, &th_scroll, th_content_h);
     SDL_RenderSetClipRect(ren, NULL);
     if (!inside) lpress = saved_press;
 }
@@ -5016,6 +5425,7 @@ int main(int argc, char **argv)
         "  --demo                 start with a two-bar demo beat\n"
         "  --beat GENRE           add a 4-bar beat (house, trap, rock, ... or a number)\n"
         "  --project-rate HZ      engine rate: 44100 48000 88200 96000 176400 192000\n"
+        "  --version              print the version\n"
         "  --save FILE.tdaw       save the project (after --demo, --beat, files) and exit\n"
         "  --export FILE          render without a window (format from the extension)\n"
         "    --format F           wav aiff flac ogg opus mp3\n"
@@ -5066,7 +5476,10 @@ int main(int argc, char **argv)
             EXO.format = found;
             format_given = 1;
         } else if (!strcmp(a, "-h") || !strcmp(a, "--help")) {
-            printf("%s", usage);
+            printf("tinydaw %s\n%s", TINYDAW_VERSION, usage);
+            return 0;
+        } else if (!strcmp(a, "--version")) {
+            printf("tinydaw %s\n", TINYDAW_VERSION);
             return 0;
         } else if (a[0] == '-') {
             fprintf(stderr, "tinydaw: unknown option %s\n%s", a, usage);
@@ -5262,6 +5675,15 @@ int main(int argc, char **argv)
             P.clips[selected].fade_out = P.clips[selected].length / 2;
         }
         if (getenv("TINYDAW_SHOT_CONFIRM")) confirm_act = ACT_QUIT;
+        if (getenv("TINYDAW_SHOT_SELECT")) {     /* a few clips selected, a pane scrolled part way */
+            sel_clear();
+            for (int i = 0; i < P.nclips; i++)
+                if (P.clips[i].track == 3 || P.clips[i].track == 4) csel[i] = 1;
+            sel_fix_primary();
+            mixer_open = 1;
+            mixer_scroll = atoi(getenv("TINYDAW_SHOT_SELECT"));
+            mixer_content_h = 3000;
+        }
         const char *th = getenv("TINYDAW_SHOT_THEORY");      /* "tab,root,scale" */
         const char *gs = getenv("TINYDAW_SHOT_GENRE");
         if (gs) gn_sel = atoi(gs);

@@ -3,10 +3,11 @@
 
 The DLLs are found by reading the import tables of the program and every DLL it pulls in;
 anything not in the MSYS2 sysroot (kernel32, user32, ...) is part of Windows.
-usage: python3 -I win/package.py
+usage: python3 -I win/package.py [VERSION]   (default: the VERSION file)
 """
 import os
 import shutil
+import sys
 import subprocess
 import zipfile
 
@@ -14,7 +15,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(HERE, "sysroot", "clang64", "bin")
 OBJDUMP = os.path.expanduser("~/.local/opt/llvm-mingw/bin/llvm-objdump")
-NAME = "tinydaw-windows-x64"
+VERSION = sys.argv[1] if len(sys.argv) > 1 else open(os.path.join(ROOT, "VERSION")).read().strip()
+NAME = f"tinydaw-{VERSION}-windows-x64"
 OUT = os.path.join(HERE, "dist", NAME)
 FONT = "/usr/share/fonts/TTF/DejaVuSansMono.ttf"
 FONT_LICENSE = "/usr/share/licenses/ttf-dejavu/LICENSE"
@@ -41,8 +43,9 @@ def main():
                     if extra not in need and extra.lower() in local:
                         need.add(local[extra.lower()])
                         todo.append(os.path.join(BIN, local[extra.lower()]))
-    if os.path.isdir(OUT):
-        shutil.rmtree(OUT)
+    dist = os.path.join(HERE, "dist")
+    if os.path.isdir(dist):                      # only the current version's folder and zip
+        shutil.rmtree(dist)
     os.makedirs(os.path.join(OUT, "licenses"))
     shutil.copy2(exe, OUT)
     for dll in sorted(need):

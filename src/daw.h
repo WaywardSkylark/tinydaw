@@ -4,6 +4,10 @@
 
 #include <stddef.h>
 
+#ifndef TINYDAW_VERSION
+#define TINYDAW_VERSION "dev"           /* the Makefile passes the VERSION file's contents */
+#endif
+
 /* The project sample rate. It can change at runtime (project_set_rate), so it is a
  * variable; SR is kept as a short name for it. */
 extern int g_rate;

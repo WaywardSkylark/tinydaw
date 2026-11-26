@@ -16,7 +16,11 @@ make
 ./tinydaw --demo       # a two-bar beat to play with
 ./tinydaw a.wav b.flac # start with files in the library
 ./tinydaw song.tdaw    # open a project
+./tinydaw --version
 ```
+
+The version lives in the `VERSION` file; the build, the window title, the File menu, saved
+projects (`saved-by` line), the Windows file properties and the release zip's name all use it.
 
 Arch/CachyOS packages: `sdl2-compat sdl2_ttf libsndfile libsamplerate alsa-lib ttf-dejavu`, plus `zenity`
 for the Open/Save dialogs (Debian/Ubuntu: `libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libsamplerate0-dev
@@ -37,9 +41,12 @@ see [win/README.md](win/README.md). It behaves the same; projects open on either
 | Hear a sound | Click it in the library (click again to stop) |
 | Place a sound | Drag it from the library onto a track |
 | Move a clip | Drag it, in time and between tracks. Arrow keys nudge it |
-| Copy a clip | Ctrl+drag, or Ctrl+D to duplicate it after itself |
+| Select several | Drag a box over empty timeline; Shift+click adds or removes a clip; Ctrl+A selects all, Esc none. Dragging, arrows, Delete, Ctrl+D, `[ ]`, Ctrl+R, Alt+wheel and the Mixer pane's clip settings act on the whole selection |
+| Copy and paste | Ctrl+C / Ctrl+X, then Ctrl+V pastes at the playhead, on the same tracks |
+| Copy a clip | Ctrl+drag (the whole selection if it's in one), or Ctrl+D to duplicate after itself |
 | Trim a clip | Drag its left or right edge |
-| Delete a clip | Right-click it, or select it and press Delete |
+| Delete a clip | Right-click it (the whole selection if it's in one), or select and press Delete |
+| Scroll a pane | Mouse wheel, drag its scrollbar, click above or below the handle for a page, or Page Up/Down |
 | Snap | **Snap** button cycles off / bar / 1/2 / 1/4 / 1/8 / 1/16. Hold Shift while dragging to ignore it |
 | Play / stop | Space, or **Play**. Home jumps back to the start |
 | Playhead | Click or drag in the ruler |

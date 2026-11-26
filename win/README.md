@@ -10,7 +10,7 @@ The Windows build is cross-compiled on Linux. Nothing here needs root.
    (checksums verified against the repository database).
 3. `make windows` builds `win/build/tinydaw.exe`; `make dist-windows` also collects the DLLs it
    needs (found by reading import tables), the DejaVu font and the licences into
-   `win/dist/tinydaw-windows-x64.zip`.
+   `win/dist/tinydaw-<version>-windows-x64.zip`, named from the `VERSION` file.
 
 Test it with Wine (a throwaway prefix, with the Mono/Gecko install prompts turned off):
 

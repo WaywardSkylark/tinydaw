@@ -48,6 +48,7 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
         return -1;
     }
     fprintf(f, MAGIC "\n");
+    fprintf(f, "saved-by tinydaw %s\n", TINYDAW_VERSION);   /* for people reading the file; ignored on load */
     fprintf(f, "rate %d\nbpm %.17g\na4 %.17g\nmaster %.9g\n", SR, p->bpm, p->a4, p->master);
     fprintf(f, "loop %d %ld %ld\nplayhead %ld\n", p->loop, p->loop_start, p->loop_end, p->playhead);
     fprintf(f, "instrument %d %d %d\n", p->inst_sample, p->inst_root, p->inst_track);

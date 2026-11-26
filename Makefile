@@ -40,7 +40,7 @@ win/build/tinydaw.exe: $(SRC) $(HDR) src/compat.h VERSION win/tinydaw.rc win/tin
 	$(WINRC) -I win -DVER_STR='\"$(VERSION)\"' -DVER_MAJ=$(word 1,$(VERNUM)) -DVER_MIN=$(word 2,$(VERNUM)) \
 	    -DVER_PAT=$(word 3,$(VERNUM)) win/tinydaw.rc -O coff -o win/build/resources.o
 	$(WINCC) -O2 -std=gnu11 -Wall -Wextra -DTINYDAW_VERSION='"$(VERSION)"' $(shell $(WINPC) --cflags $(WINPKGS)) \
-	    -o $@ $(SRC) win/build/resources.o $(shell $(WINPC) --libs $(WINPKGS)) -lwinmm -lcomdlg32 -mwindows
+	    -o $@ $(SRC) win/build/resources.o $(shell $(WINPC) --libs $(WINPKGS)) -lwinmm -lcomdlg32 -ladvapi32 -mwindows
 
 dist-windows: windows
 	python3 -I win/package.py $(VERSION)

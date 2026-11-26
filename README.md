@@ -31,11 +31,24 @@ libasound2-dev fonts-dejavu-core zenity`). Without alsa-lib it builds without MI
 `make dist-windows` cross-compiles a Windows build on Linux and zips it with its DLLs and font:
 see [win/README.md](win/README.md). It behaves the same; projects open on either system.
 
+## The window
+
+- **Top bar:** the menu (☰: new, open, save, export, settings, the show, quit), undo and redo,
+  play and loop, tempo and snap, where the playhead is, and the master level.
+- **Rail** down the left: Sounds, Theory, Pads, Mixer, Visual and Settings. Each opens its panel
+  beside the rail, with sub-tabs inside (Mixer: Clip, Track, Effects, Live). Click the open one
+  again, or press Ctrl+B, to hide the panel and give the timeline the whole width. Ctrl+1 to
+  Ctrl+6 open them from the keyboard (F1 to F4 still open Theory, Pads, Mixer and Visual).
+- **Settings:** Look (Dark, Light or System, which follows your desktop), Audio (output device,
+  project sample rate, master volume), Input (devices and MIDI options), Keys (every shortcut)
+  and About (version and where files are kept). Theme and output device are remembered in
+  `~/.config/tinydaw/settings.conf`.
+
 ## Using it
 
 | Do | How |
 |---|---|
-| Make a sound | Pick a wave (sine, square, saw, tri, noise) or drum (kick, snare, hat), set note, length, volume, attack, release, press **+ Generate sound** |
+| Make a sound | Pick a wave (sine, square, saw, tri, noise) or drum (kick, snare, hat), set note, length, volume, attack, release, press **+ Add to library** (Sounds > New sound) |
 | Change a number | Drag it left/right or up/down, or use the mouse wheel. Hold Shift for fine steps |
 | Import audio | Drop WAV, FLAC, OGG, MP3 (or anything libsndfile reads) onto the window |
 | Hear a sound | Click it in the library (click again to stop) |
@@ -55,8 +68,8 @@ see [win/README.md](win/README.md). It behaves the same; projects open on either
 | Mute / solo / volume | M and S buttons and the bar under each track name |
 | Rows | **+** next to TRACKS adds a row (up to 16); placing a beat adds and names its own rows |
 | Tuning | **Tuning A4** in the generator (415–466 Hz) applies to new tones, chords and the note table |
-| Export | **Export...** or Ctrl+E opens the export dialog (Enter exports, Esc cancels). Files go to `~/Music` (or the current folder) |
-| Project sample rate | The **kHz** button cycles 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz |
+| Export | **☰ > Export audio...** or Ctrl+E opens the export dialog (Enter exports, Esc cancels). Files go to `~/Music` (or the current folder) |
+| Project sample rate | Settings > Audio: 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz |
 | Clip volume / fades | Alt+wheel over a clip for its gain; drag the small squares on its top corners to fade in and out |
 | Transpose / reverse a clip | `[` and `]` move it a semitone; Ctrl+R plays it backwards (or use the Mixer pane) |
 | Undo / redo | Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y, or the **Undo** and **Redo** buttons (300 steps) |
@@ -76,7 +89,8 @@ or a recorded take is one step. Sounds added to the library stay there.
 
 ## Mixer and effects
 
-**Mixer** in the top bar (or F3) opens the mixer pane. Click a track's name to pick it.
+**Mixer** on the rail (or F3) opens the mixer: Clip, Track, Effects and Live pages. Click a track's
+name to pick it.
 
 | Section | What's there |
 |---|---|
@@ -98,8 +112,8 @@ reversed copies don't clutter the library.
 
 ## Visualizer
 
-Every track header has a level meter, and the top bar shows the master level when the window is
-wide enough. **Visual** (or F4) opens the analyzer: a spectrum (20 Hz to 20 kHz), the waveform,
+Every track header has a level meter, and the top bar shows the master level. **Visual** on the
+rail (or F4) opens the analyzer: a spectrum (20 Hz to 20 kHz), the waveform,
 a stereo field display with its correlation (negative means the left and right cancel in mono),
 master meters with peak readouts and clip warnings (click to clear), and a meter per track.
 
@@ -111,7 +125,7 @@ keys still play, and Esc or F11 leaves.
 
 ## Pads and live input
 
-**Pads** in the top bar (or F2) opens the pads pane: 16 pads that play library sounds, and an
+**Pads** on the rail (or F2) opens the pads panel: 16 pads that play library sounds, and an
 instrument that MIDI keyboards play chromatically.
 
 | Do | How |
@@ -132,7 +146,7 @@ Controllers work even when the window is in the background.
 
 ## Theory pane
 
-**Theory** in the top bar (or F1) opens a reference pane on the right. Sounds you hear from it
+**Theory** on the rail (or F1) opens a reference panel. Sounds you hear from it
 use the generator's current wave, volume and envelope (noise and drums fall back to triangle).
 
 | Tab | What's there |

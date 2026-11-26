@@ -34,16 +34,39 @@ static SDL_Cursor *cur_arrow, *cur_resize, *cur_hand;
 /* ---------------------------------------------------------------- colours */
 
 typedef struct { Uint8 r, g, b, a; } Col;
-static const Col BG      = {22, 23, 27, 255};
-static const Col PANEL   = {31, 33, 39, 255};
-static const Col PANEL2  = {41, 44, 52, 255};
-static const Col PANEL3  = {54, 58, 68, 255};
-static const Col LINE    = {58, 62, 72, 255};
-static const Col TEXT    = {222, 224, 230, 255};
-static const Col DIM     = {138, 144, 156, 255};
-static const Col ACCENT  = {240, 138, 64, 255};
-static const Col DARK    = {20, 20, 22, 255};
-static const Col HEAD    = {255, 214, 90, 255};
+/* The theme: set by theme_apply. Dark is the original look; light keeps the same structure
+ * with the greys inverted and the accents deepened so they read on white. */
+static Col BG, PANEL, PANEL2, PANEL3, LINE, TEXT, DIM, ACCENT, DARK, HEAD;
+static int theme_light;
+enum { THEME_DARK, THEME_LIGHT, THEME_SYSTEM };
+static int theme_choice = THEME_SYSTEM;
+
+static void theme_apply(int light)
+{
+    theme_light = light;
+    if (light) {
+        BG = (Col){236, 237, 241, 255};
+        PANEL = (Col){248, 248, 250, 255};
+        PANEL2 = (Col){232, 234, 239, 255};
+        PANEL3 = (Col){216, 220, 228, 255};
+        LINE = (Col){196, 200, 210, 255};
+        TEXT = (Col){28, 30, 36, 255};
+        DIM = (Col){96, 102, 116, 255};
+        ACCENT = (Col){226, 112, 34, 255};
+        HEAD = (Col){196, 128, 0, 255};
+    } else {
+        BG = (Col){22, 23, 27, 255};
+        PANEL = (Col){31, 33, 39, 255};
+        PANEL2 = (Col){41, 44, 52, 255};
+        PANEL3 = (Col){54, 58, 68, 255};
+        LINE = (Col){58, 62, 72, 255};
+        TEXT = (Col){222, 224, 230, 255};
+        DIM = (Col){138, 144, 156, 255};
+        ACCENT = (Col){240, 138, 64, 255};
+        HEAD = (Col){255, 214, 90, 255};
+    }
+    DARK = (Col){20, 20, 22, 255};
+}
 static const Col TRACK_COL[MAX_TRACKS] = {
     {226, 104, 92, 255}, {232, 158, 70, 255}, {212, 198, 82, 255}, {118, 198, 110, 255},
     {80, 188, 190, 255}, {92, 142, 230, 255}, {160, 112, 220, 255}, {220, 100, 168, 255},
@@ -57,6 +80,24 @@ static Col shade(Col c, float k)
     return (Col){r > 255 ? 255 : (Uint8)r, g > 255 ? 255 : (Uint8)g, b > 255 ? 255 : (Uint8)b, c.a};
 }
 static Col alpha(Col c, Uint8 a) { c.a = a; return c; }
+
+/* shade() for interface greys that follows the theme: "dimmer" means closer to the background,
+ * so on a light theme it lightens instead of darkening, and "brighter" darkens */
+static Col tone(Col c, float k)
+{
+    if (!theme_light) return shade(c, k);
+    if (k >= 1) return shade(c, 1 - (k - 1) * 0.35f);   /* gentler: light greys darken fast */
+    float t = 1 - k;
+    return (Col){(Uint8)(c.r + (255 - c.r) * t), (Uint8)(c.g + (255 - c.g) * t), (Uint8)(c.b + (255 - c.b) * t), c.a};
+}
+
+/* A track colour at strength k: darkened on the dark theme, washed towards white on the light */
+static Col wash(Col c, float k)
+{
+    if (!theme_light) return shade(c, k);
+    float t = (1 - k) * 0.85f;
+    return (Col){(Uint8)(c.r + (255 - c.r) * t), (Uint8)(c.g + (255 - c.g) * t), (Uint8)(c.b + (255 - c.b) * t), c.a};
+}
 
 static void fill(SDL_Rect r, Col c)
 {
@@ -184,6 +225,12 @@ static int pads_open;                   /* the Pads pane (shares the right-hand 
 static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
 static int vis_open;                    /* the Visualizer pane: spectrum, scope, meters */
 static int show_open;                   /* the full-screen show */
+static int sounds_open = 1;             /* the Sounds panel: library and new sounds */
+static int settings_open;
+static void disc(int cx, int cy, int r, Col c);
+enum { RI_SOUNDS, RI_THEORY, RI_PADS, RI_MIXER, RI_VISUAL, RI_SETTINGS, RI_COUNT };
+static void open_panel(int which);
+static void show_toggle(void);
 static Mixer *MX;                       /* the live mixer (see audio_cb) */
 static int sel_track;                   /* the track the Mixer pane shows */
 static int headless;                    /* self-test or screenshot: touch no files */
@@ -211,14 +258,14 @@ static void layout(void)
 {
     SDL_GetWindowSize(win, &W, &H);
     L.top = 48;
-    L.left = 290;
     L.head = 150;
     L.ruler = 28;
     L.status = 26;
+    L.pane_x = 70;                      /* RAIL_W: the category rail is on the far left */
+    L.pane_w = theory_open || pads_open || mixer_open || vis_open ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0;
+    L.left = L.pane_x + L.pane_w;
     L.tl_x = L.left + L.head;
-    L.pane_w = theory_open || pads_open || mixer_open || vis_open ? PANE_W : 0;
-    L.pane_x = W - L.pane_w;
-    L.tl_w = W - L.tl_x - L.pane_w;
+    L.tl_w = W - L.tl_x;
     L.lanes_y = L.top + L.ruler;
     L.lane_h = (H - L.lanes_y - L.status) / P.ntracks;
     if (L.lane_h < 22) L.lane_h = 22;
@@ -543,14 +590,14 @@ static void zoom(double factor, int anchor_x)
 static int button2(SDL_Rect r, const char *label, int on, int enabled)
 {
     if (!enabled) {
-        fill(r, shade(PANEL2, 0.8f));
-        outline(r, shade(LINE, 0.8f));
-        text_center(r, label, shade(DIM, 0.6f));
+        fill(r, tone(PANEL2, 0.8f));
+        outline(r, tone(LINE, 0.8f));
+        text_center(r, label, tone(DIM, 0.6f));
         return 0;
     }
     int hov = hit(r) && drag.kind == D_NONE;
     fill(r, on ? ACCENT : hov ? PANEL3 : PANEL2);
-    outline(r, on ? shade(ACCENT, 1.2f) : LINE);
+    outline(r, on ? tone(ACCENT, 1.2f) : LINE);
     text_center(r, label, on ? DARK : TEXT);
     if (hov && lpress) {
         lpress = 0;
@@ -560,6 +607,16 @@ static int button2(SDL_Rect r, const char *label, int on, int enabled)
 }
 
 static int button(SDL_Rect r, const char *label, int on) { return button2(r, label, on, 1); }
+
+/* A row of sub-tabs: one category's pages. Returns the y below it. */
+static int subtabs(int x, int y, int w, const char *const *names, int n, int *sel)
+{
+    int gap = 4, bw = (w - gap * (n - 1)) / n;
+    for (int i = 0; i < n; i++)
+        if (button((SDL_Rect){x + i * (bw + gap), y, i == n - 1 ? w - i * (bw + gap) : bw, 28}, names[i], *sel == i))
+            *sel = i;
+    return y + 40;
+}
 
 /* A scrollbar down the right of `area` for content_h pixels of content: a handle to drag, a
  * track to click for a page at a time, and shading at the edges whenever there's more above or
@@ -593,7 +650,7 @@ static void scrollbar(SDL_Rect area, int *scroll, int content_h)
     int dragging = drag.kind == D_SCROLL && drag.inum == scroll;
     int hov = drag.kind == D_NONE && hit((SDL_Rect){trk.x - 3, trk.y, trk.w + 6, trk.h});
     fill(trk, alpha(PANEL3, 140));
-    fill(thumb, dragging ? ACCENT : hov && hit(thumb) ? shade(DIM, 1.1f) : shade(DIM, 0.75f));
+    fill(thumb, dragging ? ACCENT : hov && hit(thumb) ? tone(DIM, 1.1f) : tone(DIM, 0.75f));
     if (hov && lpress) {
         if (hit((SDL_Rect){thumb.x - 3, thumb.y, thumb.w + 6, thumb.h})) {
             drag = (typeof(drag)){.kind = D_SCROLL, .inum = scroll, .iorig = *scroll, .imax = max, .sy = my,
@@ -1679,14 +1736,12 @@ static void device_row(int x, int y, int w, const char *name, Uint32 flash, Col 
     text_clip((SDL_Rect){x + 16, y, w - 16, font_h + 2}, x + 16, y, name, TEXT);
 }
 
-static int pads_content(int x, int y, int w)
+static int devices_section(int x, int y, int w)
 {
-    char buf[160], b2[64];
-    Uint32 now = SDL_GetTicks();
-
+    char buf[160];
     text(x, y, "INPUT DEVICES", DIM);
     y += font_h + 8;
-    device_row(x, y, w, "Computer keyboard (plays pads while this pane is open)", key_flash, ACCENT);
+    device_row(x, y, w, "Computer keyboard (plays pads while the Pads panel is open)", key_flash, ACCENT);
     y += font_h + 6;
     for (int i = 0; i < njoys; i++) {
         snprintf(buf, sizeof buf, "%s%s", SDL_JoystickName(joys[i]),
@@ -1711,6 +1766,25 @@ static int pads_content(int x, int y, int w)
         text_clip((SDL_Rect){x + 16, y, w - 16, font_h + 2}, x + 16, y, buf, DIM);
         y += font_h + 6;
     }
+    return y;
+}
+
+static int pads_sub, mixer_sub, vis_sub, settings_sub, sounds_sub;
+
+static int pads_content(int x, int y, int w)
+{
+    char buf[160], b2[64];
+    Uint32 now = SDL_GetTicks();
+
+    static const char *const SUBS[] = {"Pads", "Instrument"};
+    y = subtabs(x, y, w, SUBS, 2, &pads_sub);
+    if (pads_sub == 0) {
+    char names[MIDI_MAX_DEVICES][64];
+    int nm = midi_ok ? midi_devices(names, MIDI_MAX_DEVICES) : 0;
+    snprintf(buf, sizeof buf, "Playing from: keyboard%s%s%s%s   (Settings > Input)", njoys ? ", " : "",
+             njoys ? (njoys == 1 ? "1 controller" : "controllers") : "", nm ? ", " : "", nm ? "MIDI" : "");
+    text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, DIM);
+    y += font_h + 10;
     y += 6;
     if (button((SDL_Rect){x, y, 76, 28}, pads_rec ? "● Rec" : "Rec", pads_rec)) pads_rec = !pads_rec;
     snprintf(buf, sizeof buf, "record hits while playing (snap %s)", SNAP_NAMES[snap_i]);
@@ -1747,11 +1821,11 @@ static int pads_content(int x, int y, int w)
         int has = pd->sample >= 0 && pd->sample < P.nsamples;
         Uint32 age = now - pad_flash[i];
         float glow = pad_flash[i] && age < 250 ? 1.0f - age / 250.0f : 0;
-        Col base = has ? shade(TRACK_COL[pd->track % MAX_TRACKS], 0.34f + 0.5f * glow) : shade(PANEL2, 1 + glow);
-        if (has && voice_playing(&P, i) && pd->mode == PAD_LOOP) base = shade(TRACK_COL[pd->track % MAX_TRACKS], 0.6f);
+        Col base = has ? wash(TRACK_COL[pd->track % MAX_TRACKS], 0.34f + 0.5f * glow) : tone(PANEL2, 1 + glow);
+        if (has && voice_playing(&P, i) && pd->mode == PAD_LOOP) base = wash(TRACK_COL[pd->track % MAX_TRACKS], 0.6f);
         int hov = hit(r) && drag.kind == D_NONE;
         int drop = drag.kind == D_LIB && hit(r);
-        fill(r, hov ? shade(base, 1.2f) : base);
+        fill(r, hov ? tone(base, 1.2f) : base);
         outline(r, drop ? HEAD : i == pad_sel ? ACCENT : LINE);
         if (i == pad_sel) outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, ACCENT);
         if (learn_pad == i && (now / 300) % 2) outline((SDL_Rect){r.x + 2, r.y + 2, r.w - 4, r.h - 4}, HEAD);
@@ -1807,7 +1881,7 @@ static int pads_content(int x, int y, int w)
     pan_text((float)*pp, pt, sizeof pt);
     number_text((SDL_Rect){x, y, hw, 26}, "Pan", pp, -1, 1, 0.005, pt);
     fcommit(&pd->pan, pp);
-    text(x + hw + 12, y + 6, "plays through its track's effects", DIM);
+    text(x + hw + 12, y + 6, "uses its track's effects", DIM);
     y += 34;
     track_picker(x, y, "Track", &pd->track);
     if (button((SDL_Rect){x + w - 220, y, 110, 26}, learn_pad == pad_sel ? "Press input..." : "Learn input",
@@ -1831,7 +1905,9 @@ static int pads_content(int x, int y, int w)
                               : "Learn input, then press a key, button or MIDI note", DIM);
     y += font_h + 18;
 
+    } else {
     /* the instrument */
+    int hw = (w - 8) / 2;
     text(x, y, "INSTRUMENT", DIM);
     y += font_h + 4;
     text(x, y, "MIDI notes that aren't on a pad play this sound, pitched", DIM);
@@ -1875,14 +1951,16 @@ static int pads_content(int x, int y, int w)
     text(x, y, "Pads use MIDI notes 36-51 (C2-D#3) by default, like", DIM);
     text(x, y + font_h + 2, "most pad controllers. Playing a piano keyboard? Press", DIM);
     text(x, y + 2 * font_h + 4, "No MIDI on pads so every key plays the instrument.", DIM);
-    return y + 3 * font_h + 12;
+    y += 3 * font_h + 12;
+    }
+    return y;
 }
 
 static void pads_pane(void)
 {
     SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
     fill(pane, PANEL);
-    line(pane.x, pane.y, pane.x, pane.y + pane.h, LINE);
+    line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;
     if (inside && wheel_y && drag.kind == D_NONE) {
@@ -1916,7 +1994,7 @@ static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int en
 {
     int hov = enabled && hit(r);
     if (hov) fill(r, PANEL3);
-    text(r.x + 12, r.y + (r.h - font_h) / 2, label, enabled ? TEXT : shade(DIM, 0.7f));
+    text(r.x + 12, r.y + (r.h - font_h) / 2, label, enabled ? TEXT : tone(DIM, 0.7f));
     if (shortcut) text(r.x + r.w - 12 - text_w(shortcut), r.y + (r.h - font_h) / 2, shortcut, DIM);
     if (hov && lpress) {
         lpress = 0;
@@ -1927,24 +2005,29 @@ static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int en
 
 static void file_menu(void)
 {
-    int w = 250, ih = 30, n = 5;
-    SDL_Rect m = {file_btn.x, file_btn.y + file_btn.h + 2, w, n * ih + 8 + font_h + 10};
+    int w = 270, ih = 30;
+    static const struct { const char *label, *keys; } ITEMS[] = {
+        {"New", "Ctrl+N"}, {"Open...", "Ctrl+O"}, {"Save", "Ctrl+S"}, {"Save As...", "Ctrl+Shift+S"},
+        {"Recover unsaved work", NULL}, {NULL, NULL}, {"Export audio...", "Ctrl+E"}, {NULL, NULL},
+        {"Settings", "Ctrl+,"}, {"Full-screen show", "F11"}, {NULL, NULL}, {"Quit", "Ctrl+Q"}};
+    int n = sizeof ITEMS / sizeof *ITEMS, hgt = 8;
+    for (int i = 0; i < n; i++) hgt += ITEMS[i].label ? ih : 9;
+    SDL_Rect m = {file_btn.x, file_btn.y + file_btn.h + 2, w, hgt + font_h + 12};
     fill(m, PANEL);
     outline(m, LINE);
-    int y = m.y + 4, rec = autosave_exists();
-    int act = -1;
-    if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, "New", "Ctrl+N", 1)) act = 0;
-    y += ih;
-    if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, "Open...", "Ctrl+O", 1)) act = 1;
-    y += ih;
-    if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, "Save", "Ctrl+S", 1)) act = 2;
-    y += ih;
-    if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, "Save As...", "Ctrl+Shift+S", 1)) act = 3;
-    y += ih;
-    if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, "Recover unsaved work", NULL, rec)) act = 4;
-    y += ih + 4;
-    line(m.x + 8, y, m.x + w - 8, y, LINE);
-    text(m.x + 12, y + 5, "tinydaw " TINYDAW_VERSION, DIM);
+    int y = m.y + 4, act = -1;
+    for (int i = 0; i < n; i++) {
+        if (!ITEMS[i].label) {
+            line(m.x + 8, y + 4, m.x + w - 8, y + 4, LINE);
+            y += 9;
+            continue;
+        }
+        int enabled = i != 4 || autosave_exists();
+        if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, ITEMS[i].label, ITEMS[i].keys, enabled)) act = i;
+        y += ih;
+    }
+    line(m.x + 8, y + 4, m.x + w - 8, y + 4, LINE);
+    text(m.x + 12, y + 9, "tinydaw " TINYDAW_VERSION, DIM);
     if (act >= 0 || lpress || rpress) menu_open = 0;   /* any click closes it */
     lpress = rpress = 0;
     switch (act) {
@@ -1953,6 +2036,10 @@ static void file_menu(void)
     case 2: save_project(0); break;
     case 3: save_project(1); break;
     case 4: request(ACT_RECOVER, NULL); break;
+    case 6: open_export(); break;
+    case 8: if (!settings_open) open_panel(RI_SETTINGS); break;
+    case 9: show_toggle(); break;
+    case 11: request(ACT_QUIT, NULL); break;
     }
 }
 
@@ -2057,6 +2144,9 @@ static int mixer_content(int x, int y, int w)
     char buf[160], b2[48];
     int hw = (w - 8) / 2, tw = (w - 16) / 3, rh = 34;
 
+    static const char *const SUBS[] = {"Clip", "Track", "Effects", "Live"};
+    y = subtabs(x, y, w, SUBS, 4, &mixer_sub);
+    if (mixer_sub == 0) {
     /* the selected clips: the one clicked last shows its values; a change applies to all of them */
     y = section(x, y, w, "CLIP");
     if (selected >= 0 && selected < P.nclips) {
@@ -2119,6 +2209,8 @@ static int mixer_content(int x, int y, int w)
         y += font_h + 14;
     }
 
+    }
+    if (mixer_sub == 1) {
     /* the selected track */
     if (sel_track >= P.ntracks) sel_track = P.ntracks - 1;
     Track *t = &P.tracks[sel_track];
@@ -2179,8 +2271,10 @@ static int mixer_content(int x, int y, int w)
     fnumber((SDL_Rect){x + hw + 8, y, hw, 26}, "Reverb send", &t->reverb_send, 0, 1, 0.004, "%.2f");
     y += rh + 8;
 
-    /* shared effects */
+    }
     MasterFx *fx = &P.fx;
+    if (mixer_sub == 2) {
+    /* shared effects */
     y = section(x, y, w, "DELAY");
     int dw = (w - 7 * 4) / 8;
     for (int k = 0; k < DELAY_DIVS; k++)
@@ -2226,6 +2320,8 @@ static int mixer_content(int x, int y, int w)
     text(x, y, "Tracks with Duck above 0 dip whenever the source hits", DIM);
     y += font_h + 16;
 
+    }
+    if (mixer_sub == 3) {
     y = section(x, y, w, "LIVE CONTROLS");
     fnumber((SDL_Rect){x, y, hw, 26}, "Bend range", &fx->bend_range, 1, 24, 0.05, "%.0f st");
     SDL_Rect meter = {x + hw + 8, y + 4, hw, 18};
@@ -2248,14 +2344,16 @@ static int mixer_content(int x, int y, int w)
     text(x, y, "The pitch wheel bends pads and the instrument live.", DIM);
     text(x, y + font_h + 2, "Set the instrument's track (Pads pane) to a filter,", DIM);
     text(x, y + 2 * font_h + 4, "then push the mod wheel up to open it.", DIM);
-    return y + 3 * font_h + 12;
+    y += 3 * font_h + 12;
+    }
+    return y;
 }
 
 static void mixer_pane(void)
 {
     SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
     fill(pane, PANEL);
-    line(pane.x, pane.y, pane.x, pane.y + pane.h, LINE);
+    line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;
     if (inside && wheel_y && drag.kind == D_NONE) {
@@ -2362,7 +2460,7 @@ static Col meter_col(float db)
 /* A level meter, -60..0 dB, in r: vertical or horizontal. */
 static void meter_draw(SDL_Rect r, const Meter *m, int vertical)
 {
-    fill(r, shade(PANEL, 0.7f));
+    fill(r, tone(PANEL, 0.7f));
     float db = to_db(m->level), pk = to_db(m->peak);
     float k = (db + 60) / 60, kp = (pk + 60) / 60;
     k = k < 0 ? 0 : k > 1 ? 1 : k;
@@ -2387,20 +2485,20 @@ static double freq_x(double f, SDL_Rect r)   /* 20 Hz .. 20 kHz, logarithmic */
 
 static void draw_spectrum(SDL_Rect r)
 {
-    fill(r, shade(BG, 0.9f));
+    fill(r, tone(BG, 0.9f));
     static const int grid_hz[] = {50, 100, 200, 500, 1000, 2000, 5000, 10000};
     static const char *grid_lbl[] = {"50", "100", "200", "500", "1k", "2k", "5k", "10k"};
     for (int i = 0; i < 8; i++) {
         int x = (int)freq_x(grid_hz[i], r);
-        line(x, r.y, x, r.y + r.h, shade(LINE, 0.7f));
-        text(x + 3, r.y + r.h - font_h - 2, grid_lbl[i], shade(DIM, 0.8f));
+        line(x, r.y, x, r.y + r.h, tone(LINE, 0.7f));
+        text(x + 3, r.y + r.h - font_h - 2, grid_lbl[i], tone(DIM, 0.8f));
     }
     for (int db = -12; db >= -84; db -= 24) {
         int y = r.y + (int)(r.h * (-db) / 96.0);
-        line(r.x, y, r.x + r.w, y, shade(LINE, 0.7f));
+        line(r.x, y, r.x + r.w, y, tone(LINE, 0.7f));
         char b[16];
         snprintf(b, sizeof b, "%d", db);
-        text(r.x + 3, y + 1, b, shade(DIM, 0.8f));
+        text(r.x + 3, y + 1, b, tone(DIM, 0.8f));
     }
     double bin_hz = (double)SR / VIS_FFT;
     int prev_y = -1;
@@ -2414,7 +2512,7 @@ static void draw_spectrum(SDL_Rect r)
         float t = (best + 96) / 96;
         t = t < 0 ? 0 : t > 1 ? 1 : t;
         int y = r.y + r.h - (int)(r.h * t);
-        Col c = shade(ACCENT, 0.45f + 0.55f * t);
+        Col c = tone(ACCENT, 0.45f + 0.55f * t);
         line(x, y, x, r.y + r.h, alpha(c, 150));
         if (prev_y >= 0) line(x - 1, prev_y, x, y, HEAD);
         prev_y = y;
@@ -2424,8 +2522,8 @@ static void draw_spectrum(SDL_Rect r)
 
 static void draw_scope(SDL_Rect r)
 {
-    fill(r, shade(BG, 0.9f));
-    line(r.x, r.y + r.h / 2, r.x + r.w, r.y + r.h / 2, shade(LINE, 0.7f));
+    fill(r, tone(BG, 0.9f));
+    line(r.x, r.y + r.h / 2, r.x + r.w, r.y + r.h / 2, tone(LINE, 0.7f));
     int span = 2048, start = VIS_FFT - span - 1;
     for (int i = VIS_FFT - span - 1; i > VIS_FFT / 2; i--)   /* trigger on a rising zero crossing */
         if (vis_mono[i - 1] < 0 && vis_mono[i] >= 0) {
@@ -2446,10 +2544,10 @@ static void draw_scope(SDL_Rect r)
 
 static void draw_stereo(SDL_Rect r)              /* goniometer: mono is vertical, wide is spread out */
 {
-    fill(r, shade(BG, 0.9f));
+    fill(r, tone(BG, 0.9f));
     int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-    line(cx, r.y, cx, r.y + r.h, shade(LINE, 0.7f));
-    line(r.x, cy, r.x + r.w, cy, shade(LINE, 0.7f));
+    line(cx, r.y, cx, r.y + r.h, tone(LINE, 0.7f));
+    line(r.x, cy, r.x + r.w, cy, tone(LINE, 0.7f));
     SDL_SetRenderDrawColor(ren, TRACK_COL[6].r, TRACK_COL[6].g, TRACK_COL[6].b, 160);
     double corr_num = 0, el = 0, er = 0;
     for (int i = VIS_FFT - 1536; i < VIS_FFT; i++) {
@@ -2471,6 +2569,11 @@ static void draw_stereo(SDL_Rect r)              /* goniometer: mono is vertical
 static int vis_content(int x, int y, int w)
 {
     char buf[64];
+    static const char *const SUBS[] = {"Analyzer", "Meters"};
+    y = subtabs(x, y, w, SUBS, 2, &vis_sub);
+    if (button((SDL_Rect){x, y, w, 30}, "Full-screen show  (F11)", 0)) show_toggle();
+    y += 42;
+    if (vis_sub == 0) {
     text(x, y, "SPECTRUM", DIM);
     y += font_h + 6;
     draw_spectrum((SDL_Rect){x, y, w, 200});
@@ -2481,6 +2584,10 @@ static int vis_content(int x, int y, int w)
     draw_scope((SDL_Rect){x, y, w / 2 - 6, 150});
     draw_stereo((SDL_Rect){x + w / 2 + 6, y, w / 2 - 6, 150});
     y += 162;
+    text(x, y, "Stereo: a vertical line is mono, a wide cloud is", DIM);
+    text(x, y + font_h + 2, "wide. Below zero, left and right cancel in mono.", DIM);
+    y += 2 * font_h + 12;
+    } else {
     text(x, y, "MASTER", DIM);
     y += font_h + 6;
     for (int c = 0; c < 2; c++) {
@@ -2508,8 +2615,8 @@ static int vis_content(int x, int y, int w)
     text(x, y, "Red at the right of a meter means it went over 0 dB.", DIM);
     text(x, y + font_h + 2, "Click a master meter to clear the clip lights.", DIM);
     y += 2 * font_h + 14;
-    if (button((SDL_Rect){x, y, w, 32}, "Full-screen show  (F11)", 0)) show_toggle();
-    return y + 44;
+    }
+    return y;
 }
 
 static int vis_scroll, vis_content_h;
@@ -2518,7 +2625,7 @@ static void vis_pane(void)
 {
     SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
     fill(pane, PANEL);
-    line(pane.x, pane.y, pane.x, pane.y + pane.h, LINE);
+    line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;
     if (inside && wheel_y && drag.kind == D_NONE) {
@@ -2687,136 +2794,136 @@ static void show_toggle(void)
     if (!headless) SDL_SetWindowFullscreen(win, show_open ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
-/* ---------------------------------------------------------------- panels */
+/* ---------------------------------------------------------------- the rail and panels */
 
-static void top_bar(void)
+/* A column of category buttons down the left. One panel is open beside it at a time; clicking
+ * the open one again hides it and gives the timeline the room. */
+#define RAIL_W 70
+static int *const RAIL_FLAG[RI_COUNT] = {&sounds_open, &theory_open, &pads_open, &mixer_open, &vis_open, &settings_open};
+static const char *const RAIL_NAME[RI_COUNT] = {"Sounds", "Theory", "Pads", "Mixer", "Visual", "Settings"};
+static int last_panel = RI_SOUNDS;
+
+static void open_panel(int which)        /* toggles it; the others close */
 {
-    char buf[96];
-    fill((SDL_Rect){0, 0, W, L.top}, PANEL);
-    line(0, L.top - 1, W, L.top - 1, LINE);
-    int x = 10, y = 9, h = 30;
-    file_btn = (SDL_Rect){x, y, 52, h};
-    if (button(file_btn, "File", menu_open)) menu_open = !menu_open;
-    x += 58;
-    if (button2((SDL_Rect){x, y, 54, h}, "Undo", 0, nundo > 0 || !state_same(&committed))) undo_redo(0);
-    x += 58;
-    if (button2((SDL_Rect){x, y, 54, h}, "Redo", 0, nredo > 0)) undo_redo(1);
-    x += 66;
-    if (button((SDL_Rect){x, y, 72, h}, P.playing ? "Stop" : "Play", P.playing)) toggle_play();
-    x += 80;
-    if (button((SDL_Rect){x, y, 62, h}, "Loop", P.loop)) toggle_loop();
-    x += 70;
-    number((SDL_Rect){x, y, 100, h}, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
-    x += 106;
-    snprintf(buf, sizeof buf, "Snap %s", SNAP_NAMES[snap_i]);
-    if (button((SDL_Rect){x, y, 96, h}, buf, 0)) snap_i = (snap_i + 1) % 6;
-    x += 102;
-    snprintf(buf, sizeof buf, "%g kHz", SR / 1000.0);
-    if (button((SDL_Rect){x, y, 84, h}, buf, 0)) {        /* project rate: cycle */
-        int next = PROJECT_RATES[0];
-        for (int i = 0; i < 6; i++)
-            if (PROJECT_RATES[i] == SR) next = PROJECT_RATES[(i + 1) % 6];
-        set_rate(next);
-    }
-    x += 90;
-    if (button((SDL_Rect){x, y, 70, h}, "Export", 0)) open_export();
-    x += 78;
-    if (button((SDL_Rect){x, y, 70, h}, "Theory", theory_open)) {
-        theory_open = !theory_open;
-        pads_open = mixer_open = vis_open = 0;
-    }
-    x += 74;
-    if (button((SDL_Rect){x, y, 56, h}, "Pads", pads_open)) {
-        pads_open = !pads_open;
-        theory_open = mixer_open = vis_open = 0;
-    }
-    x += 60;
-    if (button((SDL_Rect){x, y, 62, h}, "Mixer", mixer_open)) {
-        mixer_open = !mixer_open;
-        theory_open = pads_open = vis_open = 0;
-    }
-    x += 66;
-    if (button((SDL_Rect){x, y, 62, h}, "Visual", vis_open)) {
-        vis_open = !vis_open;
-        theory_open = pads_open = mixer_open = 0;
-    }
-    x += 74;
+    int was = *RAIL_FLAG[which];
+    for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+    *RAIL_FLAG[which] = !was;
+    if (!was) last_panel = which;
+}
 
-    double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
-    snprintf(buf, sizeof buf, "bar %d  beat %.2f", (int)(beats / 4) + 1, fmod(beats, 4.0) + 1);
-    text(x, y + (h - font_h) / 2, buf, HEAD);
-    x += text_w("bar 000  beat 0.00") + 20;
-    snprintf(buf, sizeof buf, "%02d:%06.3f", (int)(secs / 60), fmod(secs, 60.0));
-    text(x, y + (h - font_h) / 2, buf, TEXT);
-
-    x += text_w("00:00.000") + 16;
-    if (W - 110 > x) {                          /* master level, when there's room */
-        meter_draw((SDL_Rect){W - 100, y + 6, 88, 7}, &master_meter[0], 0);
-        meter_draw((SDL_Rect){W - 100, y + 17, 88, 7}, &master_meter[1], 0);
+static void rail_icon(int kind, int cx, int cy, Col c)
+{
+    switch (kind) {
+    case RI_SOUNDS: {                           /* a waveform */
+        static const int ys[] = {0, -6, 5, -9, 8, -4, 3, 0};
+        for (int i = 0; i < 7; i++) line(cx - 10 + i * 3, cy + ys[i], cx - 10 + (i + 1) * 3, cy + ys[i + 1], c);
+        for (int i = 0; i < 7; i++) line(cx - 10 + i * 3, cy + ys[i] + 1, cx - 10 + (i + 1) * 3, cy + ys[i + 1] + 1, c);
+        break;
+    }
+    case RI_THEORY:                             /* a note */
+        disc(cx - 3, cy + 5, 4, c);
+        fill((SDL_Rect){cx, cy - 9, 2, 14}, c);
+        line(cx + 1, cy - 9, cx + 7, cy - 5, c);
+        line(cx + 1, cy - 8, cx + 7, cy - 4, c);
+        break;
+    case RI_PADS:                               /* a 2x2 grid */
+        for (int i = 0; i < 4; i++) fill((SDL_Rect){cx - 9 + (i % 2) * 10, cy - 9 + (i / 2) * 10, 8, 8}, c);
+        break;
+    case RI_MIXER:                              /* three faders */
+        for (int i = 0; i < 3; i++) {
+            int fx = cx - 7 + i * 7, ky = cy + (i == 1 ? -4 : i == 0 ? 3 : -1);
+            line(fx, cy - 9, fx, cy + 9, c);
+            fill((SDL_Rect){fx - 3, ky - 2, 7, 4}, c);
+        }
+        break;
+    case RI_VISUAL:                             /* rising bars */
+        for (int i = 0; i < 4; i++) {
+            int h = 5 + i * 4;
+            fill((SDL_Rect){cx - 9 + i * 5, cy + 9 - h, 3, h}, c);
+        }
+        break;
+    case RI_SETTINGS:                           /* a gear */
+        for (int i = 0; i < 8; i++) {
+            double a = i * VIS_PI / 4;
+            int x0 = cx + (int)(cos(a) * 6), y0 = cy + (int)(sin(a) * 6), x1 = cx + (int)(cos(a) * 10), y1 = cy + (int)(sin(a) * 10);
+            line(x0, y0, x1, y1, c);
+            line(x0 + 1, y0, x1 + 1, y1, c);
+        }
+        disc(cx, cy, 7, c);
+        disc(cx, cy, 3, PANEL);
+        break;
     }
 }
 
-static void left_panel(void)
+static void rail(void)
 {
-    SDL_Rect panel = {0, L.top, L.left, H - L.top - L.status};
-    fill(panel, PANEL);
-    line(L.left - 1, L.top, L.left - 1, H - L.status, LINE);
-    int x = 12, y = L.top + 12, w = L.left - 24;
-
-    text(x, y, "GENERATE", DIM);
-    y += 24;
-    int bw = (w - 3 * 4) / 4;
-    for (int i = 0; i < WAVE_COUNT; i++) {
-        SDL_Rect r = {x + (i % 4) * (bw + 4), y + (i / 4) * 30, bw, 26};
-        if (button(r, WAVE_NAMES[i], G.wave == i)) G.wave = i;
-    }
-    y += 64;
-    int drum = G.wave >= WAVE_KICK;
-    if (!drum) {
-        note_number((SDL_Rect){x, y, w, 26}, "Note", &G.note);
-        y += 30;
-    }
-    number((SDL_Rect){x, y, w, 26}, "Length", &G.beats, 0.0625, 32, 0.01, "%.2f beats");
-    y += 30;
-    number((SDL_Rect){x, y, w, 26}, "Volume", &G.volume, 0, 1, 0.005, "%.2f");
-    y += 30;
-    if (!drum) {
-        number((SDL_Rect){x, y, w, 26}, "Attack", &G.attack_ms, 0, 2000, 1, "%.0f ms");
-        y += 30;
-        number((SDL_Rect){x, y, w, 26}, "Release", &G.release_ms, 0, 4000, 2, "%.0f ms");
-        y += 30;
-    } else {
-        y += 60;
-    }
-    number((SDL_Rect){x, y, w, 26}, "Tuning A4", &P.a4, 415, 466, 0.05, "%.1f Hz");
-    y += 30;
-    if (button((SDL_Rect){x, y + 2, w, 30}, "+ Generate sound", 0)) {
-        G.a4 = P.a4;
-        int idx = sample_generate(&P, &G);
-        if (idx >= 0) {
-            status("Generated \"%s\". Drag it onto a track.", P.samples[idx].name);
-            preview(idx);
-            lib_scroll = P.nsamples > 6 ? P.nsamples - 6 : 0;
-        } else {
-            status("Library is full");
+    SDL_Rect r = {0, L.top, RAIL_W, H - L.top - L.status};
+    fill(r, tone(PANEL, 0.8f));
+    line(RAIL_W - 1, r.y, RAIL_W - 1, r.y + r.h, LINE);
+    for (int i = 0; i < RI_COUNT; i++) {
+        int y = i == RI_SETTINGS ? r.y + r.h - 62 : r.y + 6 + i * 62;
+        SDL_Rect b = {4, y, RAIL_W - 8, 56};
+        int on = *RAIL_FLAG[i], hov = hit(b) && drag.kind == D_NONE;
+        if (on || hov) fill(b, on ? PANEL3 : PANEL2);
+        if (on) fill((SDL_Rect){0, y + 6, 3, 44}, ACCENT);
+        Col c = on ? ACCENT : hov ? TEXT : DIM;
+        rail_icon(i, RAIL_W / 2, y + 20, c);
+        text(RAIL_W / 2 - text_w(RAIL_NAME[i]) / 2, y + 36, RAIL_NAME[i], on ? TEXT : DIM);
+        if (hov && lpress) {
+            open_panel(i);
+            lpress = 0;
         }
     }
-    y += 50;
+}
 
+/* the open panel's rectangle (and scrolling: a panel scrolls when its content is taller) */
+static SDL_Rect panel_rect(void) { return (SDL_Rect){L.pane_x, L.top, L.pane_w, H - L.top - L.status}; }
+
+static int panel_begin(SDL_Rect pane, int *scroll, int content_h, int *saved_press)
+{
+    fill(pane, PANEL);
+    line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
+    int inside = hit(pane);
+    *saved_press = lpress;
+    if (!inside) lpress = 0;
+    if (inside && wheel_y && drag.kind == D_NONE) {
+        *scroll -= wheel_y * 48;
+        wheel_y = 0;
+    }
+    int max_scroll = content_h - pane.h > 0 ? content_h - pane.h : 0;
+    *scroll = *scroll < 0 ? 0 : *scroll > max_scroll ? max_scroll : *scroll;
+    SDL_RenderSetClipRect(ren, &pane);
+    return inside;
+}
+
+static void panel_end(SDL_Rect pane, int *scroll, int content_h, int inside, int saved_press)
+{
+    scrollbar(pane, scroll, content_h);
+    SDL_RenderSetClipRect(ren, NULL);
+    if (!inside) lpress = saved_press;
+}
+
+/* ---- Sounds: the library, and making new sounds */
+
+static int sounds_scroll, sounds_content_h;
+
+static void library_list(int x, int y, int w, int bottom)
+{
     char buf[64];
     static int vis[MAX_SAMPLES];              /* pitched/reversed copies made for clips are hidden */
     int nvis = 0;
     for (int i = 0; i < P.nsamples; i++)
         if (!P.samples[i].pitched) vis[nvis++] = i;
-    snprintf(buf, sizeof buf, "LIBRARY (%d)", nvis);
+    snprintf(buf, sizeof buf, "%d sound%s", nvis, nvis == 1 ? "" : "s");
     text(x, y, buf, DIM);
-    y += 24;
-    SDL_Rect list = {x, y, w, H - L.status - y - 8};
+    y += font_h + 10;
+    SDL_Rect list = {x, y, w, bottom - y - 2 * font_h - 20};
     int item_h = 26, visible = list.h / item_h;
+    if (visible < 1) visible = 1;
     if (nvis == 0) {
-        text(x, y + 4, "Generate a sound above, or drop", DIM);
-        text(x, y + 4 + font_h + 2, "audio files (wav, flac, ogg, mp3)", DIM);
-        text(x, y + 4 + 2 * (font_h + 2), "onto this window.", DIM);
+        text(x, y + 4, "Nothing here yet. Make one under", DIM);
+        text(x, y + 4 + font_h + 2, "New sound, or drop audio files", DIM);
+        text(x, y + 4 + 2 * (font_h + 2), "(wav, flac, ogg, mp3) on the window.", DIM);
         return;
     }
     if (hit(list) && wheel_y && drag.kind == D_NONE) {
@@ -2825,12 +2932,13 @@ static void left_panel(void)
     }
     int max_scroll = nvis - visible > 0 ? nvis - visible : 0;
     lib_scroll = lib_scroll < 0 ? 0 : lib_scroll > max_scroll ? max_scroll : lib_scroll;
+    int lw = max_scroll > 0 ? w - 14 : w;
     for (int row = lib_scroll; row < nvis && row < lib_scroll + visible; row++) {
         int i = vis[row];
-        SDL_Rect r = {x, y + (row - lib_scroll) * item_h, w, item_h - 3};
+        SDL_Rect r = {x, y + (row - lib_scroll) * item_h, lw, item_h - 3};
         lib_rects[i] = r;
         int hov = hit(r) && drag.kind == D_NONE;
-        fill(r, P.preview == i ? shade(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
+        fill(r, P.preview == i ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
         snprintf(buf, sizeof buf, "%.2fs", (double)P.samples[i].frames / SR);
         int dw = text_w(buf);
         text_clip((SDL_Rect){r.x + 6, r.y, r.w - dw - 18, r.h}, r.x + 8, r.y + (r.h - font_h) / 2,
@@ -2844,13 +2952,377 @@ static void left_panel(void)
     if (max_scroll > 0) {                       /* a scrollbar in pixels, the list in whole rows */
         static int lib_px;
         if (!(drag.kind == D_SCROLL && drag.inum == &lib_px)) lib_px = lib_scroll * item_h;
-        SDL_Rect area = {x, y, w + 12, visible * item_h};
-        SDL_RenderSetClipRect(ren, &(SDL_Rect){0, area.y, L.left - 1, area.h});
+        SDL_Rect area = {x, y, w + 2, visible * item_h};
         scrollbar(area, &lib_px, nvis * item_h);
-        SDL_RenderSetClipRect(ren, NULL);
         lib_scroll = (lib_px + item_h / 2) / item_h;
     }
+    text(x, bottom - 2 * font_h - 10, "Click to hear, drag onto a track.", DIM);
+    text(x, bottom - font_h - 6, "Drop audio files here to import.", DIM);
 }
+
+static int new_sound(int x, int y, int w)
+{
+    int hw = (w - 8) / 2;
+    text(x, y, "SOUND", DIM);
+    y += font_h + 8;
+    int bw = (w - 3 * 4) / 4;
+    for (int i = 0; i < WAVE_COUNT; i++) {
+        SDL_Rect r = {x + (i % 4) * (bw + 4), y + (i / 4) * 30, bw, 26};
+        if (button(r, WAVE_NAMES[i], G.wave == i)) G.wave = i;
+    }
+    y += 70;
+    int drum = G.wave >= WAVE_KICK;
+    if (!drum) note_number((SDL_Rect){x, y, hw, 26}, "Note", &G.note);
+    number((SDL_Rect){drum ? x : x + hw + 8, y, drum ? w : hw, 26}, "Length", &G.beats, 0.0625, 32, 0.01, "%.2f b");
+    y += 34;
+    number((SDL_Rect){x, y, hw, 26}, "Volume", &G.volume, 0, 1, 0.005, "%.2f");
+    number((SDL_Rect){x + hw + 8, y, hw, 26}, "A4", &P.a4, 415, 466, 0.05, "%.1f Hz");
+    y += 34;
+    if (!drum) {
+        text(x, y, "ENVELOPE", DIM);
+        y += font_h + 8;
+        number((SDL_Rect){x, y, hw, 26}, "Attack", &G.attack_ms, 0, 2000, 1, "%.0f ms");
+        number((SDL_Rect){x + hw + 8, y, hw, 26}, "Release", &G.release_ms, 0, 4000, 2, "%.0f ms");
+        y += 34;
+    }
+    y += 6;
+    if (button((SDL_Rect){x, y, w, 32}, "+ Add to library", 1)) {
+        G.a4 = P.a4;
+        int idx = sample_generate(&P, &G);
+        if (idx >= 0) {
+            status("Made \"%s\": it's in the library, drag it onto a track", P.samples[idx].name);
+            preview(idx);
+            lib_scroll = P.nsamples;
+            sounds_sub = 0;                     /* show it where it went */
+        } else {
+            status("Library is full");
+        }
+    }
+    y += 44;
+    text(x, y, "Chords, scales and drum beats", DIM);
+    text(x, y + font_h + 2, "are in the Theory panel.", DIM);
+    return y + 2 * font_h + 10;
+}
+
+static void sounds_pane(void)
+{
+    SDL_Rect pane = panel_rect();
+    int saved, inside = panel_begin(pane, &sounds_scroll, sounds_content_h, &saved);
+    int x = pane.x + 12, w = pane.w - 24, y0 = pane.y + 10 - (sounds_sub ? sounds_scroll : 0), y = y0;
+    static const char *const SUBS[] = {"Library", "New sound"};
+    y = subtabs(x, y, w, SUBS, 2, &sounds_sub);
+    if (sounds_sub == 0) {
+        library_list(x, y, w, pane.y + pane.h);
+        sounds_content_h = 0;                   /* the list scrolls itself */
+    } else {
+        y = new_sound(x, y, w);
+        sounds_content_h = y - y0 + 10;
+    }
+    panel_end(pane, &sounds_scroll, sounds_content_h, inside, saved);
+}
+
+/* ---- Settings */
+
+static char audio_out[256];             /* output device name, "" = the system default */
+static int settings_scroll, settings_content_h;
+static void settings_save(void);
+static void theme_follow(void);
+
+static int settings_content(int x, int y, int w)
+{
+    char buf[1200];
+    static const char *const SUBS[] = {"Look", "Audio", "Input", "Keys", "About"};
+    y = subtabs(x, y, w, SUBS, 5, &settings_sub);
+    int tw = (w - 8) / 3;
+    switch (settings_sub) {
+    case 0: {
+        y = section(x, y, w, "THEME");
+        static const char *const T[] = {"Dark", "Light", "System"};
+        for (int i = 0; i < 3; i++)
+            if (button((SDL_Rect){x + i * (tw + 4), y, tw, 30}, T[i], theme_choice == i)) {
+                theme_choice = i;
+                if (i == THEME_SYSTEM) theme_follow();
+                else theme_apply(i == THEME_LIGHT);
+                settings_save();
+            }
+        y += 40;
+        text(x, y, theme_choice == THEME_SYSTEM ? (theme_light ? "Following your desktop: light right now."
+                                                               : "Following your desktop: dark right now.")
+                                                 : "System follows your desktop's dark/light setting.", DIM);
+        y += font_h + 16;
+        y = section(x, y, w, "PREVIEW");
+        for (int t = 0; t < 8; t++) {             /* the track colours on this background */
+            SDL_Rect c = {x + t * (w / 8), y, w / 8 - 4, 34};
+            fill(c, wash(TRACK_COL[t], 0.42f));
+            fill((SDL_Rect){c.x, c.y, c.w, 10}, wash(TRACK_COL[t], 0.78f));
+        }
+        y += 46;
+        text(x, y, "The full-screen show is always dark.", DIM);
+        y += font_h + 10;
+        break;
+    }
+    case 1: {
+        y = section(x, y, w, "OUTPUT");
+        int n = SDL_GetNumAudioDevices(0);
+        if (button((SDL_Rect){x, y, w, 28}, "System default", audio_out[0] == 0)) {
+            audio_out[0] = 0;
+            open_audio();
+            settings_save();
+        }
+        y += 32;
+        for (int i = 0; i < n && i < 12; i++) {
+            const char *name = SDL_GetAudioDeviceName(i, 0);
+            if (!name) continue;
+            if (button((SDL_Rect){x, y, w, 28}, name, !strcmp(audio_out, name))) {
+                snprintf(audio_out, sizeof audio_out, "%s", name);
+                open_audio();
+                settings_save();
+            }
+            y += 32;
+        }
+        y += 8;
+        y = section(x, y, w, "PROJECT");
+        text(x, y + 6, "Sample rate", DIM);
+        y += 28;
+        static const char *const RL[6] = {"44.1k", "48k", "88.2k", "96k", "176.4k", "192k"};
+        int rw = (w - 5 * 4) / 6;
+        for (int i = 0; i < 6; i++)
+            if (button((SDL_Rect){x + i * (rw + 4), y, rw, 28}, RL[i], SR == PROJECT_RATES[i]) && SR != PROJECT_RATES[i])
+                set_rate(PROJECT_RATES[i]);
+        y += 36;
+        fnumber((SDL_Rect){x, y, w, 26}, "Master volume", &P.master, 0, 1.5, 0.004, "%.2f");
+        y += 36;
+        text(x, y, "The rate is saved with the project; higher rates keep", DIM);
+        text(x, y + font_h + 2, "more detail but use more memory and processor.", DIM);
+        y += 2 * font_h + 12;
+        break;
+    }
+    case 2:
+        y = section(x, y, w, "DEVICES");
+        y = devices_section(x, y, w);
+        y += 10;
+        y = section(x, y, w, "MIDI");
+        if (button((SDL_Rect){x, y, w, 28}, inst_midi ? "MIDI keys play the instrument: on" : "MIDI keys play the instrument: off",
+                   inst_midi)) {
+            inst_midi = !inst_midi;
+            binds_changed = 1;
+        }
+        y += 34;
+        if (button((SDL_Rect){x, y, w, 28}, "Stop MIDI notes triggering pads", 0)) {
+            LOCK();
+            for (int i = 0; i < NPADS; i++) binds[i].midi = -1;
+            UNLOCK();
+            binds_changed = 1;
+            status("MIDI notes no longer trigger pads: every key plays the instrument");
+        }
+        y += 38;
+        text(x, y, "Pad bindings belong to your hardware, so they're kept", DIM);
+        text(x, y + font_h + 2, "for every project. Change them in Pads > Learn input.", DIM);
+        y += 2 * font_h + 12;
+        break;
+    case 3: {
+        static const char *const KEYS[][2] = {
+            {"Space", "play / stop"}, {"Home", "back to the start"}, {"L", "loop on/off"},
+            {"Ctrl+Z / Ctrl+Shift+Z", "undo / redo"}, {"Ctrl+S, Ctrl+O, Ctrl+N", "save, open, new"},
+            {"Ctrl+E", "export"}, {"Ctrl+1 .. Ctrl+6", "open a panel"}, {"Ctrl+B", "hide / show the panel"},
+            {"Ctrl+,", "settings"}, {"F11", "full-screen show"}, {"Ctrl+A, Esc", "select all, none"},
+            {"Shift+click, drag a box", "select several"}, {"Delete", "delete selected"},
+            {"Ctrl+C / X / V", "copy, cut, paste"}, {"Ctrl+D", "duplicate"}, {"Arrows", "nudge selected"},
+            {"[ and ]", "transpose selected"}, {"Ctrl+R", "reverse selected"}, {"Alt+wheel", "clip gain"},
+            {"Ctrl+wheel, + / -", "zoom"}, {"Shift (dragging)", "no snapping"}, {"Page Up / Down", "scroll a panel"}};
+        for (size_t i = 0; i < sizeof KEYS / sizeof *KEYS; i++) {
+            text(x, y, KEYS[i][0], TEXT);
+            text(x + w / 2, y, KEYS[i][1], DIM);
+            y += font_h + 7;
+        }
+        y += 6;
+        break;
+    }
+    case 4: {
+        snprintf(buf, sizeof buf, "tinydaw %s", TINYDAW_VERSION);
+        text(x, y, buf, TEXT);
+        y += font_h + 4;
+        text(x, y, "A small timeline sequencer.", DIM);
+        y += font_h + 16;
+        y = section(x, y, w, "WHERE THINGS GO");
+        char dir[900];
+        projects_dir(dir, sizeof dir);
+        const char *rows[][2] = {{"Projects", dir}, {"Pad inputs", binds_file()}, {"Autosave", autosave_file()}};
+        for (int i = 0; i < 3; i++) {
+            text(x, y, rows[i][0], DIM);
+            y += font_h + 2;
+            text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, rows[i][1], TEXT);
+            y += font_h + 8;
+        }
+        y += 6;
+        y = section(x, y, w, "BUILT WITH");
+        text(x, y, "SDL2, SDL2_ttf, libsndfile, libsamplerate,", DIM);
+        text(x, y + font_h + 2, "ALSA (MIDI on Linux), DejaVu fonts.", DIM);
+        y += 2 * font_h + 10;
+        text(x, y, "github.com/WaywardSkylark/tinydaw", TEXT);
+        y += font_h + 10;
+        break;
+    }
+    }
+    return y;
+}
+
+static void settings_pane(void)
+{
+    SDL_Rect pane = panel_rect();
+    int saved, inside = panel_begin(pane, &settings_scroll, settings_content_h, &saved);
+    int y0 = pane.y + 10 - settings_scroll;
+    int y = settings_content(pane.x + 14, y0, pane.w - 28);
+    settings_content_h = y - y0 + 12;
+    panel_end(pane, &settings_scroll, settings_content_h, inside, saved);
+}
+
+/* ---- settings that belong to this computer (theme, output device), not to a project */
+
+static const char *settings_file(void)
+{
+    static char path[1024];
+    if (!path[0]) {
+        char dir[900];
+        user_dir("config", dir, sizeof dir);
+        ensure_dir(dir);
+        snprintf(path, sizeof path, "%s/settings.conf", dir);
+    }
+    return path;
+}
+
+static void settings_save(void)
+{
+    if (headless) return;
+    FILE *f = fopen(settings_file(), "w");
+    if (!f) return;
+    fprintf(f, "# tinydaw settings\ntheme %d\naudio_output %s\npanel %d\n", theme_choice, audio_out, last_panel);
+    fclose(f);
+}
+
+static void settings_load(void)
+{
+    FILE *f = fopen(settings_file(), "r");
+    if (!f) return;
+    char line_[400];
+    while (fgets(line_, sizeof line_, f)) {
+        line_[strcspn(line_, "\r\n")] = 0;
+        int v;
+        if (sscanf(line_, "theme %d", &v) == 1 && v >= 0 && v <= 2) theme_choice = v;
+        else if (!strncmp(line_, "audio_output ", 13)) snprintf(audio_out, sizeof audio_out, "%.255s", line_ + 13);
+        else if (sscanf(line_, "panel %d", &v) == 1 && v >= 0 && v < RI_COUNT) last_panel = v;
+    }
+    fclose(f);
+}
+
+/* ---- following the desktop's dark/light preference (asked on a thread: it runs a program) */
+
+static SDL_atomic_t theme_probe;        /* 0 idle/unknown, 1 dark, 2 light, 3 asking */
+
+static int ask_desktop_theme(void)       /* 1 dark, 2 light, 0 unknown */
+{
+#ifdef _WIN32
+    DWORD v = 1, sz = sizeof v;
+    if (RegGetValueA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     "AppsUseLightTheme", RRF_RT_REG_DWORD, NULL, &v, &sz) == ERROR_SUCCESS)
+        return v ? 2 : 1;
+    return 0;
+#else
+    char out[256] = "";
+    /* the desktop portal works on GNOME, KDE, Cinnamon and others: 1 = dark, 2 = light */
+    FILE *p = popen("timeout 2 gdbus call --session --dest org.freedesktop.portal.Desktop "
+                    "--object-path /org/freedesktop/portal/desktop "
+                    "--method org.freedesktop.portal.Settings.ReadOne org.freedesktop.appearance color-scheme "
+                    "2>/dev/null", "r");
+    if (p) {
+        if (!fgets(out, sizeof out, p)) out[0] = 0;
+        pclose(p);
+        char *u = strstr(out, "uint32 ");
+        if (u && (u[7] == '1' || u[7] == '2')) return u[7] - '0';
+    }
+    p = popen("timeout 2 gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null", "r");
+    if (p) {                                     /* otherwise go by the theme's name */
+        out[0] = 0;
+        if (!fgets(out, sizeof out, p)) out[0] = 0;
+        pclose(p);
+        if (out[0]) return strstr(out, "dark") || strstr(out, "Dark") ? 1 : 2;
+    }
+    return 0;
+#endif
+}
+
+static int theme_thread(void *arg)
+{
+    (void)arg;
+    int t = ask_desktop_theme();
+    SDL_AtomicSet(&theme_probe, t ? t : 1);
+    return 0;
+}
+
+static void theme_follow(void)          /* ask again (at start, when the window comes back to front) */
+{
+    if (theme_choice != THEME_SYSTEM || SDL_AtomicGet(&theme_probe) == 3) return;
+    SDL_AtomicSet(&theme_probe, 3);
+    SDL_Thread *t = SDL_CreateThread(theme_thread, "theme", NULL);
+    if (t) SDL_DetachThread(t);
+    else SDL_AtomicSet(&theme_probe, 1);
+}
+
+static void theme_poll(void)
+{
+    int t = SDL_AtomicGet(&theme_probe);
+    if (t != 1 && t != 2) return;
+    SDL_AtomicSet(&theme_probe, 0);
+    if (theme_choice == THEME_SYSTEM && (t == 2) != theme_light) theme_apply(t == 2);
+}
+
+/* ---------------------------------------------------------------- panels */
+
+static void top_bar(void)
+{
+    char buf[96];
+    fill((SDL_Rect){0, 0, W, L.top}, PANEL);
+    line(0, L.top - 1, W, L.top - 1, LINE);
+    int x = 10, y = 9, h = 30;
+    file_btn = (SDL_Rect){x, y, 44, h};          /* the menu: files, export, settings, show */
+    if (button(file_btn, "", menu_open)) menu_open = !menu_open;
+    for (int i = 0; i < 3; i++) fill((SDL_Rect){x + 13, y + 9 + i * 5, 18, 2}, menu_open ? DARK : TEXT);
+    x += 54;
+    if (button2((SDL_Rect){x, y, 54, h}, "Undo", 0, nundo > 0 || !state_same(&committed))) undo_redo(0);
+    x += 58;
+    if (button2((SDL_Rect){x, y, 54, h}, "Redo", 0, nredo > 0)) undo_redo(1);
+    x += 66;
+    line(x - 6, y + 4, x - 6, y + h - 4, LINE);
+    if (button((SDL_Rect){x, y, 72, h}, P.playing ? "Stop" : "Play", P.playing)) toggle_play();
+    x += 76;
+    if (button((SDL_Rect){x, y, 62, h}, "Loop", P.loop)) toggle_loop();
+    x += 72;
+    line(x - 6, y + 4, x - 6, y + h - 4, LINE);
+    number((SDL_Rect){x, y, 100, h}, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
+    x += 104;
+    snprintf(buf, sizeof buf, "Snap %s", SNAP_NAMES[snap_i]);
+    if (button((SDL_Rect){x, y, 96, h}, buf, 0)) snap_i = (snap_i + 1) % 6;
+    x += 110;
+    line(x - 6, y + 4, x - 6, y + h - 4, LINE);
+
+    double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
+    snprintf(buf, sizeof buf, "bar %d  beat %.2f", (int)(beats / 4) + 1, fmod(beats, 4.0) + 1);
+    text(x + 6, y + (h - font_h) / 2, buf, HEAD);
+    x += text_w("bar 000  beat 0.00") + 26;
+    snprintf(buf, sizeof buf, "%02d:%06.3f", (int)(secs / 60), fmod(secs, 60.0));
+    text(x, y + (h - font_h) / 2, buf, TEXT);
+    x += text_w("00:00.000") + 16;
+
+    if (W - 110 > x) {                          /* master level */
+        meter_draw((SDL_Rect){W - 100, y + 6, 88, 7}, &master_meter[0], 0);
+        meter_draw((SDL_Rect){W - 100, y + 17, 88, 7}, &master_meter[1], 0);
+        snprintf(buf, sizeof buf, "%.80s%s", proj_path[0] ? base_name(proj_path) : "untitled", is_dirty() ? " *" : "");
+        int pw = W - 116 - x;                    /* and the project's name, when there's room */
+        if (pw > 60) text_clip((SDL_Rect){x, y, pw, h}, W - 116 - text_w(buf) > x ? W - 116 - text_w(buf) : x,
+                               y + (h - font_h) / 2, buf, DIM);
+    }
+}
+
 
 static void track_headers(void)
 {
@@ -2868,17 +3340,18 @@ static void track_headers(void)
         int y = L.lanes_y + t * L.lane_h;
         SDL_Rect r = {L.left, y, L.head, L.lane_h};
         Track *tr = &P.tracks[t];
-        fill(r, t % 2 ? PANEL : shade(PANEL, 1.08f));
+        fill(r, t % 2 ? PANEL : tone(PANEL, 1.08f));
         fill((SDL_Rect){L.left, y, 4, L.lane_h}, TRACK_COL[t]);
         line(L.left, y + L.lane_h - 1, L.left + L.head, y + L.lane_h - 1, LINE);
         int bh = compact ? L.lane_h - 10 : 20, by = compact ? y + 3 : y + 5;
         if (bh > 20) bh = 20;
-        if (mixer_open && t == sel_track) fill((SDL_Rect){L.left + 4, y, L.head - 4, L.lane_h - 1}, shade(PANEL3, 1.1f));
+        if (mixer_open && t == sel_track) fill((SDL_Rect){L.left + 4, y, L.head - 4, L.lane_h - 1}, tone(PANEL3, 1.1f));
         text_clip((SDL_Rect){L.left + 8, y, L.head - 76, L.lane_h}, L.left + 12, by + (bh - font_h) / 2, tr->name, TEXT);
         if (track_has_fx(tr) && L.lane_h >= 56) text(L.left + 12, by + bh + 3, "fx", ACCENT);
         SDL_Rect name_r = {L.left + 4, y, L.head - 66, L.lane_h - 16};
         if (drag.kind == D_NONE && hit(name_r) && lpress) {      /* pick it for the Mixer pane */
             sel_track = t;
+            if (mixer_open) mixer_sub = 1;
             lpress = 0;
         }
         SDL_Rect m = {L.left + L.head - 58, by, 22, bh}, s = {L.left + L.head - 32, by, 22, bh};
@@ -2904,7 +3377,7 @@ static void timeline(void)
     SDL_RenderSetClipRect(ren, &whole);
 
     for (int t = 0; t < P.ntracks; t++)
-        fill((SDL_Rect){L.tl_x, L.lanes_y + t * L.lane_h, L.tl_w, L.lane_h}, t % 2 ? BG : shade(BG, 1.18f));
+        fill((SDL_Rect){L.tl_x, L.lanes_y + t * L.lane_h, L.tl_w, L.lane_h}, t % 2 ? BG : tone(BG, 1.18f));
     fill(ruler, PANEL);
 
     /* loop region */
@@ -2927,7 +3400,7 @@ static void timeline(void)
         if (xd > W) break;
         if (xd < L.tl_x) continue;
         int x = (int)xd, bar = b % 4 == 0;
-        line(x, area.y, x, area.y + area.h, bar ? LINE : shade(LINE, 0.62f));
+        line(x, area.y, x, area.y + area.h, bar ? LINE : tone(LINE, 0.62f));
         line(x, L.top + L.ruler - (bar ? 10 : 5), x, L.top + L.ruler, DIM);
         if (bar && (b / 4) % label_every == 0) {
             char buf[24];
@@ -2944,13 +3417,14 @@ static void timeline(void)
         SDL_Rect r = clip_rect(c);
         if (r.x > W || r.x + r.w < L.tl_x) continue;
         Col col = TRACK_COL[c->track];
-        fill(r, shade(col, 0.42f));
-        fill((SDL_Rect){r.x, r.y, r.w, font_h + 4}, shade(col, 0.78f));
+        fill(r, wash(col, 0.42f));
+        fill((SDL_Rect){r.x, r.y, r.w, font_h + 4}, wash(col, 0.78f));
         const Sample *s = &P.samples[c->sample];
         int body_y = r.y + font_h + 4, body_h = r.h - font_h - 4, mid = body_y + body_h / 2;
         int px0 = r.x > L.tl_x ? r.x : L.tl_x, px1 = r.x + r.w < W ? r.x + r.w : W;
         float wave_gain = c->gain_db == 0 ? 1 : powf(10, c->gain_db / 20);
-        SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
+        Col wave = theme_light ? shade(col, 0.62f) : col;
+        SDL_SetRenderDrawColor(ren, wave.r, wave.g, wave.b, 255);
         for (int px = px0; px < px1; px++) {
             long fa = (long)x_to_frame_raw(px) - c->start + c->offset;
             long fb = (long)x_to_frame_raw(px + 1) - c->start + c->offset;
@@ -2983,7 +3457,7 @@ static void timeline(void)
                 }
             }
         }
-        outline(r, csel[i] ? TEXT : shade(col, 0.95f));
+        outline(r, csel[i] ? TEXT : theme_light ? shade(col, 0.8f) : shade(col, 0.95f));
         if (csel[i]) outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, i == selected ? HEAD : TEXT);
         if (drag.kind == D_NONE && hit(r)) {
             int edge = r.w / 3 < 6 ? r.w / 3 : 6;
@@ -3137,7 +3611,7 @@ static void status_bar(void)
     int y = H - L.status;
     fill((SDL_Rect){0, y, W, L.status}, PANEL);
     line(0, y, W, y, LINE);
-    const char *hint = "Space play · Ctrl+Z undo · Ctrl+S save · [ ] transpose · Alt+wheel gain · F2 pads · F3 mixer";
+    const char *hint = "Space play · Ctrl+Z undo · Ctrl+S save · Ctrl+B hide panel · Settings > Keys lists every shortcut";
     int hw = text_w(hint), show = W - hw > 420;
     int msg_w = W - 24 - (show ? hw + 24 : 0);
     text_clip((SDL_Rect){8, y, msg_w, L.status}, 10, y + (L.status - font_h) / 2, status_msg, TEXT);
@@ -3322,6 +3796,25 @@ static void key(SDL_Keysym k)
                 status(rev ? "Reversed %d clip%s" : "%d clip%s play forwards", sel_count(), sel_count() == 1 ? "" : "s");
             }
             return;
+        case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6:
+            open_panel(k.sym - SDLK_1);
+            return;
+        case SDLK_COMMA:
+            open_panel(RI_SETTINGS);
+            return;
+        case SDLK_b: {                  /* hide the panel, or bring the last one back */
+            int any = 0;
+            for (int i = 0; i < RI_COUNT; i++) any |= *RAIL_FLAG[i];
+            if (any) {
+                for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+            } else {
+                open_panel(last_panel);
+            }
+            return;
+        }
+        case SDLK_q:
+            request(ACT_QUIT, NULL);
+            return;
         case SDLK_a:
             for (int i = 0; i < P.nclips; i++) csel[i] = 1;
             sel_fix_primary();
@@ -3389,27 +3882,15 @@ static void key(SDL_Keysym k)
     case SDLK_MINUS:
     case SDLK_KP_MINUS: zoom(0.8, L.tl_x + L.tl_w / 2); break;
     case SDLK_ESCAPE: sel_clear(); break;
-    case SDLK_F1:
-        theory_open = !theory_open;
-        pads_open = mixer_open = vis_open = 0;
-        break;
-    case SDLK_F2:
-        pads_open = !pads_open;
-        theory_open = mixer_open = vis_open = 0;
-        break;
-    case SDLK_F3:
-        mixer_open = !mixer_open;
-        theory_open = pads_open = vis_open = 0;
-        break;
-    case SDLK_F4:
-        vis_open = !vis_open;
-        theory_open = pads_open = mixer_open = 0;
-        break;
+    case SDLK_F1: open_panel(RI_THEORY); break;
+    case SDLK_F2: open_panel(RI_PADS); break;
+    case SDLK_F3: open_panel(RI_MIXER); break;
+    case SDLK_F4: open_panel(RI_VISUAL); break;
     case SDLK_F11: show_toggle(); break;
     case SDLK_PAGEUP:
     case SDLK_PAGEDOWN: {               /* scroll the open pane, or the library */
         int *sc = theory_open ? &th_scroll : pads_open ? &pads_scroll : mixer_open ? &mixer_scroll
-                : vis_open ? &vis_scroll : NULL;
+                : vis_open ? &vis_scroll : settings_open ? &settings_scroll : sounds_open && sounds_sub ? &sounds_scroll : NULL;
         int page = (H - L.top - L.status) * 9 / 10, dir = k.sym == SDLK_PAGEUP ? -1 : 1;
         if (sc) *sc += dir * page;          /* clamped when the pane is drawn */
         else lib_scroll += dir * 8;
@@ -3499,7 +3980,11 @@ static void open_audio(void)
     want.channels = 2;
     want.samples = SR > 96000 ? 2048 : SR > 48000 ? 1024 : 512;   /* about 10 ms */
     want.callback = audio_cb;
-    dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+    dev = SDL_OpenAudioDevice(audio_out[0] ? audio_out : NULL, 0, &want, &have, 0);
+    if (!dev && audio_out[0]) {         /* that device has gone: use the default */
+        status("Output \"%s\" isn't available: using the default", audio_out);
+        dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+    }
     if (dev) SDL_PauseAudioDevice(dev, 0);
     else status("No audio output: %s", SDL_GetError());
 }
@@ -4189,32 +4674,55 @@ static int selftest(void)
         sim(rr.x + rr.w / 2, rr.y + rr.h / 2, 0, 1, 0, 0);
         check(sel_count() == 1 && selected == 2, "a plain click on one of them selects just that one");
 
-        /* scrollbars */
-        mixer_open = 1;
-        mixer_scroll = 0;
+        /* scrollbars: the Theory panel's Keys page is taller than the window */
+        open_panel(RI_THEORY);
+        theory_tab = 0;
+        th_scroll = 0;
         frame();
         frame();
         SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
         int sx = pane.x + pane.w - 7;
-        check(mixer_content_h > pane.h, "the mixer pane is taller than the window here");
+        check(th_content_h > pane.h, "the Theory panel's Keys page is taller than the window here");
         sim(sx, pane.y + pane.h - 20, 1, 0, 0, 0);
         sim(sx, pane.y + pane.h - 20, 0, 1, 0, 0);
-        check(mixer_scroll > 0, "clicking the scrollbar below its handle scrolls down a page");
-        int before_drag = mixer_scroll;
-        mixer_scroll = 0;
+        check(th_scroll > 0, "clicking the scrollbar below its handle scrolls down a page");
+        th_scroll = 0;
         frame();
         sim(sx, pane.y + 20, 1, 0, 0, 0);
         for (int i = 1; i <= 6; i++) sim(sx, pane.y + 20 + i * 15, 0, 0, 0, 0);
         sim(sx, pane.y + 110, 0, 1, 0, 0);
-        check(mixer_scroll > 0 && drag.kind == D_NONE, "dragging the handle scrolls");
-        (void)before_drag;
+        check(th_scroll > 0 && drag.kind == D_NONE, "dragging the handle scrolls");
         kk.sym = SDLK_PAGEDOWN;
         kk.mod = 0;
-        mixer_scroll = 0;
+        th_scroll = 0;
         key(kk);
         frame();
-        check(mixer_scroll > 0, "Page Down scrolls the open pane");
-        mixer_open = 0;
+        check(th_scroll > 0, "Page Down scrolls the open panel");
+
+        /* the rail and panels */
+        open_panel(RI_MIXER);
+        frame();
+        check(mixer_open && !theory_open && L.pane_w == PANE_W, "opening a panel closes the one that was open");
+        int tl_with = L.tl_w;
+        kk.sym = SDLK_b;
+        kk.mod = KMOD_CTRL;
+        key(kk);
+        frame();
+        check(!mixer_open && L.tl_w > tl_with, "Ctrl+B hides the panel and the timeline takes the room");
+        key(kk);
+        check(mixer_open, "and brings the same panel back");
+        sim(RAIL_W / 2, L.top + 6 + RI_VISUAL * 62 + 20, 1, 0, 0, 0);
+        sim(RAIL_W / 2, L.top + 6 + RI_VISUAL * 62 + 20, 0, 1, 0, 0);
+        check(vis_open && !mixer_open, "clicking a rail button opens its panel");
+        sim(RAIL_W / 2, L.top + 6 + RI_VISUAL * 62 + 20, 1, 0, 0, 0);
+        sim(RAIL_W / 2, L.top + 6 + RI_VISUAL * 62 + 20, 0, 1, 0, 0);
+        check(!vis_open, "and clicking it again hides it");
+        Col bg_dark = BG;
+        theme_apply(1);
+        check(BG.r > 200 && TEXT.r < 60, "the light theme is light, with dark text");
+        theme_apply(0);
+        check(BG.r == bg_dark.r, "and the dark theme comes back exactly");
+        open_panel(RI_SOUNDS);
     }
 
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
@@ -4740,7 +5248,7 @@ static int tab_tempo(int x, int y, int w)
     for (int i = 0; i < NTEMPO_MARKS; i++) {
         const TempoMark *m = &TEMPO_MARKS[i];
         int on = P.bpm >= m->lo && P.bpm < m->hi;
-        if (on) fill((SDL_Rect){x, y - 2, w, font_h + 5}, shade(ACCENT, 0.4f));
+        if (on) fill((SDL_Rect){x, y - 2, w, font_h + 5}, tone(ACCENT, 0.4f));
         text(x + 6, y, m->name, on ? TEXT : DIM);
         snprintf(buf, sizeof buf, "%d-%d BPM", m->lo, m->hi);
         text(x + 150, y, buf, on ? TEXT : DIM);
@@ -4770,7 +5278,7 @@ static int tab_notes(int x, int y, int w)
             double f = P.a4 * pow(2.0, (midi - 69) / 12.0);
             SDL_Rect r = {x + 34 + o * cw, y, cw - 2, font_h + 4};
             int hov = hit(r) && drag.kind == D_NONE;
-            if (midi == G.note) fill(r, shade(ACCENT, 0.5f));
+            if (midi == G.note) fill(r, tone(ACCENT, 0.5f));
             else if (hov) fill(r, PANEL3);
             if (midi == 69) outline(r, ACCENT);
             snprintf(buf, sizeof buf, f < 100 ? "%.2f" : f < 1000 ? "%.1f" : "%.0f", f);
@@ -5075,7 +5583,7 @@ static int tab_genres(int x, int y, int w)
             SDL_Rect r = {x + lab + st * cell, y, cell - 2, ch};
             gn_cell[l][st] = r;
             int hov = hit(r) && drag.kind == D_NONE;
-            fill(r, hov ? PANEL3 : (st / 4) % 2 ? PANEL2 : shade(PANEL2, 1.25f));
+            fill(r, hov ? PANEL3 : (st / 4) % 2 ? PANEL2 : tone(PANEL2, 1.25f));
             char c = gn_pat[gn_sel][l][st];
             Col lc = TRACK_COL[l];
             if (c == 'x') fill((SDL_Rect){r.x + 1, r.y + 2, r.w - 2, r.h - 4}, lc);
@@ -5097,7 +5605,7 @@ static int tab_genres(int x, int y, int w)
         for (int l = 0; l < DRUM_LANES; l++) snprintf(gn_pat[gn_sel][l], 33, "%s", ge->lanes[l]);
     if (button((SDL_Rect){x + 100, y, 96, 24}, "Clear", 0))
         for (int l = 0; l < DRUM_LANES; l++) memset(gn_pat[gn_sel][l], '.', (size_t)ge->steps);
-    text(x + 206, y + 4, "x hit  X accent  o ghost  r roll", DIM);
+    text_clip((SDL_Rect){x + 206, y, w - 206, font_h + 8}, x + 206, y + 4, "hit, accent, ghost, roll", DIM);
     y += 34;
 
     text(x, y + 5, "Bars", DIM);
@@ -5120,7 +5628,7 @@ static int tab_genres(int x, int y, int w)
     y += 38;
     gn_handle = (SDL_Rect){x, y, w, 34};
     int hov = hit(gn_handle) && drag.kind == D_NONE;
-    fill(gn_handle, hov ? shade(ACCENT, 0.55f) : shade(ACCENT, 0.35f));
+    fill(gn_handle, hov ? tone(ACCENT, 0.55f) : tone(ACCENT, 0.35f));
     outline(gn_handle, ACCENT);
     text_center(gn_handle, ":: Drag this beat onto the timeline ::", TEXT);
     if (hov && lpress && drag.kind == D_NONE) {
@@ -5149,7 +5657,7 @@ static void theory_pane(void)
 {
     SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
     fill(pane, PANEL);
-    line(pane.x, pane.y, pane.x, pane.y + pane.h, LINE);
+    line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;                    /* nothing scrolled out of view takes clicks */
     if (inside && wheel_y && drag.kind == D_NONE) {
@@ -5304,14 +5812,15 @@ static void export_dialog(void)
 static void frame(void)
 {
     static int min_for = -1;            /* the pane needs a wider window */
-    int pane = theory_open || pads_open || mixer_open || vis_open;
-    if (min_for != pane) {
-        min_for = pane;
-        SDL_SetWindowMinimumSize(win, pane ? 1240 : 900, 560);
+    int need = 70 + (theory_open || pads_open || mixer_open || vis_open ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0) + 520;
+    if (min_for != need) {              /* the panel plus a usable timeline */
+        min_for = need;
+        SDL_SetWindowMinimumSize(win, need, 560);
         int ww, wh;
         SDL_GetWindowSize(win, &ww, &wh);
-        if (pane && ww < 1240) SDL_SetWindowSize(win, 1240, wh);
+        if (ww < need) SDL_SetWindowSize(win, need, wh);
     }
+    theme_poll();
     layout();
     if (P.playing) {                    /* keep the playhead in view */
         double x = frame_to_x(P.playhead);
@@ -5334,13 +5843,15 @@ static void frame(void)
         show_draw();
     } else {
         top_bar();
-        left_panel();
         track_headers();
         timeline();
+        rail();
         if (theory_open) theory_pane();
         else if (pads_open) pads_pane();
         else if (mixer_open) mixer_pane();
         else if (vis_open) vis_pane();
+        else if (settings_open) settings_pane();
+        else if (sounds_open) sounds_pane();
         status_bar();
     }
     if (modal) {
@@ -5404,6 +5915,7 @@ static void frame(void)
 
 int main(int argc, char **argv)
 {
+    theme_apply(0);
 #ifdef _WIN32
     /* a windowed program has no console; borrow the one it was started from, so --help,
      * --selftest and --export can print */
@@ -5603,6 +6115,12 @@ int main(int argc, char **argv)
     if (headless) {
         binds_default();
     } else {
+        settings_load();
+        if (theme_choice == THEME_SYSTEM) theme_follow();
+        else theme_apply(theme_choice == THEME_LIGHT);
+        if (audio_out[0]) open_audio();          /* the saved output device */
+        open_panel(last_panel);
+        sounds_open = last_panel == RI_SOUNDS;
         binds_load();
         midi_ok = midi_start(midi_in, NULL) == 0;
         if (getenv("TINYDAW_DEBUG_INPUT")) {
@@ -5634,6 +6152,15 @@ int main(int argc, char **argv)
             pads_content_h = 2000;
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
+        if (getenv("TINYDAW_SHOT_LIGHT")) theme_apply(1);
+        if (getenv("TINYDAW_SHOT_PANEL")) {      /* "index[:sub]", or -1 for none */
+            int pn = -1, sub = 0;
+            sscanf(getenv("TINYDAW_SHOT_PANEL"), "%d:%d", &pn, &sub);
+            for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+            if (pn >= 0 && pn < RI_COUNT) open_panel(pn);
+            int *subs[RI_COUNT] = {&sounds_sub, &theory_tab, &pads_sub, &mixer_sub, &vis_sub, &settings_sub};
+            if (pn >= 0 && pn < RI_COUNT) *subs[pn] = sub;
+        }
         if (getenv("TINYDAW_SHOT_VIS") || getenv("TINYDAW_SHOT_SHOW")) {   /* fill the meters with the demo */
             vis_open = getenv("TINYDAW_SHOT_VIS") != NULL;
             show_open = getenv("TINYDAW_SHOT_SHOW") != NULL;
@@ -5746,6 +6273,9 @@ int main(int argc, char **argv)
                 break;
             case SDL_KEYUP:
                 if (pads_take_key(e.key.keysym)) input_event(SRC_KEY, e.key.keysym.scancode, 0, 0, -1);
+                break;
+            case SDL_WINDOWEVENT:               /* the desktop theme may have changed meanwhile */
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) theme_follow();
                 break;
             case SDL_JOYDEVICEADDED: joy_added(e.jdevice.which); break;
             case SDL_JOYDEVICEREMOVED: joy_removed(e.jdevice.which); break;

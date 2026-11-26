@@ -57,8 +57,9 @@ typedef struct {
     BeatSpec beat;
     int beat_mask;          /* which lanes it contains */
     char path[1024];
-    int pitched;            /* a pitched copy of sample `src` (pads and instrument recording) */
-    int src, semis;
+    int pitched;            /* a variant of sample `src`: shifted `semis` semitones and/or reversed.
+                             * Made for clip pitch/reverse and pad recording; hidden in the library */
+    int src, semis, reversed;
 } Sample;
 
 /* A placed region on the timeline that plays part of a sample. All positions in frames. */
@@ -67,13 +68,38 @@ typedef struct {
     long start;             /* timeline position */
     long offset;            /* first frame of the sample that plays */
     long length;            /* frames played */
+    float gain_db;          /* clip volume, 0 = as is */
+    long fade_in, fade_out; /* frames */
 } Clip;
+
+enum { FILT_OFF, FILT_LOW, FILT_HIGH, FILT_BAND, FILT_TYPES };
 
 typedef struct {
     char name[32];
     float volume;
     int mute, solo;
+    float pan;              /* -1 left .. 1 right */
+    int filter;             /* FILT_* */
+    float cutoff, reso;     /* Hz, 0..1 */
+    float eq[3];            /* low, mid, high in dB */
+    float drive;            /* 0..1 */
+    float delay_send, reverb_send;   /* 0..1 */
+    float duck;             /* 0..1: how far the sidechain source pushes this track down */
 } Track;
+
+/* The shared effects every track can send to, plus the sidechain and live controls. */
+#define DELAY_DIVS 8
+extern const double DELAY_BEATS[DELAY_DIVS];
+extern const char *DELAY_NAMES[DELAY_DIVS];
+typedef struct {
+    int delay_div;          /* index into DELAY_BEATS */
+    float delay_feedback, delay_tone, delay_level;
+    int pingpong;
+    float reverb_size, reverb_damp, reverb_level;
+    int sc_source;          /* track whose sound ducks the others, -1 = none */
+    float sc_release;       /* ms */
+    float bend_range;       /* semitones the pitch wheel bends live sounds */
+} MasterFx;
 
 /* ---- pads: library sounds played live from keys, controllers and MIDI ---- */
 
@@ -86,7 +112,8 @@ typedef struct {
     int mode;               /* PAD_* */
     float volume;
     int pitch;              /* semitones */
-    int track;              /* where recorded hits are placed */
+    int track;              /* where it plays through and where recorded hits are placed */
+    float pan;
 } Pad;
 
 /* A sound playing live (a pad hit or an instrument note), mixed on top of the song. */
@@ -94,6 +121,8 @@ typedef struct {
     int active;
     int sample;
     int pad, note;          /* who started it: pad index or -1, MIDI note or -1 */
+    int track;              /* the track whose effects it plays through */
+    float pan;
     double pos, step;       /* step != 1 plays it pitched */
     float gain;
     int loop;
@@ -121,7 +150,11 @@ typedef struct {
     Pad pads[NPADS];
     int inst_sample;        /* the instrument MIDI keys play, -1 = none */
     int inst_root;          /* the note at which it plays unpitched */
+    int inst_track;         /* the track it plays through and records to */
+    MasterFx fx;
     Voice voices[MAX_VOICES];
+    float bend;             /* live pitch wheel, -1..1 (not saved) */
+    float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */
 } Project;
 
 /* ---- export ---- */
@@ -178,15 +211,28 @@ int project_add_track(Project *p, const char *name);   /* new row, or -1 when fu
 int sample_import(Project *p, const char *path, char *err, size_t errlen);
 void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);
 
-/* A copy of sample `src` shifted by `semis` semitones; reuses an existing one. */
+/* A copy of sample `src` shifted by `semis` semitones and/or reversed; reuses an existing one.
+ * Returns src itself for (0, 0). */
+int sample_variant(Project *p, int src, int semis, int reverse);
 int sample_pitched(Project *p, int src, int semis);
+int sample_base(const Project *p, int s);       /* the original a variant was made from */
 
 /* ---- live voices (call with the audio device locked) ---- */
 int voice_start(Project *p, int sample, double step, float gain, int loop, int pad, int note);
 void voice_stop(Project *p, int pad, int note);  /* fades out voices from that pad or note */
 int voice_playing(const Project *p, int pad);
 void voices_clear(Project *p);
-void voices_mix(Project *p, float *out, int frames);
+
+/* ---- the mixer (fx.c): clips and live voices through each track's effects ---- */
+typedef struct Mixer Mixer;
+Mixer *mixer_new(void);             /* sized for the current project rate */
+void mixer_free(Mixer *m);
+int mixer_rate(const Mixer *m);
+/* Adds [start, start + frames) to out. clips = 0 mixes only live voices (stopped transport);
+ * voices = 0 leaves them out (export). only_track >= 0 renders that track alone (a stem),
+ * ignoring mute/solo. */
+void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int frames, int only_track, int voices);
+int project_has_tails(const Project *p);        /* any delay or reverb in use */
 
 /* ---- project files (project.c) ---- */
 void project_free(Project *p);                   /* frees sample memory */
@@ -197,6 +243,6 @@ int project_load(Project *dst, const char *path, char *msg, size_t msglen);
 float soft_clip(float v);
 /* Adds the output for [start, start + frames) into out (stereo). only_track < 0 mixes every
  * track honouring mute/solo; otherwise only that track, ignoring mute/solo (for stems). */
-void mix(const Project *p, long start, float *out, int frames, int only_track);
+
 
 #endif

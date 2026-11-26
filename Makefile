@@ -10,7 +10,7 @@ endif
 CFLAGS  += $(shell pkg-config --cflags $(PKGS))
 LDLIBS   = $(shell pkg-config --libs $(PKGS)) -lm -lpthread
 
-SRC = src/main.c src/audio.c src/theory.c src/project.c src/midi.c
+SRC = src/main.c src/audio.c src/fx.c src/theory.c src/project.c src/midi.c
 HDR = src/daw.h src/theory.h src/midi.h
 
 tinydaw: $(SRC) $(HDR) src/compat.h

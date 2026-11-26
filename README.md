@@ -1,7 +1,7 @@
 # tinydaw
 
 A small timeline sequencer in C. Generate tones and drums, import audio files, drag them onto
-8 tracks, arrange, loop, save and export. Play sounds live from the keyboard, game controllers
+8 tracks, arrange, loop, mix with effects, save and export. Play sounds live from the keyboard, game controllers
 and MIDI devices with 16 pads, and record what you play onto the timeline.
 
 **Libraries (all open source):** SDL2 (window, input, drawing, audio output; zlib licence),
@@ -50,6 +50,8 @@ see [win/README.md](win/README.md). It behaves the same; projects open on either
 | Tuning | **Tuning A4** in the generator (415–466 Hz) applies to new tones, chords and the note table |
 | Export | **Export...** or Ctrl+E opens the export dialog (Enter exports, Esc cancels). Files go to `~/Music` (or the current folder) |
 | Project sample rate | The **kHz** button cycles 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz |
+| Clip volume / fades | Alt+wheel over a clip for its gain; drag the small squares on its top corners to fade in and out |
+| Transpose / reverse a clip | `[` and `]` move it a semitone; Ctrl+R plays it backwards (or use the Mixer pane) |
 | Undo / redo | Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y, or the **Undo** and **Redo** buttons (300 steps) |
 | Save / open | **File** menu, Ctrl+S, Ctrl+Shift+S, Ctrl+O, Ctrl+N. Dropping a `.tdaw` file on the window opens it |
 
@@ -64,6 +66,28 @@ changes asks first.
 
 Undo covers clips, tracks, tempo, tuning, the loop region and pad settings. A drag, a placed beat
 or a recorded take is one step. Sounds added to the library stay there.
+
+## Mixer and effects
+
+**Mixer** in the top bar (or F3) opens the mixer pane. Click a track's name to pick it.
+
+| Section | What's there |
+|---|---|
+| Clip | Gain, pitch (semitones), fade in/out, reverse for the selected clip |
+| Track | Volume, pan, a filter (low-, high- or band-pass with cutoff and resonance), 3-band EQ, drive, duck amount, delay and reverb sends |
+| Delay | Tempo-synced time (1/16 to 1/2, dotted and triplet), feedback, tone, level, ping-pong |
+| Reverb | Size, damping, level |
+| Sidechain | Which track ducks the others (e.g. the kick, for the house "pump") and how fast they come back |
+| Live controls | Pitch wheel range; the MIDI pitch wheel bends pads and the instrument, the mod wheel opens the filter on the instrument's track |
+
+Each track runs drive, EQ, filter, volume, pan and ducking in that order, then sends to the shared
+delay and reverb. Pads and the instrument play through their track's effects, so what you
+record sounds like what you heard. Exports go through the same mixer, and a song with delay or
+reverb gets its tail rendered until it falls silent. Tracks with effects show `fx` under their name.
+
+A synthesized sound transposed on a clip is made again at the new pitch, so it keeps its length;
+recorded and imported sounds are resampled, so up an octave plays in half the time. Pitched and
+reversed copies don't clutter the library.
 
 ## Pads and live input
 
@@ -136,7 +160,10 @@ changes the file format, because no detail above 24 kHz exists to keep.
   to every MIDI output port. Live pad voices are mixed in the audio callback on top of the song.
 - Undo compares the project with the last snapshot after every frame, so no edit can forget to
   record itself.
-- No effects, automation or MIDI output yet.
+- `src/fx.c`: the mixer. A state-variable filter, RBJ biquads for the EQ, tanh drive, a
+  tempo-synced delay with a damped feedback loop, and a Freeverb-style reverb (8 combs and 4
+  allpasses per side, tunings scaled to the project rate).
+- No automation or MIDI output yet.
 
 ## Tests
 
@@ -150,4 +177,4 @@ TINYDAW_DEBUG_INPUT=1 ./tinydaw      # print every key, controller and MIDI inpu
 ```
 
 The self-test covers undo, saving and reopening (sound for sound), pads, learning, the instrument,
-recording, and a virtual SDL gamepad.
+recording, a virtual SDL gamepad, and every effect measured on rendered audio.

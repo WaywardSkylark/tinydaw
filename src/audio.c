@@ -28,6 +28,14 @@ const ExportFormat EXPORT_FORMATS[EXP_COUNT] = {
     {"MP3",  "mp3",  SF_FORMAT_MPEG | SF_FORMAT_MPEG_LAYER_III,  1, 48000, 0,     0},
 };
 
+static void track_defaults(Track *t)
+{
+    memset(t, 0, sizeof *t);
+    t->volume = 0.8f;
+    t->cutoff = 1200;
+    t->reso = 0.2f;
+}
+
 void project_init(Project *p)
 {
     memset(p, 0, sizeof *p);
@@ -38,19 +46,21 @@ void project_init(Project *p)
     p->ntracks = DEFAULT_TRACKS;
     p->inst_sample = -1;
     p->inst_root = 60;
-    for (int i = 0; i < NPADS; i++) p->pads[i] = (Pad){-1, PAD_ONESHOT, 0.8f, 0, 0};
+    for (int i = 0; i < NPADS; i++) p->pads[i] = (Pad){-1, PAD_ONESHOT, 0.8f, 0, 0, 0};
     for (int i = 0; i < MAX_TRACKS; i++) {
-        p->tracks[i].volume = 0.8f;
+        track_defaults(&p->tracks[i]);
         snprintf(p->tracks[i].name, sizeof p->tracks[i].name, "Track %d", i + 1);
     }
+    p->fx = (MasterFx){.delay_div = 4, .delay_feedback = 0.35f, .delay_tone = 0.5f, .delay_level = 0.8f,
+                       .reverb_size = 0.6f, .reverb_damp = 0.4f, .reverb_level = 0.8f,
+                       .sc_source = -1, .sc_release = 180, .bend_range = 2};
 }
 
 int project_add_track(Project *p, const char *name)
 {
     if (p->ntracks >= MAX_TRACKS) return -1;
     Track *t = &p->tracks[p->ntracks];
-    t->volume = 0.8f;
-    t->mute = t->solo = 0;
+    track_defaults(t);
     if (name) snprintf(t->name, sizeof t->name, "%s", name);
     else snprintf(t->name, sizeof t->name, "Track %d", p->ntracks + 1);
     return p->ntracks++;
@@ -532,60 +542,83 @@ int sample_import(Project *p, const char *path, char *err, size_t errlen)
     return idx;
 }
 
-/* ---------------------------------------------------------------- pitched copies */
+/* ---------------------------------------------------------------- variants: pitched and reversed copies */
 
-/* Resamples so the sound plays `semis` semitones higher at the same rate. */
-static float *pitch_copy(const Sample *s, int semis, long *frames)
+/* The audio of `src` shifted `semis` semitones and/or reversed, at the project rate.
+ * Plain synthesized tones and chords are made again at the new pitch (exact); anything else is
+ * resampled with libsamplerate. */
+static float *variant_render(const Sample *s, int semis, int reverse, long *frames)
 {
-    return resample(s->data, s->frames, 2, pow(2.0, -semis / 12.0), frames, SRC_SINC_MEDIUM_QUALITY);
-}
-
-int sample_pitched(Project *p, int src, int semis)
-{
-    if (src < 0 || src >= p->nsamples) return -1;
-    if (semis == 0) return src;
-    const Sample *s = &p->samples[src];
-    char name[96];
-    snprintf(name, sizeof name, "%.80s %+d", s->name, semis);
-    for (int i = 0; i < p->nsamples; i++) {
-        const Sample *o = &p->samples[i];
-        if (!strcmp(o->name, name) && ((o->pitched && o->src == src && o->semis == semis) || o->generated))
-            return i;
-    }
-    /* synthesized sounds are simply made again at the new pitch; anything else is resampled */
-    if (s->generated && !s->is_beat && s->gen.wave < WAVE_KICK) {
+    float *d = NULL;
+    long n = 0;
+    if (semis == 0) {
+        d = malloc((size_t)s->frames * 2 * sizeof(float));
+        if (d) memcpy(d, s->data, (size_t)s->frames * 2 * sizeof(float));
+        n = s->frames;
+    } else if (s->generated && !s->is_beat && s->gen.wave < WAVE_KICK) {
         GenParams g = s->gen;
-        long n;
-        float *d;
-        int notes[6];
         if (s->nchord) {
+            int notes[6];
             for (int k = 0; k < s->nchord; k++) notes[k] = s->chord[k] + semis;
             d = render_notes(&g, s->gen_bpm, notes, s->nchord, &n);
         } else {
             g.note += semis;
             d = render_gen(&g, s->gen_bpm, &n);
         }
-        int idx = d ? sample_add(p, name, d, n) : -1;
-        if (idx >= 0) {
-            Sample *t = &p->samples[idx];
-            t->generated = 1;
-            t->gen = g;
-            t->gen_bpm = p->samples[src].gen_bpm;
-            t->nchord = p->samples[src].nchord;
-            memcpy(t->chord, notes, sizeof notes);
-        }
-        return idx;
+    } else {
+        d = resample(s->data, s->frames, 2, pow(2.0, -semis / 12.0), &n, SRC_SINC_MEDIUM_QUALITY);
     }
+    if (d && reverse) {
+        for (long i = 0, j = n - 1; i < j; i++, j--) {
+            float l = d[2 * i], r = d[2 * i + 1];
+            d[2 * i] = d[2 * j];
+            d[2 * i + 1] = d[2 * j + 1];
+            d[2 * j] = l;
+            d[2 * j + 1] = r;
+        }
+    }
+    *frames = n;
+    return d;
+}
+
+int sample_base(const Project *p, int s)
+{
+    while (s >= 0 && s < p->nsamples && p->samples[s].pitched) s = p->samples[s].src;
+    return s;
+}
+
+int sample_variant(Project *p, int src, int semis, int reverse)
+{
+    src = sample_base(p, src);
+    if (src < 0 || src >= p->nsamples) return -1;
+    if (semis == 0 && !reverse) return src;
+    for (int i = 0; i < p->nsamples; i++) {
+        const Sample *o = &p->samples[i];
+        if (o->pitched && o->src == src && o->semis == semis && o->reversed == !!reverse) return i;
+    }
+    char name[96];
+    snprintf(name, sizeof name, "%.70s%s%s", p->samples[src].name, reverse ? " rev" : "", "");
+    if (semis) snprintf(name + strlen(name), sizeof name - strlen(name), " %+d", semis);
     long n;
-    float *d = pitch_copy(s, semis, &n);
+    float *d = variant_render(&p->samples[src], semis, reverse, &n);
     if (!d) return -1;
     int idx = sample_add(p, name, d, n);
     if (idx >= 0) {
-        p->samples[idx].pitched = 1;
-        p->samples[idx].src = src;
-        p->samples[idx].semis = semis;
+        Sample *t = &p->samples[idx];
+        t->pitched = 1;
+        t->src = src;
+        t->semis = semis;
+        t->reversed = !!reverse;
     }
     return idx;
+}
+
+int sample_pitched(Project *p, int src, int semis)
+{
+    int base = sample_base(p, src);
+    int rev = src >= 0 && src < p->nsamples && p->samples[src].pitched ? p->samples[src].reversed : 0;
+    int have = src >= 0 && src < p->nsamples && p->samples[src].pitched ? p->samples[src].semis : 0;
+    return sample_variant(p, base, have + semis, rev);
 }
 
 /* ---------------------------------------------------------------- rate change */
@@ -610,7 +643,7 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         else if (s->generated) nd = render_gen(&s->gen, s->gen_bpm, &nf);
         else if (s->path[0]) nd = load_file(s->path, &nf, err, sizeof err);
         else if (s->pitched && s->src >= 0 && s->src < i)
-            nd = pitch_copy(&p->samples[s->src], s->semis, &nf);
+            nd = variant_render(&p->samples[s->src], s->semis, s->reversed, &nf);
         if (nd) {
             rebuilt++;
         } else {
@@ -664,37 +697,6 @@ float soft_clip(float v)
     return v < 0 ? -shaped : shaped;
 }
 
-void mix(const Project *p, long start, float *out, int frames, int only_track)
-{
-    int any_solo = 0;
-    for (int t = 0; t < p->ntracks; t++)
-        any_solo |= p->tracks[t].solo;
-
-    for (int c = 0; c < p->nclips; c++) {
-        const Clip *cl = &p->clips[c];
-        const Track *tr = &p->tracks[cl->track];
-        if (only_track >= 0) {
-            if (cl->track != only_track) continue;
-        } else if (tr->mute || (any_solo && !tr->solo)) {
-            continue;
-        }
-        long a = start > cl->start ? start : cl->start;
-        long b = start + frames < cl->start + cl->length ? start + frames : cl->start + cl->length;
-        if (a >= b) continue;
-        const Sample *s = &p->samples[cl->sample];
-        for (long f = a; f < b; f++) {
-            long rel = f - cl->start, src = cl->offset + rel;
-            if (src < 0 || src >= s->frames) continue;
-            float g = tr->volume;
-            long right = cl->length - 1 - rel;
-            if (rel < CLIP_FADE) g *= (float)rel / CLIP_FADE;
-            if (right < CLIP_FADE) g *= (float)right / CLIP_FADE;
-            out[2 * (f - start)] += s->data[2 * src] * g;
-            out[2 * (f - start) + 1] += s->data[2 * src + 1] * g;
-        }
-    }
-}
-
 /* ---------------------------------------------------------------- live voices */
 
 #define VOICE_FADE (SR / 100)       /* 10 ms fade when a voice is stopped early */
@@ -721,7 +723,10 @@ int voice_start(Project *p, int sample, double step, float gain, int loop, int p
             }
         }
     }
-    p->voices[best] = (Voice){1, sample, pad, note, 0, step > 0 ? step : 1, gain, loop, 0};
+    int track = pad >= 0 ? p->pads[pad].track : p->inst_track;
+    float pan = pad >= 0 ? p->pads[pad].pan : 0;
+    if (track < 0 || track >= p->ntracks) track = 0;
+    p->voices[best] = (Voice){1, sample, pad, note, track, pan, 0, step > 0 ? step : 1, gain, loop, 0};
     return best;
 }
 
@@ -739,43 +744,6 @@ int voice_playing(const Project *p, int pad)
     for (int i = 0; i < MAX_VOICES; i++)
         if (p->voices[i].active && p->voices[i].pad == pad && !p->voices[i].fade) return 1;
     return 0;
-}
-
-void voices_mix(Project *p, float *out, int frames)
-{
-    for (int k = 0; k < MAX_VOICES; k++) {
-        Voice *v = &p->voices[k];
-        if (!v->active) continue;
-        if (v->sample >= p->nsamples) {
-            v->active = 0;
-            continue;
-        }
-        const Sample *s = &p->samples[v->sample];
-        long n = s->frames;
-        for (int i = 0; i < frames; i++) {
-            if (v->pos >= n - 1) {
-                if (!v->loop || n < 2) {
-                    v->active = 0;
-                    break;
-                }
-                v->pos -= n - 1;
-            }
-            long a = (long)v->pos;
-            float t = (float)(v->pos - a), g = v->gain;
-            if (v->fade) {
-                g *= (float)v->fade / VOICE_FADE;
-                if (--v->fade == 0) {
-                    v->active = 0;
-                    break;
-                }
-            }
-            float l = s->data[2 * a] + (s->data[2 * a + 2] - s->data[2 * a]) * t;
-            float r = s->data[2 * a + 1] + (s->data[2 * a + 3] - s->data[2 * a + 1]) * t;
-            out[2 * i] += l * g;
-            out[2 * i + 1] += r * g;
-            v->pos += v->step;
-        }
-    }
 }
 
 /* ---------------------------------------------------------------- export */
@@ -802,17 +770,36 @@ void export_effective(const ExportOptions *o, int *rate, int *bits)
     *bits = b;
 }
 
-static float *render_range(const Project *p, long a, long b, int only_track)
+/* Renders [a, b) through a fresh mixer, exactly like playback. With tail > 0, up to that many
+ * extra frames are rendered for delay and reverb to ring out, trimmed where it goes silent;
+ * *len gets the final length. */
+static float *render_range(const Project *p, long a, long b, int only_track, long tail, long *len)
 {
-    long n = b - a;
+    long n = b - a + tail;
     float *buf = calloc((size_t)n * 2, sizeof(float));
-    if (!buf) return NULL;
+    Mixer *m = mixer_new();
+    if (!buf || !m) {
+        free(buf);
+        mixer_free(m);
+        return NULL;
+    }
     for (long pos = 0; pos < n; pos += 4096) {
         int k = n - pos < 4096 ? (int)(n - pos) : 4096;
-        mix(p, a + pos, buf + 2 * pos, k, only_track);
+        mixer_run(m, (Project *)p, a + pos, 1, buf + 2 * pos, k, only_track, 0);
     }
+    mixer_free(m);
     for (long i = 0; i < 2 * n; i++)
         buf[i] = soft_clip(buf[i] * p->master);
+    long end = n;
+    if (tail > 0) {                              /* trim the tail once it's inaudible */
+        end = b - a;
+        for (long i = n - 1; i >= b - a; i--)
+            if (fabsf(buf[2 * i]) > 1e-4f || fabsf(buf[2 * i + 1]) > 1e-4f) {
+                end = i + 1;
+                break;
+            }
+    }
+    *len = end;
     return buf;
 }
 
@@ -928,12 +915,14 @@ int project_export(const Project *p, const ExportOptions *o, const char *base, c
         } else {
             snprintf(path, sizeof path, "%s.%s", base, f->ext);
         }
-        float *buf = render_range(p, a, b, t);
+        long len;
+        long tail = !o->loop_only && project_has_tails(p) ? 6L * SR : 0;
+        float *buf = render_range(p, a, b, t, tail, &len);
         if (!buf) {
             snprintf(msg, msglen, "out of memory");
             return -1;
         }
-        int rc = write_audio(path, o, buf, b - a, t < 0, err, sizeof err);
+        int rc = write_audio(path, o, buf, len, t < 0, err, sizeof err);
         free(buf);
         if (rc != 0) {
             snprintf(msg, msglen, "%s: %s", path, err);

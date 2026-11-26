@@ -162,7 +162,8 @@ static SDL_Keymod mods;
 
 static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h; }
 
-enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT };
+enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
+       D_FADEIN, D_FADEOUT };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
 static void place_beat(int genre, long start, int first_track);
 
@@ -180,6 +181,8 @@ static struct { int top, left, head, ruler, status, lane_h, tl_x, tl_w, lanes_y,
 /* Theory pane state */
 #define PANE_W 480
 static int pads_open;                   /* the Pads pane (shares the right-hand slot) */
+static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
+static int sel_track;                   /* the track the Mixer pane shows */
 static int headless;                    /* self-test or screenshot: touch no files */
 static int pads_drop(int sample);
 static int theory_open, theory_tab = 6, th_root, th_scale, th_sevenths, th_track = 4, th_scroll, th_content_h;
@@ -209,7 +212,7 @@ static void layout(void)
     L.ruler = 28;
     L.status = 26;
     L.tl_x = L.left + L.head;
-    L.pane_w = theory_open || pads_open ? PANE_W : 0;
+    L.pane_w = theory_open || pads_open || mixer_open ? PANE_W : 0;
     L.pane_x = W - L.pane_w;
     L.tl_w = W - L.tl_x - L.pane_w;
     L.lanes_y = L.top + L.ruler;
@@ -246,6 +249,27 @@ static SDL_Rect clip_rect(const Clip *c)
     int x0 = (int)floor(frame_to_x(c->start)), x1 = (int)ceil(frame_to_x(c->start + c->length));
     return (SDL_Rect){x0, L.lanes_y + c->track * L.lane_h + 2, x1 - x0 < 2 ? 2 : x1 - x0, L.lane_h - 4};
 }
+/* The little squares on a clip's top corners that drag its fades (none on very narrow clips). */
+static int fade_handles(const Clip *c, SDL_Rect *in, SDL_Rect *out)
+{
+    SDL_Rect r = clip_rect(c);
+    if (r.w < 40 || r.h < 20) return 0;
+    int fi = (int)(c->fade_in / (double)SR * pps), fo = (int)(c->fade_out / (double)SR * pps);
+    int xi = r.x + (fi > 8 ? fi : 8), xo = r.x + r.w - (fo > 8 ? fo : 8);
+    *in = (SDL_Rect){xi - 4, r.y + 1, 9, 9};
+    *out = (SDL_Rect){xo - 5, r.y + 1, 9, 9};
+    return 1;
+}
+
+static int fade_hit(int i)
+{
+    SDL_Rect a, b;
+    if (!fade_handles(&P.clips[i], &a, &b)) return D_NONE;
+    a = (SDL_Rect){a.x - 2, a.y - 2, a.w + 4, a.h + 4};
+    b = (SDL_Rect){b.x - 2, b.y - 2, b.w + 4, b.h + 4};
+    return hit(a) ? D_FADEIN : hit(b) ? D_FADEOUT : D_NONE;
+}
+
 static SDL_Rect volume_bar(int t)
 {
     if (L.lane_h < 40)                  /* compact rows: a thin bar along the bottom */
@@ -262,7 +286,7 @@ static int clip_add(int sample, int track, long start, long offset, long length)
         return -1;
     }
     LOCK();
-    P.clips[P.nclips] = (Clip){sample, track, start, offset, length};
+    P.clips[P.nclips] = (Clip){sample, track, start, offset, length, 0, 0, 0};
     P.nclips++;
     UNLOCK();
     return P.nclips - 1;
@@ -389,6 +413,69 @@ static void number_box(SDL_Rect r, const char *label, const char *value, int act
 }
 
 /* drag sideways or up/down to change; mouse wheel steps; Shift = fine */
+/* like number(), but shows `shown` instead of formatting the value (log scales, L/R pan...) */
+static void number_text(SDL_Rect r, const char *label, double *v, double lo, double hi, double step,
+                        const char *shown)
+{
+    number_box(r, label, shown, drag.kind == D_NUM && drag.num == v);
+    if (drag.kind == D_NONE && hit(r)) {
+        if (lpress) {
+            drag = (typeof(drag)){.kind = D_NUM, .num = v, .nmin = lo, .nmax = hi, .nstep = step,
+                                  .norig = *v, .sx = mx, .sy = my};
+            lpress = 0;
+        }
+        if (wheel_y) {
+            *v += wheel_y * step * 5;
+            *v = *v < lo ? lo : *v > hi ? hi : *v;
+            wheel_y = 0;
+        }
+    }
+}
+
+/* Project settings are floats; the number widgets edit doubles. A proxy double per float, kept
+ * in step with it except while it's being dragged; fcommit writes changes back under the lock. */
+static void pan_text(float pan, char *buf, size_t n)
+{
+    int k = (int)lroundf(pan * 100);
+    if (k == 0) snprintf(buf, n, "centre");
+    else snprintf(buf, n, "%s %d", k < 0 ? "L" : "R", abs(k));
+}
+
+static double *fproxy(float *f)
+{
+    static struct { float *f; double d; } pool[128];
+    static int next;
+    int k = -1;
+    for (int i = 0; i < 128 && k < 0; i++)
+        if (pool[i].f == f) k = i;
+    if (k < 0) {
+        k = next;
+        next = (next + 1) % 128;
+        pool[k].f = f;
+        pool[k].d = *f;
+    }
+    if (!(drag.kind == D_NUM && drag.num == &pool[k].d)) pool[k].d = *f;
+    return &pool[k].d;
+}
+
+static void fcommit(float *f, const double *d)
+{
+    if ((float)*d != *f) {
+        LOCK();
+        *f = (float)*d;
+        UNLOCK();
+    }
+}
+
+static void fnumber(SDL_Rect r, const char *label, float *f, double lo, double hi, double step, const char *fmt)
+{
+    double *d = fproxy(f);
+    char buf[48];
+    snprintf(buf, sizeof buf, fmt, *d);
+    number_text(r, label, d, lo, hi, step, buf);
+    fcommit(f, d);
+}
+
 static void number(SDL_Rect r, const char *label, double *v, double lo, double hi, double step,
                    const char *fmt)
 {
@@ -443,7 +530,8 @@ typedef struct {
     double bpm, a4;
     long loop_start, loop_end;
     Pad pads[NPADS];
-    int inst_sample, inst_root;
+    int inst_sample, inst_root, inst_track;
+    MasterFx fx;
     char label[48];
 } State;
 
@@ -477,6 +565,8 @@ static void state_capture(State *s)
     memcpy(s->pads, P.pads, sizeof s->pads);
     s->inst_sample = P.inst_sample;
     s->inst_root = P.inst_root;
+    s->inst_track = P.inst_track;
+    s->fx = P.fx;
     s->label[0] = 0;
 }
 
@@ -486,7 +576,7 @@ static int state_same(const State *s)
            s->ntracks == P.ntracks && !memcmp(s->tracks, P.tracks, sizeof s->tracks) && s->bpm == P.bpm &&
            s->a4 == P.a4 && s->loop_start == P.loop_start && s->loop_end == P.loop_end &&
            !memcmp(s->pads, P.pads, sizeof s->pads) && s->inst_sample == P.inst_sample &&
-           s->inst_root == P.inst_root;
+           s->inst_root == P.inst_root && s->inst_track == P.inst_track && !memcmp(&s->fx, &P.fx, sizeof s->fx);
 }
 
 static void state_restore(const State *s)
@@ -503,6 +593,8 @@ static void state_restore(const State *s)
     memcpy(P.pads, s->pads, sizeof s->pads);
     P.inst_sample = s->inst_sample;
     P.inst_root = s->inst_root;
+    P.inst_track = s->inst_track;
+    P.fx = s->fx;
     UNLOCK();
 }
 
@@ -514,6 +606,7 @@ static void describe(const State *s, char *buf, size_t n)
     else if (memcmp(s->clips, P.clips, (size_t)P.nclips * sizeof(Clip))) snprintf(buf, n, "clip edit");
     else if (s->ntracks != P.ntracks) snprintf(buf, n, "add track");
     else if (memcmp(s->tracks, P.tracks, sizeof s->tracks)) snprintf(buf, n, "track settings");
+    else if (memcmp(&s->fx, &P.fx, sizeof s->fx)) snprintf(buf, n, "effects");
     else if (s->bpm != P.bpm) snprintf(buf, n, "tempo %.0f BPM", s->bpm);
     else if (s->loop_start != P.loop_start || s->loop_end != P.loop_end) snprintf(buf, n, "loop region");
     else if (memcmp(s->pads, P.pads, sizeof s->pads) || s->inst_sample != P.inst_sample || s->inst_root != P.inst_root)
@@ -970,7 +1063,6 @@ static int learn_pad = -1, learned = -1, binds_changed;
 static int inst_midi = 1;               /* MIDI notes not on a pad play the instrument */
 static Uint32 pad_flash[NPADS], key_flash, joy_flash[8], midi_flash[MIDI_MAX_DEVICES];
 static int midi_ok;
-static int inst_track;                  /* where recorded instrument notes go */
 static int mouse_pad = -1;
 
 /* joysticks: SDL instance ids, plus per-axis and per-hat state to turn them into buttons */
@@ -1151,9 +1243,22 @@ static void input_event(int src, int code, int vel, int down, int device)
     UNLOCK();
 }
 
+
 static void midi_in(int code, int velocity, int device, void *ud)
 {
     (void)ud;
+    if (code == MIDI_BEND || code >= MIDI_CCV) {    /* continuous controls: not pads */
+        LOCK();
+        if (code == MIDI_BEND) {
+            float b = (velocity - 8192) / 8192.0f;
+            P.bend = b < -1 ? -1 : b > 1 ? 1 : b;
+        } else if (code == MIDI_CCV + 1) {
+            P.modwheel = velocity / 127.0f;
+        }
+        if (device >= 0 && device < MIDI_MAX_DEVICES) midi_flash[device] = SDL_GetTicks();
+        UNLOCK();
+        return;
+    }
     input_event(SRC_MIDI, code, velocity ? velocity : 0, velocity > 0, device);
 }
 
@@ -1299,7 +1404,7 @@ static void rec_drain(void)
             UNLOCK();
             if (s < 0) continue;
             rec_close(h, e->frame);
-            *h = (Held){1, snap(e->frame), s, inst_track < P.ntracks ? inst_track : 0, 0};
+            *h = (Held){1, snap(e->frame), s, P.inst_track < P.ntracks ? P.inst_track : 0, 0};
         }
     }
     if (!P.playing || !pads_rec) {          /* stopped: finish anything still held */
@@ -1415,6 +1520,8 @@ static int pads_content(int x, int y, int w)
         LOCK();
         for (int i = 0; i < NPADS && s < P.nsamples; i++)
             if (P.pads[i].sample < 0) {
+                while (s < P.nsamples && P.samples[s].pitched) s++;   /* skip clip variants */
+                if (s >= P.nsamples) break;
                 P.pads[i].sample = s++;
                 filled++;
             }
@@ -1492,7 +1599,14 @@ static int pads_content(int x, int y, int w)
         UNLOCK();
     }
     y += 34;
-    track_picker(x, y, "Record to track", &pd->track);
+    double *pp = fproxy(&pd->pan);
+    char pt[24];
+    pan_text((float)*pp, pt, sizeof pt);
+    number_text((SDL_Rect){x, y, hw, 26}, "Pan", pp, -1, 1, 0.005, pt);
+    fcommit(&pd->pan, pp);
+    text(x + hw + 12, y + 6, "plays through its track's effects", DIM);
+    y += 34;
+    track_picker(x, y, "Track", &pd->track);
     if (button((SDL_Rect){x + w - 220, y, 110, 26}, learn_pad == pad_sel ? "Press input..." : "Learn input",
                learn_pad == pad_sel))
         learn_pad = learn_pad == pad_sel ? -1 : pad_sel;
@@ -1546,7 +1660,7 @@ static int pads_content(int x, int y, int w)
         binds_changed = 1;
     }
     y += 34;
-    track_picker(x, y, "Record to track", &inst_track);
+    track_picker(x, y, "Track", &P.inst_track);
     if (button((SDL_Rect){x + w - 150, y, 150, 26}, "No MIDI on pads", 0)) {
         LOCK();
         for (int i = 0; i < NPADS; i++) binds[i].midi = -1;
@@ -1678,6 +1792,260 @@ static void waiting_overlay(const char *msg)
     text_center(r, msg, TEXT);
 }
 
+/* ---- clip edits: pitch and reverse swap in a variant of the sound; gain and fades are numbers */
+
+static void clip_variant(int ci, int semis, int reverse)
+{
+    if (ci < 0 || ci >= P.nclips) return;
+    Clip *c = &P.clips[ci];
+    const Sample *old = &P.samples[c->sample];
+    int old_rev = old->pitched ? old->reversed : 0;
+    int base = sample_base(&P, c->sample);
+    int ns = sample_variant(&P, base, semis, reverse);    /* made outside the lock: can take a moment */
+    if (ns < 0) {
+        status("Library is full");
+        return;
+    }
+    if (ns == c->sample) return;
+    double ratio = (double)P.samples[ns].frames / old->frames;
+    long nf = P.samples[ns].frames;
+    long off = llround(c->offset * ratio), len = llround(c->length * ratio);
+    if (!old_rev != !reverse) off = nf - off - len;         /* the same stretch of sound, mirrored */
+    if (off < 0) off = 0;
+    if (off > nf - 1) off = nf - 1;
+    if (off + len > nf) len = nf - off;
+    if (len < 1) len = 1;
+    LOCK();
+    c->sample = ns;
+    c->offset = off;
+    c->length = len;
+    c->fade_in = llround(c->fade_in * ratio);
+    c->fade_out = llround(c->fade_out * ratio);
+    if (c->fade_in + c->fade_out > len) c->fade_in = c->fade_out = 0;
+    UNLOCK();
+}
+
+static int clip_semis(const Clip *c) { return P.samples[c->sample].pitched ? P.samples[c->sample].semis : 0; }
+static int clip_rev(const Clip *c) { return P.samples[c->sample].pitched ? P.samples[c->sample].reversed : 0; }
+
+static int track_has_fx(const Track *t)
+{
+    return t->filter || t->drive > 0 || t->eq[0] || t->eq[1] || t->eq[2] || t->delay_send > 0 ||
+           t->reverb_send > 0 || t->duck > 0 || t->pan != 0;
+}
+
+/* ---- the Mixer pane */
+
+static int mixer_scroll, mixer_content_h;
+
+static int section(int x, int y, int w, const char *title)
+{
+    line(x, y + font_h / 2, x + w, y + font_h / 2, LINE);
+    int tw = text_w(title) + 12;
+    fill((SDL_Rect){x, y, tw, font_h + 2}, PANEL);
+    text(x, y, title, DIM);
+    return y + font_h + 10;
+}
+
+static int mixer_content(int x, int y, int w)
+{
+    char buf[160], b2[48];
+    int hw = (w - 8) / 2, tw = (w - 16) / 3, rh = 34;
+
+    /* the selected clip */
+    y = section(x, y, w, "CLIP");
+    if (selected >= 0 && selected < P.nclips) {
+        Clip *c = &P.clips[selected];
+        text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, P.samples[sample_base(&P, c->sample)].name, TEXT);
+        y += font_h + 8;
+        fnumber((SDL_Rect){x, y, hw, 26}, "Gain", &c->gain_db, -36, 12, 0.05, "%+.1f dB");
+        static double semis;
+        if (!(drag.kind == D_NUM && drag.num == &semis)) semis = clip_semis(c);
+        number((SDL_Rect){x + hw + 8, y, hw, 26}, "Pitch", &semis, -24, 24, 0.08, "%+.0f st");
+        if (drag.kind != D_NUM && (int)lround(semis) != clip_semis(c)) clip_variant(selected, (int)lround(semis), clip_rev(c));
+        y += rh;
+        double fin = (double)c->fade_in / SR * 1000, fout = (double)c->fade_out / SR * 1000;
+        double maxms = (double)c->length / SR * 1000;
+        static double din, dout;
+        if (!(drag.kind == D_NUM && drag.num == &din)) din = fin;
+        if (!(drag.kind == D_NUM && drag.num == &dout)) dout = fout;
+        number((SDL_Rect){x, y, tw, 26}, "In", &din, 0, maxms, 2, "%.0f ms");
+        number((SDL_Rect){x + tw + 8, y, tw, 26}, "Out", &dout, 0, maxms, 2, "%.0f ms");
+        if (din != fin || dout != fout) {
+            long a = (long)llround(din / 1000 * SR), b = (long)llround(dout / 1000 * SR);
+            if (a + b > c->length) b = c->length - a;
+            LOCK();
+            c->fade_in = a;
+            c->fade_out = b < 0 ? 0 : b;
+            UNLOCK();
+        }
+        if (button((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Reverse", clip_rev(c)))
+            clip_variant(selected, clip_semis(c), !clip_rev(c));
+        y += rh;
+        text(x, y, "Drag the squares on a clip's top corners to fade it", DIM);
+        y += font_h + 14;
+    } else {
+        text(x, y, "Click a clip on the timeline to edit it", DIM);
+        y += font_h + 14;
+    }
+
+    /* the selected track */
+    if (sel_track >= P.ntracks) sel_track = P.ntracks - 1;
+    Track *t = &P.tracks[sel_track];
+    y = section(x, y, w, "TRACK");
+    if (button((SDL_Rect){x, y, 24, 26}, "<", 0) && sel_track > 0) sel_track--;
+    if (button((SDL_Rect){x + w - 24, y, 24, 26}, ">", 0) && sel_track < P.ntracks - 1) sel_track++;
+    t = &P.tracks[sel_track];
+    fill((SDL_Rect){x + 30, y + 4, 4, 18}, TRACK_COL[sel_track]);
+    snprintf(buf, sizeof buf, "%d  %s", sel_track + 1, t->name);
+    text_clip((SDL_Rect){x + 40, y, w - 72, 26}, x + 40, y + (26 - font_h) / 2, buf, TEXT);
+    y += rh;
+    fnumber((SDL_Rect){x, y, hw, 26}, "Volume", &t->volume, 0, 1.5, 0.004, "%.2f");
+    double *pd = fproxy(&t->pan);
+    pan_text((float)*pd, b2, sizeof b2);
+    number_text((SDL_Rect){x + hw + 8, y, hw, 26}, "Pan", pd, -1, 1, 0.005, b2);
+    fcommit(&t->pan, pd);
+    y += rh;
+    static const char *FNAMES[FILT_TYPES] = {"Off", "Low-pass", "High-pass", "Band-pass"};
+    text(x, y + 6, "Filter", DIM);
+    int fw = (w - 60 - 12) / 4;
+    for (int k = 0; k < FILT_TYPES; k++)
+        if (button((SDL_Rect){x + 60 + k * (fw + 4), y, fw, 26}, FNAMES[k], t->filter == k)) {
+            LOCK();
+            t->filter = k;
+            UNLOCK();
+        }
+    y += rh;
+    double *cp = fproxy(&t->cutoff);
+    static double cpos;                         /* cutoff is dragged on a log scale */
+    if (!(drag.kind == D_NUM && drag.num == &cpos)) cpos = log(*cp / 20.0) / log(1000.0);
+    double hz = 20 * pow(1000.0, cpos);
+    if (hz >= 1000) snprintf(b2, sizeof b2, "%.2f kHz", hz / 1000);
+    else snprintf(b2, sizeof b2, "%.0f Hz", hz);
+    number_text((SDL_Rect){x, y, hw, 26}, "Cutoff", &cpos, 0, 1, 0.002, b2);
+    *cp = 20 * pow(1000.0, cpos);
+    fcommit(&t->cutoff, cp);
+    fnumber((SDL_Rect){x + hw + 8, y, hw, 26}, "Resonance", &t->reso, 0, 1, 0.004, "%.2f");
+    y += rh;
+    static const char *EQN[3] = {"Low", "Mid", "High"};
+    for (int k = 0; k < 3; k++)
+        fnumber((SDL_Rect){x + k * (tw + 8), y, tw, 26}, EQN[k], &t->eq[k], -15, 15, 0.05, "%+.1f dB");
+    y += rh;
+    fnumber((SDL_Rect){x, y, hw, 26}, "Drive", &t->drive, 0, 1, 0.004, "%.2f");
+    snprintf(buf, sizeof buf, P.fx.sc_source >= 0 ? "Duck (by %d)" : "Duck", P.fx.sc_source + 1);
+    double before = t->duck;
+    fnumber((SDL_Rect){x + hw + 8, y, hw, 26}, buf, &t->duck, 0, 1, 0.004, "%.2f");
+    if (before == 0 && t->duck > 0 && P.fx.sc_source < 0) {     /* pick a sidechain source: the kick */
+        int src = sel_track == 0 ? 1 : 0;
+        for (int k = 0; k < P.ntracks; k++)
+            if (k != sel_track && (strstr(P.tracks[k].name, "Kick") || strstr(P.tracks[k].name, "kick"))) src = k;
+        LOCK();
+        P.fx.sc_source = src < P.ntracks ? src : -1;
+        UNLOCK();
+        status("Track %d now ducks this one: change it under Master effects", P.fx.sc_source + 1);
+    }
+    y += rh;
+    fnumber((SDL_Rect){x, y, hw, 26}, "Delay send", &t->delay_send, 0, 1, 0.004, "%.2f");
+    fnumber((SDL_Rect){x + hw + 8, y, hw, 26}, "Reverb send", &t->reverb_send, 0, 1, 0.004, "%.2f");
+    y += rh + 8;
+
+    /* shared effects */
+    MasterFx *fx = &P.fx;
+    y = section(x, y, w, "DELAY");
+    int dw = (w - 7 * 4) / 8;
+    for (int k = 0; k < DELAY_DIVS; k++)
+        if (button((SDL_Rect){x + k * (dw + 4), y, dw, 26}, DELAY_NAMES[k], fx->delay_div == k)) {
+            LOCK();
+            fx->delay_div = k;
+            UNLOCK();
+        }
+    y += rh;
+    fnumber((SDL_Rect){x, y, tw, 26}, "Feedback", &fx->delay_feedback, 0, 0.95, 0.004, "%.2f");
+    fnumber((SDL_Rect){x + tw + 8, y, tw, 26}, "Tone", &fx->delay_tone, 0, 1, 0.004, "%.2f");
+    fnumber((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Level", &fx->delay_level, 0, 1.5, 0.004, "%.2f");
+    y += rh;
+    if (button((SDL_Rect){x, y, 120, 26}, "Ping-pong", fx->pingpong)) {
+        LOCK();
+        fx->pingpong = !fx->pingpong;
+        UNLOCK();
+    }
+    snprintf(buf, sizeof buf, "%.0f ms at %.0f BPM", DELAY_BEATS[fx->delay_div] * 60000.0 / P.bpm, P.bpm);
+    text(x + 132, y + 6, buf, DIM);
+    y += rh + 8;
+    y = section(x, y, w, "REVERB");
+    fnumber((SDL_Rect){x, y, tw, 26}, "Size", &fx->reverb_size, 0, 1, 0.004, "%.2f");
+    fnumber((SDL_Rect){x + tw + 8, y, tw, 26}, "Damping", &fx->reverb_damp, 0, 1, 0.004, "%.2f");
+    fnumber((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Level", &fx->reverb_level, 0, 1.5, 0.004, "%.2f");
+    y += rh + 8;
+    y = section(x, y, w, "SIDECHAIN");
+    text(x, y + 6, "Source", DIM);
+    if (button((SDL_Rect){x + 64, y, 24, 26}, "<", 0) && fx->sc_source >= 0) {
+        LOCK();
+        fx->sc_source--;
+        UNLOCK();
+    }
+    snprintf(buf, sizeof buf, "%s", fx->sc_source < 0 ? "off" : P.tracks[fx->sc_source].name);
+    text_clip((SDL_Rect){x + 92, y, hw - 120, 26}, x + 96, y + (26 - font_h) / 2, buf, TEXT);
+    if (button((SDL_Rect){x + hw - 24, y, 24, 26}, ">", 0) && fx->sc_source < P.ntracks - 1) {
+        LOCK();
+        fx->sc_source++;
+        UNLOCK();
+    }
+    fnumber((SDL_Rect){x + hw + 8, y, hw, 26}, "Release", &fx->sc_release, 20, 1000, 1, "%.0f ms");
+    y += rh;
+    text(x, y, "Tracks with Duck above 0 dip whenever the source hits", DIM);
+    y += font_h + 16;
+
+    y = section(x, y, w, "LIVE CONTROLS");
+    fnumber((SDL_Rect){x, y, hw, 26}, "Bend range", &fx->bend_range, 1, 24, 0.05, "%.0f st");
+    SDL_Rect meter = {x + hw + 8, y + 4, hw, 18};
+    fill(meter, PANEL2);
+    int mid = meter.x + meter.w / 2;
+    int bx = mid + (int)(P.bend * meter.w / 2);
+    fill((SDL_Rect){bx < mid ? bx : mid, meter.y, abs(bx - mid) + 1, meter.h}, ACCENT);
+    snprintf(buf, sizeof buf, "bend %+.1f st", P.bend * fx->bend_range);
+    text_center(meter, buf, TEXT);
+    line(mid, meter.y - 3, mid, meter.y, DIM);
+    line(mid, meter.y + meter.h, mid, meter.y + meter.h + 3, DIM);
+    y += rh;
+    SDL_Rect mw = {x + hw + 8, y + 4, hw, 18};
+    fill(mw, PANEL2);
+    fill((SDL_Rect){mw.x, mw.y, (int)(mw.w * P.modwheel), mw.h}, TRACK_COL[3]);
+    text_center(mw, "mod wheel", TEXT);
+    snprintf(buf, sizeof buf, "opens track %d's filter", P.inst_track + 1);
+    text(x, y + 6, buf, DIM);
+    y += rh;
+    text(x, y, "The pitch wheel bends pads and the instrument live.", DIM);
+    text(x, y + font_h + 2, "Set the instrument's track (Pads pane) to a filter,", DIM);
+    text(x, y + 2 * font_h + 4, "then push the mod wheel up to open it.", DIM);
+    return y + 3 * font_h + 12;
+}
+
+static void mixer_pane(void)
+{
+    SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
+    fill(pane, PANEL);
+    line(pane.x, pane.y, pane.x, pane.y + pane.h, LINE);
+    int inside = hit(pane), saved_press = lpress;
+    if (!inside) lpress = 0;
+    if (inside && wheel_y && drag.kind == D_NONE) {
+        mixer_scroll -= wheel_y * 48;
+        wheel_y = 0;
+    }
+    int max_scroll = mixer_content_h - pane.h > 0 ? mixer_content_h - pane.h : 0;
+    mixer_scroll = mixer_scroll < 0 ? 0 : mixer_scroll > max_scroll ? max_scroll : mixer_scroll;
+    SDL_RenderSetClipRect(ren, &pane);
+    int y0 = pane.y + 12 - mixer_scroll;
+    int y = mixer_content(pane.x + 14, y0, pane.w - 28);
+    mixer_content_h = y - y0 + 12;
+    if (max_scroll > 0) {
+        int bar_h = pane.h * pane.h / mixer_content_h;
+        fill((SDL_Rect){pane.x + pane.w - 5, pane.y + (pane.h - bar_h) * mixer_scroll / max_scroll, 3, bar_h}, PANEL3);
+    }
+    SDL_RenderSetClipRect(ren, NULL);
+    if (!inside) lpress = saved_press;
+}
+
 /* ---------------------------------------------------------------- panels */
 
 static void top_bar(void)
@@ -1710,18 +2078,23 @@ static void top_bar(void)
         set_rate(next);
     }
     x += 104;
-    if (button((SDL_Rect){x, y, 92, h}, "Export...", 0)) open_export();
-    x += 100;
-    if (button((SDL_Rect){x, y, 76, h}, "Theory", theory_open)) {
+    if (button((SDL_Rect){x, y, 70, h}, "Export", 0)) open_export();
+    x += 78;
+    if (button((SDL_Rect){x, y, 70, h}, "Theory", theory_open)) {
         theory_open = !theory_open;
-        pads_open = 0;
+        pads_open = mixer_open = 0;
     }
-    x += 82;
-    if (button((SDL_Rect){x, y, 64, h}, "Pads", pads_open)) {
+    x += 74;
+    if (button((SDL_Rect){x, y, 56, h}, "Pads", pads_open)) {
         pads_open = !pads_open;
-        theory_open = 0;
+        theory_open = mixer_open = 0;
     }
-    x += 80;
+    x += 60;
+    if (button((SDL_Rect){x, y, 62, h}, "Mixer", mixer_open)) {
+        mixer_open = !mixer_open;
+        theory_open = pads_open = 0;
+    }
+    x += 74;
 
     double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
     snprintf(buf, sizeof buf, "bar %d  beat %.2f", (int)(beats / 4) + 1, fmod(beats, 4.0) + 1);
@@ -1783,12 +2156,16 @@ static void left_panel(void)
     y += 50;
 
     char buf[64];
-    snprintf(buf, sizeof buf, "LIBRARY (%d)", P.nsamples);
+    static int vis[MAX_SAMPLES];              /* pitched/reversed copies made for clips are hidden */
+    int nvis = 0;
+    for (int i = 0; i < P.nsamples; i++)
+        if (!P.samples[i].pitched) vis[nvis++] = i;
+    snprintf(buf, sizeof buf, "LIBRARY (%d)", nvis);
     text(x, y, buf, DIM);
     y += 24;
     SDL_Rect list = {x, y, w, H - L.status - y - 8};
     int item_h = 26, visible = list.h / item_h;
-    if (P.nsamples == 0) {
+    if (nvis == 0) {
         text(x, y + 4, "Generate a sound above, or drop", DIM);
         text(x, y + 4 + font_h + 2, "audio files (wav, flac, ogg, mp3)", DIM);
         text(x, y + 4 + 2 * (font_h + 2), "onto this window.", DIM);
@@ -1798,10 +2175,11 @@ static void left_panel(void)
         lib_scroll -= wheel_y;
         wheel_y = 0;
     }
-    int max_scroll = P.nsamples - visible > 0 ? P.nsamples - visible : 0;
+    int max_scroll = nvis - visible > 0 ? nvis - visible : 0;
     lib_scroll = lib_scroll < 0 ? 0 : lib_scroll > max_scroll ? max_scroll : lib_scroll;
-    for (int i = lib_scroll; i < P.nsamples && i < lib_scroll + visible; i++) {
-        SDL_Rect r = {x, y + (i - lib_scroll) * item_h, w, item_h - 3};
+    for (int row = lib_scroll; row < nvis && row < lib_scroll + visible; row++) {
+        int i = vis[row];
+        SDL_Rect r = {x, y + (row - lib_scroll) * item_h, w, item_h - 3};
         lib_rects[i] = r;
         int hov = hit(r) && drag.kind == D_NONE;
         fill(r, P.preview == i ? shade(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
@@ -1817,7 +2195,7 @@ static void left_panel(void)
     }
     if (max_scroll > 0) {                       /* scroll indicator */
         int track_h = visible * item_h;
-        int bar_h = track_h * visible / P.nsamples;
+        int bar_h = track_h * visible / nvis;
         int bar_y = y + (track_h - bar_h) * lib_scroll / max_scroll;
         fill((SDL_Rect){x + w + 4, bar_y, 3, bar_h}, PANEL3);
     }
@@ -1844,7 +2222,14 @@ static void track_headers(void)
         line(L.left, y + L.lane_h - 1, L.left + L.head, y + L.lane_h - 1, LINE);
         int bh = compact ? L.lane_h - 10 : 20, by = compact ? y + 3 : y + 5;
         if (bh > 20) bh = 20;
+        if (mixer_open && t == sel_track) fill((SDL_Rect){L.left + 4, y, L.head - 4, L.lane_h - 1}, shade(PANEL3, 1.1f));
         text_clip((SDL_Rect){L.left + 8, y, L.head - 76, L.lane_h}, L.left + 12, by + (bh - font_h) / 2, tr->name, TEXT);
+        if (track_has_fx(tr) && L.lane_h >= 56) text(L.left + 12, by + bh + 3, "fx", ACCENT);
+        SDL_Rect name_r = {L.left + 4, y, L.head - 66, L.lane_h - 16};
+        if (drag.kind == D_NONE && hit(name_r) && lpress) {      /* pick it for the Mixer pane */
+            sel_track = t;
+            lpress = 0;
+        }
         SDL_Rect m = {L.left + L.head - 58, by, 22, bh}, s = {L.left + L.head - 32, by, 22, bh};
         if (button(m, "M", tr->mute)) { LOCK(); tr->mute = !tr->mute; UNLOCK(); }
         if (button(s, "S", tr->solo)) { LOCK(); tr->solo = !tr->solo; UNLOCK(); }
@@ -1912,6 +2297,7 @@ static void timeline(void)
         const Sample *s = &P.samples[c->sample];
         int body_y = r.y + font_h + 4, body_h = r.h - font_h - 4, mid = body_y + body_h / 2;
         int px0 = r.x > L.tl_x ? r.x : L.tl_x, px1 = r.x + r.w < W ? r.x + r.w : W;
+        float wave_gain = c->gain_db == 0 ? 1 : powf(10, c->gain_db / 20);
         SDL_SetRenderDrawColor(ren, col.r, col.g, col.b, 255);
         for (int px = px0; px < px1; px++) {
             long fa = (long)x_to_frame_raw(px) - c->start + c->offset;
@@ -1921,10 +2307,30 @@ static void timeline(void)
             if (fb <= fa) fb = fa + 1;
             float lo, hi;
             sample_minmax(s, fa, fb, &lo, &hi);
+            long rel = fa - c->offset;                  /* draw it as loud as it plays */
+            float g = wave_gain;
+            if (c->fade_in > 0 && rel < c->fade_in) g *= (float)rel / c->fade_in;
+            if (c->fade_out > 0 && c->length - rel < c->fade_out) g *= (float)(c->length - rel) / c->fade_out;
+            hi = hi * g > 1 ? 1 : hi * g;
+            lo = lo * g < -1 ? -1 : lo * g;
             int y0 = mid - (int)(hi * body_h / 2), y1 = mid - (int)(lo * body_h / 2);
             SDL_RenderDrawLine(ren, px, y0, px, y1);
         }
-        text_clip((SDL_Rect){r.x + 2, r.y, r.w - 4, font_h + 4}, r.x + 5, r.y + 2, s->name, DARK);
+        char label[128];
+        if (c->gain_db != 0) snprintf(label, sizeof label, "%s  %+.1fdB", s->name, c->gain_db);
+        else snprintf(label, sizeof label, "%s", s->name);
+        text_clip((SDL_Rect){r.x + 2, r.y, r.w - 4, font_h + 4}, r.x + 5, r.y + 2, label, DARK);
+        SDL_Rect hin, hout;
+        if (fade_handles(c, &hin, &hout)) {                /* fades as lines, handles on hover */
+            if (c->fade_in > 0) line(r.x, r.y + r.h - 1, hin.x + 4, r.y + 1, TEXT);
+            if (c->fade_out > 0) line(hout.x + 4, r.y + 1, r.x + r.w - 1, r.y + r.h - 1, TEXT);
+            if (i == selected || (drag.kind == D_NONE && hit(r)) || drag.kind == D_FADEIN || drag.kind == D_FADEOUT) {
+                if (i == selected || drag.clip == i || hit(r)) {
+                    fill(hin, hit(hin) ? HEAD : TEXT);
+                    fill(hout, hit(hout) ? HEAD : TEXT);
+                }
+            }
+        }
         outline(r, i == selected ? TEXT : shade(col, 0.95f));
         if (i == selected) outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, TEXT);
         if (drag.kind == D_NONE && hit(r)) {
@@ -1936,7 +2342,7 @@ static void timeline(void)
     /* drop preview while dragging from the library */
     if (drag.kind == D_LIB && hit(area)) {
         const Sample *s = &P.samples[drag.sample];
-        Clip ghost = {drag.sample, lane_at(my), snap(x_to_frame(mx)), 0, s->frames};
+        Clip ghost = {drag.sample, lane_at(my), snap(x_to_frame(mx)), 0, s->frames, 0, 0, 0};
         SDL_Rect r = clip_rect(&ghost);
         fill(r, alpha(TRACK_COL[ghost.track], 90));
         outline(r, TEXT);
@@ -1946,7 +2352,7 @@ static void timeline(void)
         int reps, parts = beat_layout(drag.sample, &pat, &reps);
         for (int i = 0; i < parts; i++) {
             int t = lane_at(my) + i;
-            Clip ghost = {0, t, snap(x_to_frame(mx)), 0, pat * reps};
+            Clip ghost = {0, t, snap(x_to_frame(mx)), 0, pat * reps, 0, 0, 0};
             SDL_Rect r = clip_rect(&ghost);
             fill(r, alpha(TRACK_COL[t % MAX_TRACKS], 90));
             outline(r, TEXT);
@@ -1962,15 +2368,25 @@ static void timeline(void)
     SDL_RenderSetClipRect(ren, NULL);
 
     /* cursor shape */
-    if (drag.kind == D_TRIML || drag.kind == D_TRIMR || hover_edge) SDL_SetCursor(cur_resize);
+    if (drag.kind == D_TRIML || drag.kind == D_TRIMR || drag.kind == D_FADEIN || drag.kind == D_FADEOUT || hover_edge)
+        SDL_SetCursor(cur_resize);
     else if (drag.kind == D_MOVE || drag.kind == D_LIB || drag.kind == D_BEAT) SDL_SetCursor(cur_hand);
     else SDL_SetCursor(cur_arrow);
 
     if (drag.kind != D_NONE) return;
 
-    /* wheel: scroll, Ctrl+wheel: zoom */
+    /* wheel: scroll, Ctrl+wheel: zoom, Alt+wheel over a clip: its gain */
     if (hit(whole) && (wheel_y || wheel_x)) {
-        if (mods & KMOD_CTRL) {
+        int over = -1;
+        for (int i = P.nclips - 1; i >= 0 && over < 0 && (mods & KMOD_ALT); i--)
+            if (hit(clip_rect(&P.clips[i]))) over = i;
+        if (over >= 0) {
+            float gdb = P.clips[over].gain_db + wheel_y * ((mods & KMOD_SHIFT) ? 0.1f : 1.0f);
+            LOCK();
+            P.clips[over].gain_db = gdb < -36 ? -36 : gdb > 12 ? 12 : gdb;
+            UNLOCK();
+            status("Clip gain %+.1f dB", P.clips[over].gain_db);
+        } else if (mods & KMOD_CTRL) {
             zoom(pow(1.25, wheel_y), mx);
         } else {
             view_start -= (wheel_x - wheel_y) * 60.0 / pps;
@@ -1993,11 +2409,19 @@ static void timeline(void)
 
     if (hit(area) && (lpress || rpress)) {
         int found = -1;
-        for (int i = P.nclips - 1; i >= 0; i--)
+        for (int i = P.nclips - 1; i >= 0 && lpress; i--)   /* fade handles can stick out above a clip */
+            if (fade_hit(i) != D_NONE) {
+                found = i;
+                break;
+            }
+        for (int i = P.nclips - 1; i >= 0 && found < 0; i--)
             if (hit(clip_rect(&P.clips[i]))) { found = i; break; }
         if (found >= 0 && rpress) {
             status("Deleted clip \"%s\"", P.samples[P.clips[found].sample].name);
             clip_delete(found);
+        } else if (found >= 0 && lpress && !(mods & KMOD_CTRL) && fade_hit(found) != D_NONE) {
+            selected = found;
+            drag = (typeof(drag)){.kind = fade_hit(found), .clip = found};
         } else if (found >= 0 && lpress) {
             if (mods & KMOD_CTRL) {            /* Ctrl+drag: copy */
                 Clip c = P.clips[found];
@@ -2023,7 +2447,7 @@ static void status_bar(void)
     int y = H - L.status;
     fill((SDL_Rect){0, y, W, L.status}, PANEL);
     line(0, y, W, y, LINE);
-    const char *hint = "Space play · Ctrl+Z undo · Ctrl+S save · Ctrl+drag copy · right-click delete · F2 pads";
+    const char *hint = "Space play · Ctrl+Z undo · Ctrl+S save · [ ] transpose · Alt+wheel gain · F2 pads · F3 mixer";
     int hw = text_w(hint), show = W - hw > 420;
     int msg_w = W - 24 - (show ? hw + 24 : 0);
     text_clip((SDL_Rect){8, y, msg_w, L.status}, 10, y + (L.status - font_h) / 2, status_msg, TEXT);
@@ -2095,6 +2519,19 @@ static void update_drag(void)
         *drag.inum = v < drag.imin ? drag.imin : v > drag.imax ? drag.imax : v;
         break;
     }
+    case D_FADEIN:
+    case D_FADEOUT: {
+        Clip *c = &P.clips[drag.clip];
+        long f = (long)x_to_frame_raw(mx);
+        long v = drag.kind == D_FADEIN ? f - c->start : c->start + c->length - f;
+        long other = drag.kind == D_FADEIN ? c->fade_out : c->fade_in;
+        v = v < 0 ? 0 : v > c->length - other ? c->length - other : v;
+        LOCK();
+        if (drag.kind == D_FADEIN) c->fade_in = v;
+        else c->fade_out = v;
+        UNLOCK();
+        break;
+    }
     case D_TVOL: {
         SDL_Rect vb = volume_bar(drag.track);
         float v = (float)(mx - vb.x) / vb.w;
@@ -2159,6 +2596,12 @@ static void key(SDL_Keysym k)
         case SDLK_s: save_project(shift != 0); return;
         case SDLK_o: request(ACT_OPEN, NULL); return;
         case SDLK_n: request(ACT_NEW, NULL); return;
+        case SDLK_r:
+            if (selected >= 0) {
+                clip_variant(selected, clip_semis(&P.clips[selected]), !clip_rev(&P.clips[selected]));
+                status(clip_rev(&P.clips[selected]) ? "Clip reversed" : "Clip plays forwards");
+            }
+            return;
         }
     }
     switch (k.sym) {
@@ -2209,16 +2652,31 @@ static void key(SDL_Keysym k)
     case SDLK_ESCAPE: selected = -1; break;
     case SDLK_F1:
         theory_open = !theory_open;
-        pads_open = 0;
+        pads_open = mixer_open = 0;
         break;
     case SDLK_F2:
         pads_open = !pads_open;
-        theory_open = 0;
+        theory_open = mixer_open = 0;
+        break;
+    case SDLK_F3:
+        mixer_open = !mixer_open;
+        theory_open = pads_open = 0;
+        break;
+    case SDLK_LEFTBRACKET:
+    case SDLK_RIGHTBRACKET:             /* transpose the selected clip */
+        if (selected >= 0) {
+            Clip *c = &P.clips[selected];
+            int st = clip_semis(c) + (k.sym == SDLK_RIGHTBRACKET ? 1 : -1);
+            if (st >= -24 && st <= 24) clip_variant(selected, st, clip_rev(c));
+            status("Clip pitch %+d semitones", clip_semis(&P.clips[selected]));
+        }
         break;
     }
 }
 
 /* ---------------------------------------------------------------- audio */
+
+static Mixer *MX;                       /* the live mixer: its effects keep ringing between callbacks */
 
 static void audio_cb(void *ud, Uint8 *stream, int len)
 {
@@ -2226,6 +2684,7 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
     float *out = (float *)stream;
     int frames = len / (int)(2 * sizeof(float));
     memset(stream, 0, (size_t)len);
+    if (!P.playing) mixer_run(MX, &P, P.playhead, 0, out, frames, -1, 1);   /* pads, instrument, tails */
     if (P.playing) {
         int done = 0;
         while (done < frames) {
@@ -2236,7 +2695,7 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
                 P.playhead = P.loop_start;
                 continue;
             }
-            mix(&P, P.playhead, out + 2 * done, n, -1);
+            mixer_run(MX, &P, P.playhead, 1, out + 2 * done, n, -1, 1);
             P.playhead += n;
             done += n;
             if (looping && P.playhead >= P.loop_end) P.playhead = P.loop_start;
@@ -2256,7 +2715,6 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
             out[2 * i + 1] += scratch[2 * scratch_pos + 1];
         }
     }
-    voices_mix(&P, out, frames);
     for (int i = 0; i < 2 * frames; i++)
         out[i] = soft_clip(out[i] * P.master);
 }
@@ -2267,6 +2725,10 @@ static void open_audio(void)
     if (dev) {
         SDL_CloseAudioDevice(dev);
         dev = 0;
+    }
+    if (mixer_rate(MX) != SR) {         /* the device is closed: nothing is using the old one */
+        mixer_free(MX);
+        MX = mixer_new();
     }
     SDL_AudioSpec want, have;
     SDL_zero(want);
@@ -2375,6 +2837,31 @@ static void check(int ok, const char *what)
 }
 
 static int lane_y(int t) { return L.lanes_y + t * L.lane_h + L.lane_h / 2; }
+
+static float *test_render(Project *p, long a, long n, int only)
+{
+    float *b = calloc((size_t)n * 2, sizeof(float));
+    Mixer *m = mixer_new();
+    for (long pos = 0; pos < n; pos += 1024) {
+        int k = n - pos < 1024 ? (int)(n - pos) : 1024;
+        mixer_run(m, p, a + pos, 1, b + 2 * pos, k, only, 0);
+    }
+    mixer_free(m);
+    return b;
+}
+
+static double test_rms(const float *b, long a, long e, int ch)   /* ch 0 left, 1 right, 2 both */
+{
+    double sum = 0;
+    long n = 0;
+    for (long i = a; i < e; i++)
+        for (int c = 0; c < 2; c++)
+            if (ch == 2 || ch == c) {
+                sum += (double)b[2 * i + c] * b[2 * i + c];
+                n++;
+            }
+    return n ? sqrt(sum / n) : 0;
+}
 
 static int selftest(void)
 {
@@ -2568,7 +3055,7 @@ static int selftest(void)
     char tpath[1100];
     const char *tmpdir = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
     snprintf(tpath, sizeof tpath, "%s/tinydaw-selftest-%u.tdaw", tmpdir, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
-    P.pads[2] = (Pad){1, PAD_HOLD, 0.5f, 3, 4};
+    P.pads[2] = (Pad){1, PAD_HOLD, 0.5f, 3, 4, 0};
     P.tracks[1].mute = 1;
     frame();
     check(project_save(&P, tpath, msg, sizeof msg) == 0, "the project saves");
@@ -2613,18 +3100,18 @@ static int selftest(void)
 
     /* pads */
     binds_default();
-    P.pads[0] = (Pad){0, PAD_ONESHOT, 0.8f, 0, 2};
+    P.pads[0] = (Pad){0, PAD_ONESHOT, 0.8f, 0, 2, 0};
     LOCK();
     voices_clear(&P);
     UNLOCK();
     input_event(SRC_KEY, binds[0].key, 110, 1, -1);
     check(voice_playing(&P, 0), "pressing a pad's key plays its sound");
-    P.pads[1] = (Pad){0, PAD_HOLD, 0.8f, 0, 2};
+    P.pads[1] = (Pad){0, PAD_HOLD, 0.8f, 0, 2, 0};
     input_event(SRC_JOY, binds[1].joy, 127, 1, 0);
     int held = voice_playing(&P, 1);
     input_event(SRC_JOY, binds[1].joy, 0, 0, 0);
     check(held && !voice_playing(&P, 1), "a Hold pad plays while its button is down");
-    P.pads[2] = (Pad){0, PAD_LOOP, 0.8f, 0, 2};
+    P.pads[2] = (Pad){0, PAD_LOOP, 0.8f, 0, 2, 0};
     input_event(SRC_MIDI, binds[2].midi, 100, 1, 0);
     input_event(SRC_MIDI, binds[2].midi, 0, 0, 0);
     int looping = voice_playing(&P, 2);
@@ -2648,9 +3135,11 @@ static int selftest(void)
         if (P.voices[i].active && P.voices[i].note == 72 && fabs(P.voices[i].step - 2.0) < 1e-9) found_inst = 1;
     check(found_inst, "a MIDI note not on a pad plays the instrument an octave up");
     float vbuf[2 * 256] = {0}, vpeak = 0;
+    Mixer *vm = mixer_new();
     LOCK();
-    voices_mix(&P, vbuf, 256);
+    mixer_run(vm, &P, 0, 0, vbuf, 256, -1, 1);
     UNLOCK();
+    mixer_free(vm);
     for (int i = 0; i < 2 * 256; i++) vpeak = fabsf(vbuf[i]) > vpeak ? fabsf(vbuf[i]) : vpeak;
     check(vpeak > 0.01f, "live voices are heard in the output");
     LOCK();
@@ -2684,14 +3173,168 @@ static int selftest(void)
           "recorded hits land on the pad's track, snapped to the grid");
     check(nundo == u0 + 1, "a recorded take is one undo step");
 
+    /* effects: each one measured on rendered audio, in a separate test project */
+    {
+        Project *T = malloc(sizeof *T);
+        project_init(T);
+        GenParams saw = {WAVE_SAW, 69, 2.0, 0.5, 2, 2, 440};          /* 440 Hz saw, 1 s at 120 BPM */
+        int ss = sample_generate(T, &saw);
+        long sl = T->samples[ss].frames, half = sl / 2;
+        T->clips[T->nclips++] = (Clip){ss, 0, 0, 0, sl, 0, 0, 0};
+        float *b0 = test_render(T, 0, sl, -1);
+        double ref = test_rms(b0, 0, sl, 2);
+
+        T->tracks[0].pan = -1;
+        float *b1 = test_render(T, 0, sl, -1);
+        check(test_rms(b1, 0, sl, 1) < 1e-4 && test_rms(b1, 0, sl, 0) > ref * 1.3, "pan hard left silences the right");
+        T->tracks[0].pan = 0;
+
+        T->tracks[0].filter = FILT_LOW;
+        T->tracks[0].cutoff = 150;
+        T->tracks[0].reso = 0;
+        float *b2 = test_render(T, 0, sl, -1);
+        check(test_rms(b2, half, sl, 2) < ref * 0.4, "a low-pass well below the note takes most of it away");
+        T->tracks[0].filter = FILT_HIGH;
+        T->tracks[0].cutoff = 4000;
+        float *b3 = test_render(T, 0, sl, -1);
+        check(test_rms(b3, half, sl, 2) < ref * 0.5 && test_rms(b3, half, sl, 2) > ref * 0.02,
+              "a high-pass above the note leaves only its harmonics");
+        T->tracks[0].filter = FILT_LOW;
+        T->tracks[0].cutoff = 440;
+        T->tracks[0].reso = 0;
+        float *b4a = test_render(T, 0, sl, -1);
+        T->tracks[0].reso = 0.95f;
+        float *b4b = test_render(T, 0, sl, -1);
+        check(test_rms(b4b, half, sl, 2) > test_rms(b4a, half, sl, 2) * 1.5, "resonance boosts the cutoff frequency");
+        T->tracks[0].filter = FILT_OFF;
+
+        T->tracks[0].eq[0] = 12;
+        GenParams low = {WAVE_SINE, 33, 2.0, 0.3, 2, 2, 440};          /* 55 Hz */
+        int ls = sample_generate(T, &low);
+        T->clips[0].sample = ls;
+        T->clips[0].length = T->samples[ls].frames;
+        float *b5 = test_render(T, 0, sl, -1);
+        T->tracks[0].eq[0] = 0;
+        float *b5r = test_render(T, 0, sl, -1);
+        check(test_rms(b5, half, sl, 2) > test_rms(b5r, half, sl, 2) * 2.5, "the low EQ band boosts a bass note");
+        T->clips[0].sample = ss;
+        T->clips[0].length = sl;
+
+        T->clips[0].gain_db = -6.0206f;
+        float *b6 = test_render(T, 0, sl, -1);
+        check(fabs(test_rms(b6, half, sl, 2) / test_rms(b0, half, sl, 2) - 0.5) < 0.01, "clip gain -6 dB halves it");
+        T->clips[0].gain_db = 0;
+        T->clips[0].fade_in = sl / 4;
+        T->clips[0].fade_out = sl / 4;
+        float *b7 = test_render(T, 0, sl, -1);
+        check(test_rms(b7, 0, sl / 40, 2) < ref * 0.06 && test_rms(b7, sl - sl / 40, sl, 2) < ref * 0.06 &&
+                  test_rms(b7, sl / 3, 2 * sl / 3, 2) > ref * 0.9, "fades start and end at silence");
+        T->clips[0].fade_in = T->clips[0].fade_out = 0;
+
+        T->tracks[0].drive = 1;
+        T->clips[0].gain_db = -20;
+        float *b8 = test_render(T, 0, sl, -1);
+        T->tracks[0].drive = 0;
+        float *b8r = test_render(T, 0, sl, -1);
+        check(test_rms(b8, half, sl, 2) > test_rms(b8r, half, sl, 2) * 2, "drive makes a quiet sound hotter");
+        T->clips[0].gain_db = 0;
+
+        long beat = (long)llround(60.0 / T->bpm * SR), end = sl + 3 * SR;
+        T->clips[0].length = beat / 4;                                 /* a short blip, then silence */
+        T->tracks[0].delay_send = 1;
+        T->fx.delay_div = 5;                                           /* 1/4 = one beat */
+        T->fx.delay_feedback = 0.5f;
+        float *b9 = test_render(T, 0, end, -1);
+        check(test_rms(b9, beat + beat / 16, beat + beat / 5, 2) > 0.02 && test_rms(b9, beat / 2, beat - 100, 2) < 1e-3,
+              "the delay repeats the sound one beat later, silent in between");
+        T->tracks[0].delay_send = 0;
+        T->tracks[0].reverb_send = 1;
+        float *b10 = test_render(T, 0, end, -1);
+        check(test_rms(b10, beat / 2, beat, 2) > 1e-3, "the reverb rings on after the sound stops");
+        check(project_has_tails(T), "a reverb send counts as a tail for export");
+        T->tracks[0].reverb_send = 0;
+        T->clips[0].length = sl;
+
+        GenParams kick = {WAVE_KICK, 36, 0.5, 0.9, 0, 0, 440};
+        int ks = sample_generate(T, &kick);
+        T->clips[T->nclips++] = (Clip){ks, 1, 0, 0, T->samples[ks].frames, 0, 0, 0};
+        T->fx.sc_source = 1;
+        T->tracks[0].duck = 1;
+        float *b11 = test_render(T, 0, sl, 0);                         /* track 0 alone: its stem */
+        T->tracks[0].duck = 0;
+        float *b11r = test_render(T, 0, sl, 0);
+        check(test_rms(b11, 0, SR / 20, 2) < test_rms(b11r, 0, SR / 20, 2) * 0.4 &&
+                  test_rms(b11, sl - SR / 10, sl, 2) > test_rms(b11r, sl - SR / 10, sl, 2) * 0.8,
+              "the sidechain ducks the track under the kick, then lets it back up");
+
+        int up = sample_variant(T, ss, 12, 0), rv = sample_variant(T, ss, 0, 1), kup = sample_variant(T, ks, 12, 0);
+        int zc0 = 0, zc1 = 0;
+        for (long i = 1; i < sl; i++) {
+            zc0 += (T->samples[ss].data[2 * i - 2] < 0) != (T->samples[ss].data[2 * i] < 0);
+            zc1 += (T->samples[up].data[2 * i - 2] < 0) != (T->samples[up].data[2 * i] < 0);
+        }
+        check(up >= 0 && T->samples[up].frames == sl && abs(zc1 - 2 * zc0) < zc0 / 20,
+              "a synth note an octave up is made again: same length, twice the frequency");
+        check(kup >= 0 && labs(T->samples[kup].frames - T->samples[ks].frames / 2) <= 2,
+              "a recorded sound an octave up is resampled: half the length");
+        check(rv >= 0 && T->samples[rv].data[0] == T->samples[ss].data[2 * (sl - 1)], "reverse plays it backwards");
+        check(sample_variant(T, up, 12, 0) == up && sample_base(T, up) == ss, "variants are reused, not duplicated");
+
+        T->tracks[0].filter = FILT_BAND;
+        T->tracks[0].eq[2] = -3;
+        T->fx.pingpong = 1;
+        T->clips[0].gain_db = -2.5f;
+        T->clips[0].fade_in = 100;
+        T->clips[T->nclips++] = (Clip){rv, 2, 0, 0, T->samples[rv].frames, 0, 0, 0};
+        char fpath[1200];
+        snprintf(fpath, sizeof fpath, "%s.fx", tpath);
+        project_save(T, fpath, msg, sizeof msg);
+        Project *U = malloc(sizeof *U);
+        int lr2 = project_load(U, fpath, msg, sizeof msg);
+        check(lr2 == 0 && !memcmp(U->tracks, T->tracks, sizeof T->tracks) && !memcmp(&U->fx, &T->fx, sizeof T->fx) &&
+                  !memcmp(U->clips, T->clips, (size_t)T->nclips * sizeof(Clip)),
+              "track effects, master effects and clip gain/fades are saved exactly");
+        check(lr2 == 0 && U->samples[rv].pitched && U->samples[rv].reversed && U->samples[rv].frames == sl,
+              "a reversed clip's sound comes back reversed");
+        if (lr2 == 0) project_free(U);
+        free(U);
+        remove(fpath);
+
+        float *bufs[] = {b0, b1, b2, b3, b4a, b4b, b5, b5r, b6, b7, b8, b8r, b9, b10, b11, b11r};
+        for (size_t i = 0; i < sizeof bufs / sizeof *bufs; i++) free(bufs[i]);
+        project_free(T);
+        free(T);
+    }
+
+    /* the pitch wheel and mod wheel arrive as continuous MIDI controls, not pad presses */
+    midi_in(MIDI_BEND, 16383, 0, NULL);
+    check(P.bend > 0.99f, "the pitch wheel bends live sounds");
+    midi_in(MIDI_BEND, 8192, 0, NULL);
+    midi_in(MIDI_CCV + 1, 127, 0, NULL);
+    check(P.modwheel > 0.99f && P.bend == 0, "the mod wheel is read, and the wheel springs back to centre");
+    midi_in(MIDI_CCV + 1, 0, 0, NULL);
+
+    /* clip edits through the UI helpers */
+    frame();
+    int ci = P.nclips - 1;
+    long len0 = P.clips[ci].length, fr0 = P.samples[P.clips[ci].sample].frames;
+    u0 = nundo;
+    clip_variant(ci, 12, 0);
+    frame();
+    long want = llround(len0 * (double)P.samples[P.clips[ci].sample].frames / fr0);
+    check(clip_semis(&P.clips[ci]) == 12 && labs(P.clips[ci].length - want) <= 2 && nundo == u0 + 1,
+          "transposing a clip keeps the same stretch of sound, as one undo step");
+    undo_redo(0);
+    check(clip_semis(&P.clips[ci]) == 0 && P.clips[ci].length == len0, "and undo brings the original back");
+
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
     int vj = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 4, 12, 1);
     if (vj >= 0) {
         SDL_Joystick *vh = SDL_JoystickOpen(vj);
         int got_added = 0, got_hit = 0;
         binds_default();
-        P.pads[0] = (Pad){0, PAD_HOLD, 0.8f, 0, 0};
-        P.pads[12] = (Pad){0, PAD_HOLD, 0.8f, 0, 0};
+        P.pads[0] = (Pad){0, PAD_HOLD, 0.8f, 0, 0, 0};
+        P.pads[12] = (Pad){0, PAD_HOLD, 0.8f, 0, 0, 0};
         LOCK();
         voices_clear(&P);
         UNLOCK();
@@ -3773,7 +4416,7 @@ static void export_dialog(void)
 static void frame(void)
 {
     static int min_for = -1;            /* the pane needs a wider window */
-    int pane = theory_open || pads_open;
+    int pane = theory_open || pads_open || mixer_open;
     if (min_for != pane) {
         min_for = pane;
         SDL_SetWindowMinimumSize(win, pane ? 1240 : 900, 560);
@@ -3803,6 +4446,7 @@ static void frame(void)
     timeline();
     if (theory_open) theory_pane();
     else if (pads_open) pads_pane();
+    else if (mixer_open) mixer_pane();
     status_bar();
     if (modal) {
         mx = smx;
@@ -4091,6 +4735,23 @@ int main(int argc, char **argv)
             pads_content_h = 2000;
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
+        if (getenv("TINYDAW_SHOT_MIXER")) {
+            mixer_open = 1;
+            mixer_scroll = atoi(getenv("TINYDAW_SHOT_MIXER"));
+            mixer_content_h = 3000;
+            sel_track = 3;
+            for (int i = 0; i < P.nclips; i++)
+                if (P.clips[i].track == 3) {
+                    selected = i;
+                    break;
+                }
+            P.tracks[3].filter = FILT_LOW;
+            P.tracks[3].cutoff = 800;
+            P.tracks[3].pan = -0.3f;
+            P.tracks[3].reverb_send = 0.25f;
+            P.clips[selected].gain_db = -3;
+            P.clips[selected].fade_out = P.clips[selected].length / 2;
+        }
         if (getenv("TINYDAW_SHOT_CONFIRM")) confirm_act = ACT_QUIT;
         const char *th = getenv("TINYDAW_SHOT_THEORY");      /* "tab,root,scale" */
         const char *gs = getenv("TINYDAW_SHOT_GENRE");

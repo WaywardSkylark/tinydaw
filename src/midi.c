@@ -31,7 +31,9 @@ static void CALLBACK on_midi(HMIDIIN h, UINT msg, DWORD_PTR inst, DWORD_PTR p1, 
     int dev = (int)inst, status = p1 & 0xF0, ch = p1 & 0x0F, d1 = (p1 >> 8) & 0x7F, d2 = (p1 >> 16) & 0x7F;
     if (status == 0x90) callback(d1, d2, dev, user);           /* velocity 0 = off */
     else if (status == 0x80) callback(d1, 0, dev, user);
+    else if (status == 0xE0) callback(MIDI_BEND, d1 | d2 << 7, dev, user);
     else if (status == 0xB0) {
+        callback(MIDI_CCV + d1, d2, dev, user);
         int down = d2 >= 64;
         if (down != cc_down[ch][d1]) {
             cc_down[ch][d1] = (unsigned char)down;
@@ -226,8 +228,12 @@ static void handle(const snd_seq_event_t *ev)
     case SND_SEQ_EVENT_NOTEOFF:
         callback(ev->data.note.note & 127, 0, dev, user);
         break;
-    case SND_SEQ_EVENT_CONTROLLER: {                  /* pads and buttons that send CCs */
+    case SND_SEQ_EVENT_PITCHBEND:
+        callback(MIDI_BEND, ev->data.control.value + 8192, dev, user);
+        break;
+    case SND_SEQ_EVENT_CONTROLLER: {                  /* knobs, and pads and buttons that send CCs */
         int ch = ev->data.control.channel & 15, cc = ev->data.control.param & 127;
+        callback(MIDI_CCV + cc, ev->data.control.value & 127, dev, user);
         int down = ev->data.control.value >= 64;
         if (down != cc_down[ch][cc]) {
             cc_down[ch][cc] = (unsigned char)down;

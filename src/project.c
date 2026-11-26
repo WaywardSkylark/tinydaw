@@ -33,7 +33,7 @@ static const char *kind_of(const Sample *s)
     if (s->is_beat) return "beat";
     if (s->generated && s->nchord) return "chord";
     if (s->generated) return "gen";
-    if (s->pitched) return "pitched";
+    if (s->pitched) return "variant";
     if (s->path[0]) return "file";
     return "raw";
 }
@@ -50,10 +50,16 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     fprintf(f, MAGIC "\n");
     fprintf(f, "rate %d\nbpm %.17g\na4 %.17g\nmaster %.9g\n", SR, p->bpm, p->a4, p->master);
     fprintf(f, "loop %d %ld %ld\nplayhead %ld\n", p->loop, p->loop_start, p->loop_end, p->playhead);
-    fprintf(f, "instrument %d %d\n", p->inst_sample, p->inst_root);
+    fprintf(f, "instrument %d %d %d\n", p->inst_sample, p->inst_root, p->inst_track);
+    const MasterFx *fx = &p->fx;
+    fprintf(f, "fx %d %.9g %.9g %.9g %d %.9g %.9g %.9g %d %.9g %.9g\n", fx->delay_div, fx->delay_feedback,
+            fx->delay_tone, fx->delay_level, fx->pingpong, fx->reverb_size, fx->reverb_damp, fx->reverb_level,
+            fx->sc_source, fx->sc_release, fx->bend_range);
     for (int t = 0; t < p->ntracks; t++) {
         const Track *tr = &p->tracks[t];
         fprintf(f, "track %.9g %d %d %s\n", tr->volume, tr->mute, tr->solo, tr->name);
+        fprintf(f, "trackfx %.9g %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n", tr->pan, tr->filter, tr->cutoff,
+                tr->reso, tr->eq[0], tr->eq[1], tr->eq[2], tr->drive, tr->delay_send, tr->reverb_send, tr->duck);
     }
     int raw = 0;
     for (int i = 0; i < p->nsamples; i++) {
@@ -77,17 +83,18 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
                     b->kick_hz, b->kick_decay, b->snare_hz, b->hat_decay, b->open_decay, b->volume, s->beat_mask);
             for (int l = 0; l < DRUM_LANES; l++) fprintf(f, "lane %d %s\n", l, b->lanes[l][0] ? b->lanes[l] : "-");
         }
-        if (s->pitched) fprintf(f, "pitch %d %d\n", s->src, s->semis);
+        if (s->pitched) fprintf(f, "variant %d %d %d\n", s->src, s->semis, s->reversed);
         if (s->path[0]) fprintf(f, "path %s\n", s->path);
         fprintf(f, "end\n");
     }
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
-        fprintf(f, "clip %d %d %ld %ld %ld\n", cl->sample, cl->track, cl->start, cl->offset, cl->length);
+        fprintf(f, "clip %d %d %ld %ld %ld %.9g %ld %ld\n", cl->sample, cl->track, cl->start, cl->offset, cl->length,
+                cl->gain_db, cl->fade_in, cl->fade_out);
     }
     for (int i = 0; i < NPADS; i++) {
         const Pad *pd = &p->pads[i];
-        fprintf(f, "pad %d %d %d %.9g %d %d\n", i, pd->sample, pd->mode, pd->volume, pd->pitch, pd->track);
+        fprintf(f, "pad %d %d %d %.9g %d %d %.9g\n", i, pd->sample, pd->mode, pd->volume, pd->pitch, pd->track, pd->pan);
     }
     int bad = ferror(f);
     if (fclose(f) != 0 || bad || replace_file(tmp, path) != 0) {   /* write then rename: never a half-written file */
@@ -111,7 +118,7 @@ typedef struct {
     double gen_bpm;
     int chord[6], nchord;
     BeatSpec beat;
-    int mask, src, semis;
+    int mask, src, semis, reversed;
 } Pending;
 
 static const char *rest_after(const char *line, int fields)   /* the text after n words */
@@ -146,8 +153,8 @@ static int build(Project *p, Pending *s, int *missing)
     } else if (!strcmp(s->kind, "beat") && s->has_beat) {
         p->bpm = s->gen_bpm;
         idx = sample_generate_beat(p, &s->beat, s->mask, s->name);
-    } else if (!strcmp(s->kind, "pitched") && s->src >= 0 && s->src < p->nsamples) {
-        idx = sample_pitched(p, s->src, s->semis);
+    } else if ((!strcmp(s->kind, "pitched") || !strcmp(s->kind, "variant")) && s->src >= 0 && s->src < p->nsamples) {
+        idx = sample_variant(p, s->src, s->semis, s->reversed);
     } else if (!strcmp(s->kind, "file") && s->path[0]) {
         char err[200];
         idx = sample_import(p, s->path, err, sizeof err);
@@ -204,7 +211,21 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         } else if (!strcmp(word, "playhead")) {
             ok = sscanf(line, "playhead %ld", &p->playhead) == 1;
         } else if (!strcmp(word, "instrument")) {
-            ok = sscanf(line, "instrument %d %d", &p->inst_sample, &p->inst_root) == 2;
+            ok = sscanf(line, "instrument %d %d %d", &p->inst_sample, &p->inst_root, &p->inst_track) >= 2;
+        } else if (!strcmp(word, "fx")) {
+            MasterFx *fx = &p->fx;
+            ok = sscanf(line, "fx %d %f %f %f %d %f %f %f %d %f %f", &fx->delay_div, &fx->delay_feedback,
+                        &fx->delay_tone, &fx->delay_level, &fx->pingpong, &fx->reverb_size, &fx->reverb_damp,
+                        &fx->reverb_level, &fx->sc_source, &fx->sc_release, &fx->bend_range) == 11;
+            if (fx->delay_div < 0 || fx->delay_div >= DELAY_DIVS) fx->delay_div = 4;
+            if (fx->sc_source >= MAX_TRACKS) fx->sc_source = -1;
+        } else if (!strcmp(word, "trackfx")) {
+            if (ntracks > 0) {
+                Track *t = &p->tracks[ntracks - 1];
+                ok = sscanf(line, "trackfx %f %d %f %f %f %f %f %f %f %f %f", &t->pan, &t->filter, &t->cutoff, &t->reso,
+                            &t->eq[0], &t->eq[1], &t->eq[2], &t->drive, &t->delay_send, &t->reverb_send, &t->duck) == 11;
+                if (t->filter < 0 || t->filter >= FILT_TYPES) t->filter = FILT_OFF;
+            }
         } else if (!strcmp(word, "track")) {
             if (ntracks < MAX_TRACKS) {
                 Track *t = &p->tracks[ntracks];
@@ -239,8 +260,10 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
             char pat[33] = "";
             ok = sscanf(line, "lane %d %32s", &l, pat) == 2 && l >= 0 && l < DRUM_LANES;
             if (ok) snprintf(s.beat.lanes[l], 33, "%s", strcmp(pat, "-") ? pat : "");
-        } else if (in_sample && !strcmp(word, "pitch")) {
+        } else if (in_sample && !strcmp(word, "pitch")) {         /* older files */
             ok = sscanf(line, "pitch %d %d", &s.src, &s.semis) == 2;
+        } else if (in_sample && !strcmp(word, "variant")) {
+            ok = sscanf(line, "variant %d %d %d", &s.src, &s.semis, &s.reversed) == 3;
         } else if (in_sample && !strcmp(word, "path")) {
             snprintf(s.path, sizeof s.path, "%.1023s", rest_after(line, 1));
         } else if (in_sample && !strcmp(word, "end")) {
@@ -252,7 +275,9 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
             in_sample = 0;
         } else if (!strcmp(word, "clip")) {
             Clip c;
-            ok = sscanf(line, "clip %d %d %ld %ld %ld", &c.sample, &c.track, &c.start, &c.offset, &c.length) == 5 &&
+            memset(&c, 0, sizeof c);
+            ok = sscanf(line, "clip %d %d %ld %ld %ld %f %ld %ld", &c.sample, &c.track, &c.start, &c.offset, &c.length,
+                        &c.gain_db, &c.fade_in, &c.fade_out) >= 5 &&
                  c.sample >= 0 && c.sample < p->nsamples && c.track >= 0 && c.track < MAX_TRACKS;
             if (ok && p->nclips < MAX_CLIPS) {
                 long fr = p->samples[c.sample].frames;
@@ -261,12 +286,16 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 if (c.offset + c.length > fr) c.length = fr - c.offset;
                 if (c.length < 1) c.length = 1;
                 if (c.start < 0) c.start = 0;
+                if (c.fade_in < 0 || c.fade_in > c.length) c.fade_in = 0;
+                if (c.fade_out < 0 || c.fade_in + c.fade_out > c.length) c.fade_out = 0;
                 p->clips[p->nclips++] = c;
             }
         } else if (!strcmp(word, "pad")) {
             int i = -1;
             Pad pd;
-            ok = sscanf(line, "pad %d %d %d %f %d %d", &i, &pd.sample, &pd.mode, &pd.volume, &pd.pitch, &pd.track) == 6 &&
+            memset(&pd, 0, sizeof pd);
+            ok = sscanf(line, "pad %d %d %d %f %d %d %f", &i, &pd.sample, &pd.mode, &pd.volume, &pd.pitch, &pd.track,
+                        &pd.pan) >= 6 &&
                  i >= 0 && i < NPADS;
             if (ok) {
                 if (pd.sample >= p->nsamples) pd.sample = -1;
@@ -286,6 +315,8 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
     for (int c = 0; c < p->nclips; c++)
         if (p->clips[c].track >= p->ntracks) p->ntracks = p->clips[c].track + 1;
     if (p->inst_sample >= p->nsamples) p->inst_sample = -1;
+    if (p->inst_track < 0 || p->inst_track >= p->ntracks) p->inst_track = 0;
+    if (p->fx.sc_source >= p->ntracks) p->fx.sc_source = -1;
     if (p->loop_end < p->loop_start) p->loop_end = p->loop_start;
     p->playing = 0;
     p->preview = -1;

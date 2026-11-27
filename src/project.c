@@ -30,6 +30,7 @@ void project_free(Project *p)
 
 static const char *kind_of(const Sample *s)
 {
+    if (s->synth) return "synth";
     if (s->is_beat == 2) return "hit";
     if (s->is_beat) return "beat";
     if (s->generated && s->nchord) return "chord";
@@ -85,6 +86,14 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
                     b->kick_hz, b->kick_decay, b->snare_hz, b->hat_decay, b->open_decay, b->volume, s->beat_mask);
             for (int l = 0; l < DRUM_LANES; l++) fprintf(f, "lane %d %s\n", l, b->lanes[l][0] ? b->lanes[l] : "-");
         }
+        if (s->synth) {
+            const SynthSound *y = &s->syn;
+            char pt[1500];
+            synth_patch_text(&y->patch, pt, sizeof pt);
+            fprintf(f, "synth %d %.9g %.9g %.9g", y->note, y->seconds, y->volume, y->a4);
+            for (int m = 0; m < MACROS; m++) fprintf(f, " %.6g", y->macro[m]);
+            fprintf(f, "\npatch%s\n", pt);
+        }
         if (s->pitched) fprintf(f, "variant %d %d %d\n", s->src, s->semis, s->reversed);
         if (s->path[0]) fprintf(f, "path %s\n", s->path);
         if (s->removed) fprintf(f, "removed\n");
@@ -126,7 +135,8 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
 typedef struct {
     char kind[16], name[96], path[1024];
     long frames;
-    int has_gen, has_beat;
+    int has_gen, has_beat, has_synth;
+    SynthSound syn;
     GenParams gen;
     double gen_bpm;
     int chord[6], nchord;
@@ -166,6 +176,8 @@ static int build(Project *p, Pending *s, int *missing)
     } else if (!strcmp(s->kind, "beat") && s->has_beat) {
         p->bpm = s->gen_bpm;
         idx = sample_generate_beat(p, &s->beat, s->mask, s->name);
+    } else if (!strcmp(s->kind, "synth") && s->has_synth) {
+        idx = sample_generate_synth(p, &s->syn, s->name);
     } else if (!strcmp(s->kind, "hit") && s->has_beat) {
         idx = sample_generate_hit(p, &s->beat, s->mask, s->name);
     } else if ((!strcmp(s->kind, "pitched") || !strcmp(s->kind, "variant")) && s->src >= 0 && s->src < p->nsamples) {
@@ -271,6 +283,15 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                         &b->kick_hz, &b->kick_decay, &b->snare_hz, &b->hat_decay, &b->open_decay, &b->volume,
                         &s.mask) == 10;
             s.has_beat = ok;
+        } else if (in_sample && !strcmp(word, "synth")) {
+            SynthSound *y = &s.syn;
+            double *m = y->macro;
+            ok = sscanf(line, "synth %d %lf %lf %lf %lf %lf %lf %lf %lf", &y->note, &y->seconds, &y->volume, &y->a4,
+                        &m[0], &m[1], &m[2], &m[3], &m[4]) == 4 + MACROS &&
+                 y->note >= 0 && y->note <= 127 && y->seconds > 0;
+            s.has_synth = ok;
+        } else if (in_sample && !strcmp(word, "patch")) {
+            synth_patch_parse(rest_after(line, 1), &s.syn.patch);
         } else if (in_sample && !strcmp(word, "lane")) {
             int l = -1;
             char pat[33] = "";

@@ -197,6 +197,7 @@ void auto_apply(const Project *p, int track, long at, Track *out)
 
 int sample_root(const Sample *s)
 {
+    if (s->synth) return s->syn.note;
     if (s->generated && !s->is_beat) return s->nchord ? s->chord[0] : s->gen.note;
     return 60;                                   /* drums and imported sounds: as is at middle C */
 }

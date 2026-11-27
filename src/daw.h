@@ -45,6 +45,61 @@ typedef struct {
     double volume;
 } BeatSpec;
 
+/* The Generator's synth: a small subtractive/FM voice that the genre presets are made from.
+ * Zero means "off" for every field, so a preset only names what it uses. */
+enum { SW_SAW, SW_SQUARE, SW_TRI, SW_SINE, SW_COUNT };
+enum { SF_NONE, SF_LOW, SF_HIGH, SF_BAND };
+typedef struct {
+    int wave, noosc;        /* main oscillator; noosc = noise only (hats, wind) */
+    int wave2;              /* second oscillator, mix2 loud, semi2 semitones away */
+    double semi2, mix2;
+    int voices;             /* unison copies (1..7), spread detune cents and width (0..1) wide */
+    double detune, width;
+    double pw;              /* square pulse width (0 = 0.5) */
+    double sub;             /* sine an octave down */
+    double noise, noise_decay;      /* noise level; its own decay time (s), 0 = follows the envelope */
+    int bursts;             /* the noise restarts this many times 11 ms apart (claps) */
+    double fm, fm_ratio, fm_decay;  /* phase modulation: amount, modulator ratio, decay (s) */
+    double pitch_drop, pitch_time;  /* starts pitch_drop semitones off and falls back over pitch_time s */
+    double psweep;          /* semitones the pitch moves over the whole sound (risers) */
+    double vibrato, lfo_hz; /* vibrato in cents; the LFO rate for vibrato and wobble */
+    int filter;             /* SF_* */
+    double cutoff, reso;    /* Hz, 0..1 */
+    double fenv, fdecay;    /* the filter opens fenv octaves and closes over fdecay s */
+    double fsweep;          /* octaves the cutoff moves over the whole sound */
+    double wobble;          /* LFO depth on the cutoff, octaves */
+    double attack, decay, sustain, release;   /* s, s, 0..1, s */
+    double drive, crush;    /* saturation and bit/rate reduction, 0..1 */
+} SynthPatch;
+
+/* A Generator sound: the preset's patch plus the friendly controls (0..1, 0.5 = as designed). */
+enum { MAC_BRIGHT, MAC_SOFT, MAC_THICK, MAC_GRIT, MAC_WOBBLE, MACROS };
+typedef struct {
+    SynthPatch patch;
+    double macro[MACROS];
+    int note;               /* MIDI note */
+    double seconds, volume, a4;
+} SynthSound;
+
+typedef struct {
+    const char *name, *genre, *kind, *about;
+    SynthPatch patch;
+    int note;
+    double seconds;
+} SynthPreset;
+extern const SynthPreset SYNTH_PRESETS[];
+extern const int NSYNTH_PRESETS;
+extern const char *const SYNTH_GENRES[];
+extern const int NSYNTH_GENRES;
+extern const char *const SYNTH_KINDS[];
+extern const int NSYNTH_KINDS;
+extern const char *const MACRO_NAMES[MACROS][3];   /* name, low end, high end */
+
+float *render_synth(const SynthSound *s, long *frames);   /* stereo at the project rate */
+void synth_from_preset(SynthSound *s, int preset);
+void synth_patch_text(const SynthPatch *p, char *buf, size_t n);   /* for project files */
+void synth_patch_parse(const char *s, SynthPatch *p);
+
 /* A sound in the library: interleaved stereo float at the project rate, plus a min/max
  * overview for drawing. Generated sounds remember their recipe and imported ones their
  * file, so a rate change can rebuild them at full quality instead of resampling. */
@@ -68,6 +123,8 @@ typedef struct {
     int pitched;            /* a variant of sample `src`: shifted `semis` semitones and/or reversed.
                              * Made for clip pitch/reverse and pad recording; hidden in the library */
     int src, semis, reversed;
+    int synth;              /* made in the Generator: rebuilt from syn */
+    SynthSound syn;
 } Sample;
 
 /* A placed region on the timeline that plays part of a sample. All positions in frames.
@@ -245,6 +302,7 @@ int sample_generate_beat(Project *p, const BeatSpec *b, int mask, const char *na
 /* One hit of one drum (lane 0-5: kick, snare, clap, closed hat, open hat, percussion) from a kit */
 float *render_hit(const BeatSpec *b, int lane, long *frames);
 int sample_generate_hit(Project *p, const BeatSpec *b, int lane, const char *name);
+int sample_generate_synth(Project *p, const SynthSound *s, const char *name);
 int project_add_track(Project *p, const char *name);   /* new row, or -1 when full */
 int sample_import(Project *p, const char *path, char *err, size_t errlen);
 void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);

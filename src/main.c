@@ -347,7 +347,7 @@ static SDL_Keymod mods;
 static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h; }
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
-       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL };
+       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
 static void place_beat(int genre, long start, int first_track);
 
@@ -373,6 +373,7 @@ static int chord_sample(const int *notes, int n, const char *label, double beats
 
 /* Theory pane state */
 #define PANE_W 480
+static int pads_sub, mixer_sub, vis_sub, settings_sub, sounds_sub;   /* each panel's open sub-tab */
 static int pads_open;                   /* the Pads pane (shares the right-hand slot) */
 static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
 static int vis_open;                    /* the Visualizer pane: spectrum, scope, meters */
@@ -421,7 +422,7 @@ static void layout(void)
     L.ruler = 44;                       /* bar numbers above, minutes:seconds below */
     L.status = 26;
     L.pane_x = 70;                      /* RAIL_W: the category rail is on the far left */
-    L.pane_w = theory_open || pads_open || mixer_open || vis_open ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0;
+    L.pane_w = theory_open || pads_open || mixer_open || vis_open || (sounds_open && sounds_sub == 1) ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0;
     L.left = L.pane_x + L.pane_w;
     L.tl_x = L.left + L.head;
     L.tl_w = W - L.tl_x;
@@ -908,16 +909,51 @@ static void import_file(const char *path)
 /* export dialog state: options persist for the session */
 static ExportOptions EXO;
 static int export_open, export_pending;
-static char export_base_path[1024];        /* full path without extension */
+static char export_dir[900];            /* where it goes: kept for the session once chosen */
+static char export_name[256];           /* the file name, without the extension */
+static char export_base_path[1200];     /* export_dir/export_name, made when exporting */
+static SDL_Rect export_dir_r, export_name_r, export_go_r;   /* where they were drawn, for the self-test */
+static char proj_path[1024];            /* "" = never saved */
+
+/* A name typed with a format's extension picks that format, and loses the extension. */
+static void export_take_ext(char *name)
+{
+    size_t n = strlen(name);
+    for (int f = 0; f < EXP_COUNT; f++) {
+        size_t e = strlen(EXPORT_FORMATS[f].ext);
+        if (n > e + 1 && name[n - e - 1] == '.' && !strcasecmp(name + n - e, EXPORT_FORMATS[f].ext)) {
+            name[n - e - 1] = 0;
+            EXO.format = f;
+            return;
+        }
+    }
+}
+
+static void export_make_base(void)
+{
+    size_t n = strlen(export_dir);
+    int slash = n && (export_dir[n - 1] == '/' || export_dir[n - 1] == '\\');
+    snprintf(export_base_path, sizeof export_base_path, "%s%s%s", export_dir, slash ? "" : "/",
+             export_name[0] ? export_name : "untitled");
+}
 
 static void open_export(void)
 {
-    char dir[900], stamp[32];
-    user_dir("music", dir, sizeof dir);
-    if (!dir_writable(dir) && !getcwd(dir, sizeof dir)) snprintf(dir, sizeof dir, ".");
-    time_t now = time(NULL);
-    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
-    snprintf(export_base_path, sizeof export_base_path, "%s/tinydaw-%s", dir, stamp);
+    if (!export_dir[0]) {                   /* the first time: the Music folder */
+        user_dir("music", export_dir, sizeof export_dir);
+        if (!dir_writable(export_dir) && !getcwd(export_dir, sizeof export_dir))
+            snprintf(export_dir, sizeof export_dir, ".");
+    }
+    if (proj_path[0]) {                     /* named after the project... */
+        snprintf(export_name, sizeof export_name, "%.255s", path_base(proj_path));
+        size_t n = strlen(export_name);
+        if (n > 5 && !strcmp(export_name + n - 5, ".tdaw")) export_name[n - 5] = 0;
+    } else {                                /* ...or the time, so nothing is overwritten */
+        char stamp[32];
+        time_t now = time(NULL);
+        strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
+        snprintf(export_name, sizeof export_name, "tinydaw-%s", stamp);
+    }
     if (P.loop_end <= P.loop_start) EXO.loop_only = 0;
     export_open = 1;
 }
@@ -925,8 +961,85 @@ static void open_export(void)
 static void do_export_now(void)
 {
     char msg[1500];
+    export_make_base();
     if (project_export(&P, &EXO, export_base_path, msg, sizeof msg) == 0) status("%s", msg);
     else status("Export failed: %s", msg);
+}
+
+/* ---- a one-line text field (the export folder and file name). Click to type; Enter, Tab or a
+ * click elsewhere keeps it, Esc puts it back. */
+static struct {
+    char *buf, orig[1024];
+    size_t cap;
+    int path;                           /* folders may have slashes; file names may not */
+    SDL_Rect r;
+} tf;
+
+static void tf_end(int keep)
+{
+    if (!tf.buf) return;
+    if (!keep) snprintf(tf.buf, tf.cap, "%s", tf.orig);
+    tf.buf = NULL;
+}
+
+static void tf_insert(const char *t)
+{
+    if (!tf.buf) return;
+    for (; *t; t++) {
+        size_t n = strlen(tf.buf);
+        unsigned char c = (unsigned char)*t;
+        if (c < 32 || (!tf.path && strchr("/\\:*?\"<>|", c))) continue;
+        if (n + 1 < tf.cap) {
+            tf.buf[n] = (char)c;
+            tf.buf[n + 1] = 0;
+        }
+    }
+}
+
+static int tf_key(SDL_Keysym k)         /* 1 when the field took the key */
+{
+    if (!tf.buf) return 0;
+    size_t n = strlen(tf.buf);
+    if (k.sym == SDLK_RETURN || k.sym == SDLK_KP_ENTER || k.sym == SDLK_TAB) tf_end(1);
+    else if (k.sym == SDLK_ESCAPE) tf_end(0);
+    else if (k.sym == SDLK_BACKSPACE && n) {
+        while (n > 0 && ((unsigned char)tf.buf[n - 1] & 0xC0) == 0x80) n--;   /* a whole UTF-8 character */
+        tf.buf[n ? n - 1 : 0] = 0;
+    } else if ((k.mod & KMOD_CTRL) && k.sym == SDLK_v) {
+        char *clip = SDL_GetClipboardText();
+        if (clip) tf_insert(clip);
+        SDL_free(clip);
+    } else if ((k.mod & KMOD_CTRL) && (k.sym == SDLK_a || k.sym == SDLK_u)) tf.buf[0] = 0;
+    return 1;
+}
+
+static void textfield(SDL_Rect r, char *buf, size_t cap, int path, const char *placeholder)
+{
+    int active = tf.buf == buf, hov = hit(r);
+    field_box(r, hov, active);
+    if (active) {
+        outline(r, ACCENT);
+        outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, ACCENT);
+    }
+    int tw = text_w(buf), room = r.w - 20;
+    int tx = tw > room && active ? r.x + 10 + room - tw : r.x + 10;   /* typing at the end keeps the end in view */
+    if (buf[0]) text_clip((SDL_Rect){r.x + 6, r.y, r.w - 12, r.h}, tx, r.y + (r.h - font_h) / 2, buf, TEXT);
+    else if (!active) text(r.x + 10, r.y + (r.h - font_h) / 2, placeholder, DIM);
+    if (active && (SDL_GetTicks() / 500) % 2 == 0) {
+        int cx = tx + tw + 1;
+        if (cx > r.x + r.w - 6) cx = r.x + r.w - 6;
+        fill((SDL_Rect){cx, r.y + 6, 2, r.h - 12}, ACCENT);
+    }
+    if (hov && lpress && !active) {
+        lpress = 0;
+        tf_end(1);
+        tf.buf = buf;
+        tf.cap = cap;
+        tf.path = path;
+        tf.r = r;
+        snprintf(tf.orig, sizeof tf.orig, "%s", buf);
+        SDL_StartTextInput();
+    }
 }
 
 static void set_rate(int rate);
@@ -1560,7 +1673,6 @@ static void history_scale(double ratio)
 
 /* ---------------------------------------------------------------- project files */
 
-static char proj_path[1024];            /* "" = never saved */
 static int recovered;                   /* opened from the autosave: unsaved by definition */
 static int autosaved_serial = -1;
 static Uint32 last_autosave;
@@ -1724,6 +1836,7 @@ static void autosave_tick(void)
 
 static SDL_atomic_t fd_state;           /* 0 idle, 1 open, 2 finished */
 static int fd_saving;
+static int fd_export;                   /* choosing where an export goes (else a project) */
 static char fd_result[1024];
 #ifndef _WIN32
 static char fd_cmd[4000];
@@ -1755,12 +1868,21 @@ static void win_file_dialog(void)
     memset(&o, 0, sizeof o);
     o.lStructSize = sizeof o;
     o.hwndOwner = fd_owner;
-    o.lpstrFilter = L"tinydaw projects (*.tdaw)\0*.tdaw\0All files\0*.*\0";
+    wchar_t filter[256], ext[16];
+    char f8[256];
+    const char *e8 = fd_export ? EXPORT_FORMATS[EXO.format].ext : "tdaw";
+    if (fd_export) snprintf(f8, sizeof f8, "%s audio (*.%s)|*.%s|All files|*.*|", EXPORT_FORMATS[EXO.format].name, e8, e8);
+    else snprintf(f8, sizeof f8, "tinydaw projects (*.tdaw)|*.tdaw|All files|*.*|");
+    int fl = MultiByteToWideChar(CP_UTF8, 0, f8, -1, filter, 255);
+    for (int i = 0; i < fl; i++)
+        if (filter[i] == L'|') filter[i] = 0;     /* the list is NUL-separated, ending in two */
+    MultiByteToWideChar(CP_UTF8, 0, e8, -1, ext, 16);
+    o.lpstrFilter = filter;
     o.lpstrFile = file;
     o.nMaxFile = 1024;
     o.lpstrInitialDir = dir[0] ? dir : NULL;
-    o.lpstrDefExt = L"tdaw";
-    o.lpstrTitle = fd_saving ? L"Save project" : L"Open project";
+    o.lpstrDefExt = ext;
+    o.lpstrTitle = fd_export ? L"Export to" : fd_saving ? L"Save project" : L"Open project";
     o.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
               (fd_saving ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     BOOL ok = fd_saving ? GetSaveFileNameW(&o) : GetOpenFileNameW(&o);
@@ -1831,6 +1953,7 @@ static void file_dialog(int saving)
     else
         snprintf(start, sizeof start, "%s/", proj_path[0] ? dirname_of(proj_path) : dir);
     fd_saving = saving;
+    fd_export = 0;
 #ifdef _WIN32
     (void)q;
     snprintf(fd_start, sizeof fd_start, "%s", start);
@@ -1869,10 +1992,65 @@ static void file_dialog(int saving)
     else SDL_AtomicSet(&fd_state, 0);
 }
 
+/* The system Save dialog for an export: starts at the folder and name in the dialog, and
+ * hands back both (file_dialog_poll). Without a dialog program the fields can still be typed in. */
+static void export_file_dialog(void)
+{
+    if (SDL_AtomicGet(&fd_state) != 0) return;
+    const ExportFormat *f = &EXPORT_FORMATS[EXO.format];
+    char start[1300];
+    export_make_base();
+    snprintf(start, sizeof start, "%s.%s", export_base_path, f->ext);
+    fd_saving = 1;
+#ifdef _WIN32
+    snprintf(fd_start, sizeof fd_start, "%s", start);
+    SDL_SysWMinfo wm;
+    SDL_VERSION(&wm.version);
+    fd_owner = SDL_GetWindowWMInfo(win, &wm) ? wm.info.win.window : NULL;
+#else
+    char q[2700];
+    shell_quote(q, sizeof q, start);
+    if (have_program("zenity")) {
+        snprintf(fd_cmd, sizeof fd_cmd,
+                 "zenity --file-selection --save --confirm-overwrite --title='Export to' --filename=%s "
+                 "--file-filter='%s audio (*.%s) | *.%s' --file-filter='All files | *' 2>/dev/null",
+                 q, f->name, f->ext, f->ext);
+    } else if (have_program("kdialog")) {
+        snprintf(fd_cmd, sizeof fd_cmd, "kdialog --getsavefilename %s '*.%s' 2>/dev/null", q, f->ext);
+    } else {
+        status("No file dialog available (install zenity): type the folder and name instead");
+        return;
+    }
+#endif
+    fd_export = 1;
+    SDL_AtomicSet(&fd_state, 1);
+    SDL_Thread *t = SDL_CreateThread(fd_thread, "filedialog", NULL);
+    if (t) SDL_DetachThread(t);
+    else {
+        SDL_AtomicSet(&fd_state, 0);
+        fd_export = 0;
+    }
+}
+
+/* a chosen export file: its folder and name go into the dialog (its extension picks the format) */
+static void export_take_path(const char *path)
+{
+    char name[512];
+    snprintf(name, sizeof name, "%s", path_base(path));
+    export_take_ext(name);
+    snprintf(export_name, sizeof export_name, "%.255s", name);
+    snprintf(export_dir, sizeof export_dir, "%.899s", dirname_of(path));
+}
+
 static void file_dialog_poll(void)
 {
     if (SDL_AtomicGet(&fd_state) != 2) return;
     SDL_AtomicSet(&fd_state, 0);
+    if (fd_export) {                        /* Export > Choose: back to the export dialog */
+        fd_export = 0;
+        if (fd_result[0]) export_take_path(fd_result);
+        return;
+    }
     if (!fd_result[0]) {                    /* cancelled */
         after_save_act = ACT_NONE;
         return;
@@ -2374,7 +2552,6 @@ static int devices_section(int x, int y, int w)
     return y;
 }
 
-static int pads_sub, mixer_sub, vis_sub, settings_sub, sounds_sub;
 
 enum { PAD_PRESET_COUNT = 6 };
 static const char *const PAD_PRESETS[PAD_PRESET_COUNT] = {"Drum kit", "Drums + chords", "Chords of the key",
@@ -4006,16 +4183,320 @@ static int new_sound(int x, int y, int w)
     return y + 2 * font_h + 10;
 }
 
+
+/* ---- Sounds > Generator: genre presets on a small synth, shaped with five plain controls.
+ * Made for people who've never used a synth: pick a style, pick what the sound is for, click a
+ * sound to hear it, nudge it with words like "brighter" and "fatter", then keep it. */
+
+static int gx_genre = -1, gx_kind = -1, gx_preset = -1;   /* -1 = any */
+static SynthSound GX;
+static float *gx_heard;                 /* what the Generator's Play started */
+static double *slide_done;              /* the slider whose drag just ended */
+
+static const char *const KIND_ABOUT[] = {
+    "the low notes under everything", "the main tune people hum", "long, soft background chords",
+    "piano-like, for chords and melodies", "short notes for riffs and arpeggios", "single drum hits to build beats",
+    "whooshes, booms and effects for transitions"};
+
+/* A 0..1 slider with a mark at the middle ("as designed"). Returns 1 when a drag on it ends,
+ * or a double-click puts it back to the middle. */
+static int slider(SDL_Rect r, double *v)
+{
+    int active = drag.kind == D_SLIDE && drag.num == v, hov = hit(r) && (drag.kind == D_NONE || active);
+    int cy = r.y + r.h / 2, kx = r.x + (int)lround(*v * r.w);
+    fill((SDL_Rect){r.x, cy - 2, r.w, 4}, PANEL3);
+    int mid = r.x + r.w / 2;
+    fill(kx >= mid ? (SDL_Rect){mid, cy - 2, kx - mid, 4} : (SDL_Rect){kx, cy - 2, mid - kx, 4}, ACCENT);
+    fill((SDL_Rect){mid - 1, cy - 7, 2, 14}, DIM);
+    SDL_Rect knob = {kx - 7, cy - 9, 14, 18};
+    fill(knob, active ? HEAD : hov ? tone(ACCENT, 1.25f) : ACCENT);
+    outline(knob, DARK);
+    if (drag.kind == D_NONE && hit((SDL_Rect){r.x - 8, r.y, r.w + 16, r.h})) {
+        if (lpress && ldouble) {
+            lpress = 0;
+            *v = 0.5;
+            return 1;
+        }
+        if (lpress) {
+            lpress = 0;
+            drag = (typeof(drag)){.kind = D_SLIDE, .num = v, .sx = r.x, .sy = r.w};
+            double nv = (double)(mx - r.x) / r.w;
+            *v = nv < 0 ? 0 : nv > 1 ? 1 : nv;
+        }
+        if (wheel_y) {
+            *v += wheel_y * 0.05;
+            *v = *v < 0 ? 0 : *v > 1 ? 1 : *v;
+            wheel_y = 0;
+        }
+    }
+    if (slide_done == v) {
+        slide_done = NULL;
+        return 1;
+    }
+    return 0;
+}
+
+static void gx_play(void)
+{
+    SynthSound s = GX;
+    s.a4 = P.a4;
+    long len;
+    float *b = render_synth(&s, &len);
+    if (b) {
+        play_scratch(b, len);
+        gx_heard = b;
+    }
+}
+
+static int gx_reveal;                   /* scroll the picked sound's controls into view */
+static SDL_Rect gx_row_r[128], gx_genre_r[16], gx_kind_r[8], gx_slide_r[MACROS], gx_lib_r, gx_place_r, gx_inst_r;
+
+static void gx_pick(int preset)
+{
+    gx_reveal = gx_preset != preset;
+    gx_preset = preset;
+    synth_from_preset(&GX, preset);
+    gx_play();
+}
+
+static int gx_matches(int i)
+{
+    const SynthPreset *p = &SYNTH_PRESETS[i];
+    return (gx_genre < 0 || !strcmp(p->genre, SYNTH_GENRES[gx_genre])) &&
+           (gx_kind < 0 || !strcmp(p->kind, SYNTH_KINDS[gx_kind]));
+}
+
+/* the library name: the preset's name, plus the note when it isn't the preset's own */
+static void gx_name(char *buf, size_t n)
+{
+    const SynthPreset *p = &SYNTH_PRESETS[gx_preset];
+    char nn[16];
+    note_name(GX.note, nn, sizeof nn);
+    if (GX.note != p->note && strcmp(p->kind, "Drums") && strcmp(p->kind, "FX")) snprintf(buf, n, "%s %s", p->name, nn);
+    else snprintf(buf, n, "%s", p->name);
+}
+
+static int gx_keep(void)
+{
+    char name[96];
+    gx_name(name, sizeof name);
+    GX.a4 = P.a4;
+    int idx = sample_generate_synth(&P, &GX, name);
+    if (idx < 0) status("Library is full");
+    return idx;
+}
+
+/* the first track with nothing playing from `at` for `len` frames */
+static int free_track_at(long at, long len)
+{
+    for (int t = 0; t < P.ntracks; t++) {
+        int busy = 0;
+        for (int c = 0; c < P.nclips && !busy; c++)
+            busy = P.clips[c].track == t && P.clips[c].start < at + len && P.clips[c].start + P.clips[c].length > at;
+        if (!busy) return t;
+    }
+    return 0;
+}
+
+static void gx_surprise(void)
+{
+    static uint32_t r = 0x6d2b79f5u;
+    int pool[256], n = 0;
+    for (int i = 0; i < NSYNTH_PRESETS && n < 256; i++)
+        if (gx_matches(i)) pool[n++] = i;
+    if (!n) return;
+    r = r * 1664525u + 1013904223u + SDL_GetTicks();
+    synth_from_preset(&GX, pool[(r >> 8) % (uint32_t)n]);
+    gx_preset = pool[(r >> 8) % (uint32_t)n];
+    for (int m = 0; m < MACROS; m++) {       /* a nudge either way, not a wreck */
+        r = r * 1664525u + 1013904223u;
+        GX.macro[m] = 0.5 + ((double)(r >> 8) / 16777216.0 - 0.5) * (m == MAC_WOBBLE ? 0.5 : 0.7);
+    }
+    gx_play();
+}
+
+/* one sound in the list; returns its height */
+static int gx_row(int x, int y, int w, int i)
+{
+    char buf[96];
+    const SynthPreset *p = &SYNTH_PRESETS[i];
+    SDL_Rect r = {x, y, w, 2 * font_h + 14};
+    if (i < 128) gx_row_r[i] = r;
+    int hov = hit(r) && drag.kind == D_NONE, on = gx_preset == i;
+    fill(r, on ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
+    if (on) fill((SDL_Rect){r.x, r.y, 4, r.h}, ACCENT);
+    snprintf(buf, sizeof buf, "%s %s", p->genre, p->kind);
+    int tw = text_w(buf);
+    text_clip((SDL_Rect){r.x + 10, r.y, r.w - tw - 26, r.h}, r.x + 12, r.y + 5, p->name, on ? HEAD : TEXT);
+    text(r.x + r.w - tw - 10, r.y + 5, buf, DIM);
+    text_clip((SDL_Rect){r.x + 10, r.y, r.w - 20, r.h}, r.x + 12, r.y + 9 + font_h, p->about, DIM);
+    if (hov && lpress) {
+        lpress = 0;
+        gx_pick(i);
+    }
+    return r.h;
+}
+
+/* the controls for the picked sound, opened under its row */
+static int gx_shape(int x, int y, int w)
+{
+    int top = y;
+    x += 12;
+    w -= 24;
+    y += 12;
+    int changed = 0, lw = 0, lo = 0, ww = 0;
+    for (int m = 0; m < MACROS; m++) {
+        int a = text_w(MACRO_NAMES[m][0]), b = text_w(MACRO_NAMES[m][1]), c = text_w(MACRO_NAMES[m][2]);
+        lw = a > lw ? a : lw;
+        lo = b > lo ? b : lo;
+        ww = c > ww ? c : ww;
+    }
+    lw += 12;
+    lo += 16;
+    ww += 4;
+    for (int m = 0; m < MACROS; m++) {
+        text(x, y + 4, MACRO_NAMES[m][0], TEXT);
+        text(x + lw, y + 4, MACRO_NAMES[m][1], DIM);
+        int hx = x + w - ww;
+        text(hx, y + 4, MACRO_NAMES[m][2], DIM);
+        gx_slide_r[m] = (SDL_Rect){x + lw + lo, y, hx - (x + lw + lo) - 16, font_h + 8};
+        changed |= slider(gx_slide_r[m], &GX.macro[m]);
+        y += font_h + 16;
+    }
+    y += 4;
+    int hw = (w - 8) / 2;
+    const char *kind = SYNTH_PRESETS[gx_preset].kind;
+    int pitched = strcmp(kind, "Drums") && strcmp(kind, "FX");
+    note_number((SDL_Rect){x, y, hw, 26}, pitched ? "Note" : "Pitch", &GX.note);
+    number((SDL_Rect){x + hw + 8, y, hw, 26}, "Length", &GX.seconds, 0.05, 12, 0.01, "%.2f s");
+    y += 34;
+    number((SDL_Rect){x, y, hw, 26}, "Volume", &GX.volume, 0.05, 1, 0.005, "%.2f");
+    if (button((SDL_Rect){x + hw + 8, y, hw, 26}, "Back to how it was", 0)) {
+        synth_from_preset(&GX, gx_preset);
+        changed = 1;
+    }
+    y += 38;
+    if (changed) gx_play();                  /* hear each change as soon as you let go */
+
+    int hearing = scratch && scratch == gx_heard && scratch_pos < scratch_len;
+    int bw3 = (w - 8) / 3;
+    if (button((SDL_Rect){x, y, bw3, 32}, hearing ? "Stop" : "Play", hearing)) {
+        if (hearing) play_scratch(NULL, 0);
+        else gx_play();
+    }
+    if (button((SDL_Rect){x + bw3 + 4, y, bw3, 32}, "Surprise me", 0)) gx_surprise();
+    gx_lib_r = (SDL_Rect){x + 2 * (bw3 + 4), y, w - 2 * (bw3 + 4), 32};
+    if (button(gx_lib_r, "+ Library", 1)) {
+        int idx = gx_keep();
+        if (idx >= 0) {
+            status("Made \"%s\": it's in the library, drag it onto a track", P.samples[idx].name);
+            lib_scroll = P.nsamples;
+        }
+    }
+    y += 38;
+    gx_place_r = (SDL_Rect){x, y, hw, 32};
+    gx_inst_r = (SDL_Rect){x + hw + 8, y, hw, 32};
+    if (button(gx_place_r, "Put it at the playhead", 0)) {
+        int idx = gx_keep();
+        if (idx >= 0) {
+            long at = snap(P.playhead);
+            int t = free_track_at(at, P.samples[idx].frames);
+            int c = clip_add(idx, t, at, 0, P.samples[idx].frames);
+            if (c >= 0) {
+                selected = c;
+                status("Placed \"%s\" on track %d at the playhead", P.samples[idx].name, t + 1);
+            }
+        }
+    }
+    if (button(gx_inst_r, "Play notes with it", 0)) {
+        int idx = gx_keep();
+        if (idx >= 0) {
+            LOCK();
+            P.inst_sample = idx;
+            P.inst_root = GX.note;
+            UNLOCK();
+            status("\"%s\" is the instrument: double-click a track to write notes, or play a MIDI keyboard",
+                   P.samples[idx].name);
+        }
+    }
+    y += 40;
+    text(x, y, "Double-click a slider to put it back in the middle.", DIM);
+    y += font_h + 12;
+    SDL_Rect box = {x - 12, top, w + 24, y - top};
+    outline(box, tone(ACCENT, 0.7f));
+    if (gx_reveal) {                         /* bring the controls into view, keeping the row on screen */
+        gx_reveal = 0;
+        SDL_Rect pr = panel_rect();
+        int over = y - (pr.y + pr.h - 8), room = top - 2 * font_h - 14 - (pr.y + 8);
+        if (over > 0 && room > 0) sounds_scroll += over < room ? over : room;
+    }
+    return y - top;
+}
+
+static int generator(int x, int y, int w)
+{
+    y = section(x, y, w, "1  WHAT KIND OF MUSIC?");
+    {
+        int cols = 5, gap = 4, bw = (w - gap * (cols - 1)) / cols;
+        for (int i = -1; i < NSYNTH_GENRES; i++) {
+            int k = i + 1;
+            SDL_Rect r = {x + (k % cols) * (bw + gap), y + (k / cols) * 32, bw, 28};
+            if (k < 16) gx_genre_r[k] = r;
+            if (button(r, i < 0 ? "Any" : SYNTH_GENRES[i], gx_genre == i)) gx_genre = i;
+        }
+        y += ((NSYNTH_GENRES + 1 + cols - 1) / cols) * 32 + 10;
+    }
+    y = section(x, y, w, "2  WHAT IS THE SOUND FOR?");
+    {
+        int cols = 4, gap = 4, bw = (w - gap * (cols - 1)) / cols;
+        for (int i = -1; i < NSYNTH_KINDS; i++) {
+            int k = i + 1;
+            SDL_Rect r = {x + (k % cols) * (bw + gap), y + (k / cols) * 32, bw, 28};
+            if (k < 8) gx_kind_r[k] = r;
+            if (button(r, i < 0 ? "Anything" : SYNTH_KINDS[i], gx_kind == i)) gx_kind = i;
+        }
+        y += ((NSYNTH_KINDS + 1 + cols - 1) / cols) * 32 + 2;
+        text(x, y, gx_kind < 0 ? "Every kind of sound" : KIND_ABOUT[gx_kind], DIM);
+        y += font_h + 14;
+    }
+    y = section(x, y, w, "3  CLICK A SOUND TO HEAR IT AND SHAPE IT");
+    int shown = 0;
+    memset(gx_row_r, 0, sizeof gx_row_r);
+    if (gx_preset >= 0 && !gx_matches(gx_preset)) {   /* the one you're shaping stays at the top */
+        y += gx_row(x, y, w, gx_preset);
+        if (gx_preset >= 0) y += gx_shape(x, y, w);
+        y += 10;
+    }
+    for (int i = 0; i < NSYNTH_PRESETS; i++) {
+        if (!gx_matches(i)) continue;
+        y += gx_row(x, y, w, i);
+        if (gx_preset == i) y += gx_shape(x, y, w);
+        y += 4;
+        shown++;
+    }
+    if (!shown) {
+        text(x, y + 4, "Nothing like that yet: pick Any or Anything.", DIM);
+        y += font_h + 12;
+    }
+    y += 8;
+    text(x, y, "Sounds you keep go in the Library, ready to drag", DIM);
+    text(x, y + font_h + 2, "onto a track.", DIM);
+    return y + 2 * font_h + 10;
+}
+
 static void sounds_pane(void)
 {
     SDL_Rect pane = panel_rect();
     int saved, inside = panel_begin(pane, &sounds_scroll, sounds_content_h, &saved);
     int x = pane.x + 12, w = pane.w - 24, y0 = pane.y + 10 - (sounds_sub ? sounds_scroll : 0), y = y0;
-    static const char *const SUBS[] = {"Library", "New sound"};
-    y = subtabs(x, y, w, SUBS, 2, &sounds_sub);
+    static const char *const SUBS[] = {"Library", "Generator", "New sound"};
+    y = subtabs(x, y, w, SUBS, 3, &sounds_sub);
     if (sounds_sub == 0) {
         library_list(x, y, w, pane.y + pane.h);
         sounds_content_h = 0;                   /* the list scrolls itself */
+    } else if (sounds_sub == 1) {
+        y = generator(x, y, w - 14);           /* clear of the scrollbar */
+        sounds_content_h = y - y0 + 10;
     } else {
         y = new_sound(x, y, w);
         sounds_content_h = y - y0 + 10;
@@ -5747,6 +6228,11 @@ static void update_drag(void)
         *drag.num = v < drag.nmin ? drag.nmin : v > drag.nmax ? drag.nmax : v;
         break;
     }
+    case D_SLIDE: {                     /* sx, sy: the slider's x and width */
+        double v = (double)(mx - drag.sx) / (drag.sy > 1 ? drag.sy : 1);
+        *drag.num = v < 0 ? 0 : v > 1 ? 1 : v;
+        break;
+    }
     case D_NOTE: {
         int v = drag.iorig + ((mx - drag.sx) - (my - drag.sy)) / 8;
         *drag.inum = v < drag.imin ? drag.imin : v > drag.imax ? drag.imax : v;
@@ -5776,6 +6262,7 @@ static void update_drag(void)
 
 static void end_drag(void)
 {
+    if (drag.kind == D_SLIDE) slide_done = drag.num;
     if (drag.kind == D_NUM && abs(mx - drag.sx) + abs(my - drag.sy) < 3) {
         *drag.num = drag.norig;                 /* a click, not a drag: type the value instead */
         numedit_begin(drag.num, drag.nmin, drag.nmax);
@@ -5812,8 +6299,9 @@ static void key(SDL_Keysym k)
     int ctrl = k.mod & KMOD_CTRL;
     long nudge = snap_frames() ? snap_frames() : SR / 100;
     if (export_open) {                  /* the dialog takes the keyboard */
+        if (SDL_AtomicGet(&fd_state) != 0) return;          /* the system file dialog is up */
         if (k.sym == SDLK_ESCAPE) export_open = 0;
-        if (k.sym == SDLK_RETURN || k.sym == SDLK_KP_ENTER) {
+        if ((k.sym == SDLK_RETURN || k.sym == SDLK_KP_ENTER) && export_name[0] && dir_writable(export_dir)) {
             export_open = 0;
             export_pending = 1;
         }
@@ -7193,7 +7681,7 @@ static int selftest(void)
     /* New sound: Play hears it without adding it to the library */
     {
         show_panel(RI_SOUNDS);
-        sounds_sub = 1;
+        sounds_sub = 2;
         frame();
         int ns = P.nsamples;
         SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
@@ -7483,6 +7971,227 @@ static int selftest(void)
             lit += sum / (64 * 36 * 3) > 0.002 && sum / (64 * 36 * 3) < 1.0;
         }
         check(lit == SCENE_COUNT, "every geometry and shader scene draws something, with no bad values");
+    }
+
+
+    /* ---- Sounds > Generator: the synth */
+    {
+        int bad = 0, quiet = 0, dc = 0;
+        for (int i = 0; i < NSYNTH_PRESETS; i++) {
+            SynthSound y;
+            synth_from_preset(&y, i);
+            long n;
+            float *d = render_synth(&y, &n);
+            if (!d) {
+                bad++;
+                continue;
+            }
+            double pk = 0, sum = 0, mean = 0;
+            for (long k = 0; k < 2 * n; k++) {
+                if (!isfinite(d[k])) bad++;
+                pk = fmax(pk, fabs(d[k]));
+                sum += d[k] * d[k];
+                mean += d[k];
+            }
+            quiet += sqrt(sum / (2 * n)) < 0.02 || fabs(pk - 0.64) > 0.02;
+            dc += fabs(mean / (2 * n)) > 0.03;
+            free(d);
+        }
+        check(!bad && !quiet && !dc, "every Generator preset renders clean, audible, level-matched audio with no DC");
+
+        int bass = 0;
+        for (int i = 0; i < NSYNTH_PRESETS; i++)
+            if (!strcmp(SYNTH_PRESETS[i].name, "Deep bass")) bass = i;
+        double edge[2];
+        for (int b = 0; b < 2; b++) {           /* brightness: more high end */
+            SynthSound y;
+            synth_from_preset(&y, bass);
+            y.macro[MAC_BRIGHT] = b;
+            long n;
+            float *d = render_synth(&y, &n);
+            double kk = exp(-2 * 3.14159265358979 * 1000.0 / SR), lp = 0, e = 0, a = 0;   /* the share above 1 kHz */
+            for (long k = 0; k < n; k++) {
+                double x = d[2 * k];
+                lp = x + (lp - x) * kk;
+                e += (x - lp) * (x - lp);
+                a += x * x;
+            }
+            edge[b] = e / a;
+            free(d);
+        }
+        check(edge[1] > edge[0] * 2, "Brightness opens up the high end");
+
+        int sub = 0;
+        for (int i = 0; i < NSYNTH_PRESETS; i++)
+            if (!strcmp(SYNTH_PRESETS[i].name, "Rolling sub")) sub = i;
+        int zc[2];
+        for (int o = 0; o < 2; o++) {           /* the note: an octave up crosses zero twice as often */
+            SynthSound y;
+            synth_from_preset(&y, sub);
+            y.note += 12 * o;
+            long n;
+            float *d = render_synth(&y, &n);
+            zc[o] = 0;
+            for (long k = 1; k < n; k++) zc[o] += (d[2 * k] >= 0) != (d[2 * k - 2] >= 0);
+            free(d);
+        }
+        check(abs(zc[1] - 2 * zc[0]) < zc[0] / 20, "the Note control sets the pitch");
+
+        Project *T = malloc(sizeof *T);
+        project_init(T);
+        SynthSound y;
+        synth_from_preset(&y, bass);
+        y.macro[MAC_GRIT] = 0.8;
+        y.note = 40;
+        int si = sample_generate_synth(T, &y, "My bass");
+        check(si >= 0 && T->samples[si].synth && sample_root(&T->samples[si]) == 40,
+              "a Generator sound plays unpitched at its note in note clips");
+        int vi = sample_variant(T, si, 12, 0);
+        y.note = 52;
+        long vn;
+        float *want = render_synth(&y, &vn);
+        int same = vi >= 0 && want && T->samples[vi].frames == vn;
+        for (long k = 0; same && k < 2 * vn; k++) same = T->samples[vi].data[k] == want[k];
+        free(want);
+        check(same, "a Generator sound is pitched by making it again at the new note");
+        char msg[1200];
+        int saved = project_save(T, tpath, msg, sizeof msg) == 0;
+        Project *U = malloc(sizeof *U);
+        int loaded = saved && project_load(U, tpath, msg, sizeof msg) == 0;
+        check(loaded && U->samples[si].synth && !strcmp(U->samples[si].name, "My bass") &&
+                  !memcmp(&U->samples[si].syn.patch, &T->samples[si].syn.patch, sizeof(SynthPatch)) &&
+                  U->samples[si].syn.macro[MAC_GRIT] == 0.8 && U->samples[si].syn.note == 40 &&
+                  U->samples[si].frames == T->samples[si].frames &&
+                  !memcmp(U->samples[si].data, T->samples[si].data, (size_t)T->samples[si].frames * 2 * sizeof(float)),
+              "a Generator sound saves as its recipe and comes back exactly");
+        long before = T->samples[si].frames;
+        int rate_ok = project_set_rate(T, 96000, msg, sizeof msg) == 0 && T->samples[si].frames == before * 2;
+        project_set_rate(T, 48000, msg, sizeof msg);
+        check(rate_ok, "a Generator sound is made again at a new project rate");
+        if (loaded) project_free(U);
+        free(U);
+        project_free(T);
+        free(T);
+        remove(tpath);
+    }
+    {
+        show_panel(RI_SOUNDS);
+        sounds_sub = 1;
+        sounds_scroll = 0;
+        gx_genre = gx_kind = gx_preset = -1;
+        frame();
+        check(L.pane_w == PANE_W, "the Generator gets the wide panel");
+        int dub = -1, bassk = -1, wob = -1, kick = -1;
+        for (int i = 0; i < NSYNTH_GENRES; i++)
+            if (!strcmp(SYNTH_GENRES[i], "Dubstep")) dub = i;
+        for (int i = 0; i < NSYNTH_KINDS; i++)
+            if (!strcmp(SYNTH_KINDS[i], "Bass")) bassk = i;
+        for (int i = 0; i < NSYNTH_PRESETS; i++) {
+            if (!strcmp(SYNTH_PRESETS[i].name, "Wobble bass")) wob = i;
+            if (!strcmp(SYNTH_PRESETS[i].name, "Floor kick")) kick = i;
+        }
+        SDL_Rect r = gx_genre_r[dub + 1];
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        r = gx_kind_r[bassk + 1];
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        frame();
+        int only = gx_row_r[wob].w > 0 && gx_row_r[kick].w == 0;
+        for (int i = 0; i < NSYNTH_PRESETS && i < 128; i++)
+            if (gx_row_r[i].w && (strcmp(SYNTH_PRESETS[i].genre, "Dubstep") || strcmp(SYNTH_PRESETS[i].kind, "Bass"))) only = 0;
+        check(gx_genre == dub && gx_kind == bassk && only, "picking a style and a kind lists just those sounds");
+        r = gx_row_r[wob];
+        sim(r.x + 20, r.y + 5, 1, 1, 0, 0);
+        frame();
+        check(gx_preset == wob && scratch && scratch == gx_heard, "clicking a sound picks it and plays it");
+        float *heard = gx_heard;
+        r = gx_slide_r[MAC_BRIGHT];
+        sim_drag(r.x + r.w / 2, r.y + r.h / 2, r.x - 30, r.y + r.h / 2, 0);
+        frame();
+        check(GX.macro[MAC_BRIGHT] == 0 && gx_heard != heard, "dragging a slider changes the sound and plays it again");
+        r = gx_slide_r[MAC_BRIGHT];
+        ldouble = 1;
+        sim(r.x + 3, r.y + r.h / 2, 1, 1, 0, 0);
+        ldouble = 0;
+        check(GX.macro[MAC_BRIGHT] == 0.5, "double-clicking a slider puts it back in the middle");
+        int ns = P.nsamples;
+        r = gx_lib_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(P.nsamples == ns + 1 && P.samples[ns].synth && !strcmp(P.samples[ns].name, "Wobble bass"),
+              "+ Library keeps the sound");
+        int nc = P.nclips;
+        P.playhead = 8 * (long)SR;
+        frame();
+        r = gx_place_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        int placed = P.nclips == nc + 1 && P.clips[nc].start == snap(8 * (long)SR) && P.samples[P.clips[nc].sample].synth;
+        for (int c = 0; c < nc && placed; c++)              /* on a track that was free there */
+            placed = !(P.clips[c].track == P.clips[nc].track && P.clips[c].start < P.clips[nc].start + P.clips[nc].length &&
+                       P.clips[c].start + P.clips[c].length > P.clips[nc].start);
+        check(placed, "Put it at the playhead places it on a free track");
+        GX.note = 38;
+        frame();
+        r = gx_inst_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(P.inst_sample == P.nsamples - 1 && P.inst_root == 38, "Play notes with it makes it the instrument at its note");
+        r = gx_kind_r[0];                       /* the sound being shaped stays when the filter changes */
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        gx_kind = -1;
+        for (int i = 0; i < NSYNTH_KINDS; i++)
+            if (!strcmp(SYNTH_KINDS[i], "Drums")) gx_kind = i;
+        frame();
+        check(gx_row_r[wob].w > 0 && gx_preset == wob, "the sound you're shaping stays listed when you change the filter");
+        play_scratch(NULL, 0);
+        gx_genre = gx_kind = gx_preset = -1;
+        sounds_sub = 0;
+        history_check();
+    }
+
+    /* ---- Export: choosing the folder and file name */
+    {
+        char keep_proj[1024];
+        snprintf(keep_proj, sizeof keep_proj, "%s", proj_path);
+        snprintf(proj_path, sizeof proj_path, "/somewhere/My Song.tdaw");
+        open_export();
+        check(export_open && !strcmp(export_name, "My Song") && export_dir[0], "Export names the file after the project");
+        export_take_path("/a/b/take two.flac");
+        check(!strcmp(export_dir, "/a/b") && !strcmp(export_name, "take two") && EXO.format == EXP_FLAC,
+              "a file chosen in the system dialog sets the folder, the name and the format");
+        const char *tmpd = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(export_dir, sizeof export_dir, "%s", tmpd);
+        EXO.format = EXP_WAV;
+        frame();
+        SDL_Rect r = export_name_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(tf.buf == export_name, "clicking the file name lets you type it");
+        export_name[0] = 0;
+        tf_insert("mix/1.mp3");
+        tf_key((SDL_Keysym){.sym = SDLK_RETURN});
+        frame();
+        check(!tf.buf && !strcmp(export_name, "mix1") && EXO.format == EXP_MP3,
+              "typing a name keeps slashes out, and .mp3 picks MP3");
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        tf_insert("zzz");
+        tf_key((SDL_Keysym){.sym = SDLK_ESCAPE});
+        check(!strcmp(export_name, "mix1"), "Esc puts the name back");
+        snprintf(export_dir, sizeof export_dir, "%s/no-such-dir-%u", tmpd, (unsigned)SDL_GetTicks());
+        frame();
+        r = export_go_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(export_open && !export_pending, "Export waits for a folder that exists");
+        snprintf(export_dir, sizeof export_dir, "%s", tmpd);
+        snprintf(export_name, sizeof export_name, "tinydaw-selftest-export-%u", (unsigned)SDL_GetTicks());
+        EXO.format = EXP_WAV;
+        EXO.loop_only = 0;
+        EXO.stems = 0;
+        frame();
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        frame();
+        frame();
+        char out[1400];
+        snprintf(out, sizeof out, "%s/%s.wav", tmpd, export_name);
+        check(!export_open && file_exists(out), "Export writes to the chosen folder and name");
+        remove(out);
+        snprintf(proj_path, sizeof proj_path, "%s", keep_proj);
     }
 
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
@@ -8700,7 +9409,7 @@ static const char *RATE_LABELS[6] = {"44.1k", "48k", "88.2k", "96k", "176.4k", "
 static void export_dialog(void)
 {
     fill((SDL_Rect){0, 0, W, H}, alpha(DARK, 170));
-    int w = 700, h = 500;
+    int w = 700, h = H - 16 < 590 ? H - 16 : 590;    /* rows close up a little in a short window */
     SDL_Rect d = {(W - w) / 2, (H - h) / 2, w, h};
     fill(d, PANEL);
     outline(d, LINE);
@@ -8709,7 +9418,7 @@ static void export_dialog(void)
     const ExportFormat *f = &EXPORT_FORMATS[EXO.format];
     int rate, bits;
     export_effective(&EXO, &rate, &bits);
-    int lx = d.x + 18, ox = d.x + 150, y = d.y + 48, row = 40, bh = 28;
+    int lx = d.x + 18, ox = d.x + 150, y = d.y + 48, row = h < 590 ? 35 : 40, bh = row - 12;
     char buf[1200];
 #define ROW(label) do { text(lx, y + (bh - font_h) / 2, label, DIM); } while (0)
 
@@ -8782,6 +9491,24 @@ static void export_dialog(void)
     text(ox + 180, y + (bh - font_h) / 2, dith_ok ? "TPDF, recommended for 16-bit" : "only used for 16-bit", DIM);
     y += row + 6;
 
+    ROW("Folder");
+    int picking = SDL_AtomicGet(&fd_state) != 0;
+    export_dir_r = (SDL_Rect){ox, y, w - (ox - d.x) - 18 - 116, bh};
+    textfield(export_dir_r, export_dir, sizeof export_dir, 1, "choose a folder");
+    if (button2((SDL_Rect){d.x + w - 18 - 110, y, 110, bh}, "Choose...", 0, !picking)) {
+        tf_end(1);
+        export_file_dialog();
+    }
+    y += row;
+    ROW("File name");
+    if (tf.buf != export_name) export_take_ext(export_name);    /* "song.mp3" picks MP3 */
+    snprintf(buf, sizeof buf, "%s.%s", EXO.stems ? "-trackN" : "", f->ext);
+    int ew = text_w(buf);
+    export_name_r = (SDL_Rect){ox, y, w - (ox - d.x) - 18 - ew - 12, bh};
+    textfield(export_name_r, export_name, sizeof export_name, 0, "untitled");
+    text(d.x + w - 18 - ew, y + (bh - font_h) / 2, buf, DIM);
+    y += row + 4;
+
     /* summary */
     long a = EXO.loop_only ? P.loop_start : 0, b = EXO.loop_only ? P.loop_end : project_end(&P);
     char depth[24];
@@ -8792,19 +9519,39 @@ static void export_dialog(void)
              rate != SR ? "  (resampled, best quality)" : "");
     text(lx, y, buf, HEAD);
     y += font_h + 6;
-    const char *home = home_dir();
-    const char *shown = export_base_path;
-    char tilde[1100];
-    if (home && !strncmp(shown, home, strlen(home))) {
-        snprintf(tilde, sizeof tilde, "~%s", shown + strlen(home));
-        shown = tilde;
+    export_make_base();
+    char full[1300];
+    snprintf(full, sizeof full, "%s%s.%s", export_base_path, EXO.stems ? "-track1" : "", f->ext);
+    int dir_ok = export_dir[0] && dir_writable(export_dir), name_ok = export_name[0] != 0;
+    if (!dir_ok) {
+        text(lx, y, "That folder doesn't exist or can't be written to: choose another.", rgb(225, 90, 80));
+    } else if (!name_ok) {
+        text(lx, y, "Give the file a name.", rgb(225, 90, 80));
+    } else {
+        const char *home = home_dir();
+        const char *shown = full;
+        char tilde[1400];
+        if (home && home[0] && !strncmp(shown, home, strlen(home))) {
+            snprintf(tilde, sizeof tilde, "~%s", shown + strlen(home));
+            shown = tilde;
+        }
+        snprintf(buf, sizeof buf, "Saves as %.1100s", shown);
+        text_clip((SDL_Rect){lx, y, w - 36, font_h + 2}, lx, y, buf, DIM);
+        if (file_exists(full)) {
+            y += font_h + 4;
+            text(lx, y, EXO.stems ? "Files with these names are already there: they'll be replaced."
+                                  : "A file with this name is already there: it'll be replaced.", ACCENT);
+        }
     }
-    snprintf(buf, sizeof buf, "%s%s.%s", shown, EXO.stems ? "-trackN" : "", f->ext);
-    text_clip((SDL_Rect){lx, y, w - 36, font_h + 2}, lx, y, buf, DIM);
 
     SDL_Rect cancel = {d.x + w - 236, d.y + h - 46, 100, 32}, go = {d.x + w - 126, d.y + h - 46, 108, 32};
-    if (button(cancel, "Cancel", 0)) export_open = 0;
-    if (button2(go, "Export", 1, b > a)) {
+    export_go_r = go;
+    if (button(cancel, "Cancel", 0)) {
+        tf_end(0);
+        export_open = 0;
+    }
+    if (button2(go, "Export", 1, b > a && dir_ok && name_ok)) {
+        tf_end(1);
         export_open = 0;
         export_pending = 1;
     }
@@ -8814,7 +9561,7 @@ static void export_dialog(void)
 static void frame(void)
 {
     static int min_for = -1;            /* the pane needs a wider window */
-    int need = 70 + (theory_open || pads_open || mixer_open || vis_open ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0) + 520;
+    int need = 70 + (theory_open || pads_open || mixer_open || vis_open || (sounds_open && sounds_sub == 1) ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0) + 520;
     if (min_for != need) {              /* the panel plus a usable timeline */
         min_for = need;
         SDL_SetWindowMinimumSize(win, need, 560);
@@ -8833,6 +9580,7 @@ static void frame(void)
     vis_update();
     dd_input();
     if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
+    if (tf.buf && (((lpress || rpress) && !hit(tf.r)) || !export_open)) tf_end(1);
 
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
@@ -8871,7 +9619,10 @@ static void frame(void)
         wheel_x = swx;
         wheel_y = swy;
     }
-    if (export_open) export_dialog();
+    if (export_open) {
+        if (picking) lpress = rpress = 0;  /* the system file dialog has the mouse */
+        export_dialog();
+    }
     if (menu_open && !picking) file_menu();
     if (met_open && !picking) metronome_menu();
     dd_draw();
@@ -9229,6 +9980,16 @@ int main(int argc, char **argv)
                 lib_badge_at = 0;
             }
         }
+        if (getenv("TINYDAW_SHOT_GEN")) {        /* "genre,kind,preset,scroll": the Generator */
+            int ge = -1, ki = -1, pr = -1, sc = 0;
+            sscanf(getenv("TINYDAW_SHOT_GEN"), "%d,%d,%d,%d", &ge, &ki, &pr, &sc);
+            show_panel(RI_SOUNDS);
+            sounds_sub = 1;
+            gx_genre = ge;
+            gx_kind = ki;
+            if (pr >= 0 && pr < NSYNTH_PRESETS) synth_from_preset(&GX, gx_preset = pr);
+            sounds_scroll = sc;
+        }
         if (getenv("TINYDAW_SHOT_VIS") || getenv("TINYDAW_SHOT_SHOW")) {   /* fill the meters with the demo */
             vis_open = getenv("TINYDAW_SHOT_VIS") != NULL;
             show_open = getenv("TINYDAW_SHOT_SHOW") != NULL;
@@ -9342,9 +10103,11 @@ int main(int argc, char **argv)
             }
             case SDL_TEXTINPUT:
                 numedit_text(e.text.text);
+                tf_insert(e.text.text);
                 break;
             case SDL_KEYDOWN:
                 if (numedit_key(e.key.keysym)) break;      /* typing a value */
+                if (tf_key(e.key.keysym)) break;           /* typing a name */
                 if (pads_take_key(e.key.keysym) && e.key.keysym.sym != SDLK_ESCAPE) {
                     int sc = e.key.keysym.scancode, bound = 0;
                     for (int i = 0; i < NPADS; i++) bound |= binds[i].key == sc;

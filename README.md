@@ -8,8 +8,9 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
 
 - **Starts you off quickly:** three example songs, 30 ready-made drum beats, and a Theory panel
   with scales, chords and progressions you can add to your song with one click.
-- **Makes its own sounds:** sine, square, saw, triangle and noise tones, kicks, snares and hats.
-  It can also bring in WAV, FLAC, OGG and MP3 files.
+- **Makes its own sounds:** a Generator with 54 ready-made sounds across 12 styles (808s, wobble
+  bass, supersaws, pads, keys, drum hits, risers), shaped with five plain controls like
+  *brightness* and *grit*. Also plain tones, and WAV, FLAC, OGG and MP3 files.
 - **A real mixer:** per-track filter, EQ, drive, pan and sidechain ducking, plus delay and reverb.
 - **Piano roll and automation:** write melodies note by note, and draw volume, pan, filter and
   send changes over time.
@@ -35,7 +36,7 @@ make
 ./tinydaw
 ```
 
-`zenity` gives the Open and Save dialogs. Without alsa-lib tinydaw still builds, just without MIDI.
+`zenity` (or `kdialog`) gives the Open, Save and Export dialogs. Without alsa-lib tinydaw still builds, just without MIDI.
 
 ## Your first minute
 
@@ -45,8 +46,9 @@ make
    press **Place on new row(s)**.
 3. **Add harmony:** in Theory > **Keys**, pick a key, then press **Place** next to a chord
    progression (or **+** to put its chords in your library).
-4. **Add your own sounds:** **Sounds > New sound**, choose a wave and a note, press
-   **+ Add to library**, then drag it from the library onto a track.
+4. **Add your own sounds:** **Sounds > Generator**, pick a style (say *Trap*) and what the sound
+   is for (say *Bass*), click a sound to hear it, then press **Put it at the playhead** or
+   **+ Library** and drag it onto a track.
 5. **Mix it:** open **Mixer**, click a track's name and try a filter, some reverb, or **Duck** to
    make it pump with the kick.
 6. **Save** with Ctrl+S and **export** with Ctrl+E.
@@ -125,7 +127,35 @@ has points. Automating the cutoff turns the track's filter on as a low-pass if i
 
 ## Making sounds
 
-**Sounds** has your library and **New sound**: choose sine, square, saw, triangle, noise, kick,
+**Sounds > Generator** is the quickest way to a sound, with no synth knowledge needed:
+
+1. **What kind of music?** House, Techno, Hip-hop, Trap, Lo-fi, Drum & bass, Dubstep, Synthwave,
+   Pop, R&B, Ambient or Chiptune (or Any).
+2. **What is the sound for?** Bass, Lead, Pad, Keys, Pluck, Drums or FX (or Anything). Each says
+   what it's for in plain words.
+3. **Click a sound** to hear it. Its controls open underneath:
+
+| Control | What it does |
+|---|---|
+| Brightness | dark to bright: muffled or crisp |
+| Softness | snappy to smooth: a hard start and short tail, or a slow fade in and long tail |
+| Thickness | thin to fat: more detuned copies, wider stereo, more sub |
+| Grit | clean to dirty: saturation, then bit-crushing |
+| Wobble | still to wobbly: the filter moving in a rhythm |
+| Note, Length, Volume | the pitch it plays at, how long it lasts, how loud |
+
+Each control starts in the middle, which is the sound as designed. You hear every change as you let
+go, double-clicking a control puts it back, and **Back to how it was** resets the lot. **Surprise
+me** picks a random sound that fits your choices, with a little variation. Then:
+
+- **+ Library** keeps it, ready to drag onto a track.
+- **Put it at the playhead** places it straight into the song, on the first free track.
+- **Play notes with it** makes it the instrument, so double-clicking a track writes notes with it
+  in the piano roll, and a MIDI keyboard plays it.
+
+Generator sounds are saved as recipes, like everything else that tinydaw makes.
+
+**Sounds > New sound** builds a plain tone instead: choose sine, square, saw, triangle, noise, kick,
 snare or hat. Then set the note, length, volume and envelope (attack, release), and the tuning (A4,
 415–466 Hz). **Play** lets you hear it before adding it to the library. Pitched and reversed copies made for clips stay out of the library list.
 
@@ -204,7 +234,10 @@ back. Projects also open by dropping them on the window or naming them on the co
 | Normalize | Off, -1 dB, -0.1 dB |
 | Dither | For 16-bit files |
 
-Exports go to your Music folder.
+**Folder** and **File name** say where it goes. Type in either, or press **Choose...** for your
+system's save dialog. The file is named after the project, or the date and time if it hasn't been
+saved yet. Typing a name ending in `.mp3`, `.flac` and so on also picks that format. The dialog
+warns before replacing a file, and the folder you choose is kept until you close tinydaw.
 
 ## Watching it: the visualizer
 
@@ -264,8 +297,7 @@ Linux and `%APPDATA%\tinydaw` on Windows.
 
 ## Limits
 
-tinydaw has no automation (effect settings stay the same for the whole song), no MIDI output, no
-recording from a microphone, and no time-stretching. Its drum patterns are approximations of each
+tinydaw has no MIDI output, no recording from a microphone, and no time-stretching. Its drum patterns are approximations of each
 style, meant as a starting point.
 
 ## For developers
@@ -282,6 +314,8 @@ style, meant as a starting point.
 - `src/project.c`: the `.tdaw` format
 - `src/midi.c`: MIDI input (ALSA on Linux, winmm on Windows)
 - `src/theory.c`: scales, chords, progressions and the beat styles
+- `src/synth.c`: the Generator's synth (unison oscillators, FM, a resonant filter with its own
+  envelope and LFO, drive and crushing) and its genre presets
 - `src/compat.h`: the few things that differ on Windows
 
 **How some of it works:**

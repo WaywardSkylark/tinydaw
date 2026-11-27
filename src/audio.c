@@ -592,6 +592,10 @@ static float *variant_render(const Sample *s, int semis, int reverse, long *fram
         d = malloc((size_t)s->frames * 2 * sizeof(float));
         if (d) memcpy(d, s->data, (size_t)s->frames * 2 * sizeof(float));
         n = s->frames;
+    } else if (s->synth) {                       /* made again at the new pitch */
+        SynthSound q = s->syn;
+        q.note += semis;
+        d = render_synth(&q, &n);
     } else if (s->generated && !s->is_beat && s->gen.wave < WAVE_KICK) {
         GenParams g = s->gen;
         if (s->nchord) {
@@ -675,7 +679,8 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         float *nd = NULL;
         long nf = 0;
         char err[128];
-        if (s->is_beat == 2) nd = render_hit(&s->beat, s->beat_mask, &nf);
+        if (s->synth) nd = render_synth(&s->syn, &nf);
+        else if (s->is_beat == 2) nd = render_hit(&s->beat, s->beat_mask, &nf);
         else if (s->is_beat) nd = render_beat(&s->beat, s->beat_mask, s->gen_bpm, &nf);
         else if (s->generated && s->nchord) nd = render_notes(&s->gen, s->gen_bpm, s->chord, s->nchord, &nf);
         else if (s->generated) nd = render_gen(&s->gen, s->gen_bpm, &nf);

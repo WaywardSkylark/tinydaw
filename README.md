@@ -1,243 +1,253 @@
 # tinydaw
 
-A small timeline sequencer in C. Generate tones and drums, import audio files, drag them onto
-8 tracks, arrange, loop, mix with effects, save and export. Play sounds live from the keyboard, game controllers
-and MIDI devices with 16 pads, and record what you play onto the timeline.
+A small music maker for Windows and Linux. Make drums, synth sounds and chords, arrange them on a
+timeline, mix them with effects and export a finished song. You can also play sounds live from
+your computer keyboard, a game controller or a MIDI keyboard, and record what you play.
 
-**Libraries (all open source):** SDL2 (window, input, drawing, audio output; zlib licence),
-SDL2_ttf (text; zlib), libsndfile (reading and writing audio files; LGPL-2.1), libsamplerate
-(sample-rate conversion; BSD-2), alsa-lib (MIDI input; LGPL-2.1, optional). Font: DejaVu Sans Mono.
+![tinydaw playing the House example song](docs/screenshot.png)
 
-## Build and run
+- **Starts you off quickly:** three example songs, 30 ready-made drum beats, and a Theory panel
+  with scales, chords and progressions you can add to your song with one click.
+- **Makes its own sounds:** sine, square, saw, triangle and noise tones, kicks, snares and hats.
+  It can also bring in WAV, FLAC, OGG and MP3 files.
+- **A real mixer:** per-track filter, EQ, drive, pan and sidechain ducking, plus delay and reverb.
+- **Live play:** 16 pads and a MIDI instrument, with recording onto the timeline.
+- **Exports** to WAV, AIFF, FLAC, OGG, Opus or MP3, as a full mix or as one file per track.
+- **Looks how you like:** Dark, Light, follow-your-desktop, Windows XP, Frutiger Aero and Blender themes.
+
+## Get it
+
+**Windows:** download `tinydaw-<version>-windows-x64.zip` from the
+[latest release](https://github.com/WaywardSkylark/tinydaw/releases/latest), unzip it anywhere and
+run `tinydaw.exe`. Nothing is installed.
+
+**Linux:** install the libraries and build:
 
 ```sh
+# Arch / CachyOS
+sudo pacman -S sdl2-compat sdl2_ttf libsndfile libsamplerate alsa-lib ttf-dejavu zenity
+# Debian / Ubuntu
+sudo apt install libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libsamplerate0-dev libasound2-dev fonts-dejavu-core zenity
+
 make
-./tinydaw              # empty project
-./tinydaw --demo       # a two-bar beat to play with
-./tinydaw a.wav b.flac # start with files in the library
-./tinydaw song.tdaw    # open a project
-./tinydaw --version
+./tinydaw
 ```
 
-The version lives in the `VERSION` file; the build, the window title, the File menu, saved
-projects (`saved-by` line), the Windows file properties and the release zip's name all use it.
+`zenity` gives the Open and Save dialogs. Without alsa-lib tinydaw still builds, just without MIDI.
 
-Arch/CachyOS packages: `sdl2-compat sdl2_ttf libsndfile libsamplerate alsa-lib ttf-dejavu`, plus `zenity`
-for the Open/Save dialogs (Debian/Ubuntu: `libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libsamplerate0-dev
-libasound2-dev fonts-dejavu-core zenity`). Without alsa-lib it builds without MIDI. Set `TINYDAW_FONT=/path/to/font.ttf` to use another font.
+## Your first minute
 
-### Windows
+1. **Hear what it can do:** ☰ > **Open an example song**, then press **Space**. Each example opens
+   as an untitled copy, so you can change anything without spoiling it.
+2. **Start your own:** ☰ > **New**. Open **Theory** on the left, pick a **Style** under Beats and
+   press **Place on new row(s)**.
+3. **Add harmony:** in Theory > **Keys**, pick a key, then press **Place** next to a chord
+   progression (or **+** to put its chords in your library).
+4. **Add your own sounds:** **Sounds > New sound**, choose a wave and a note, press
+   **+ Add to library**, then drag it from the library onto a track.
+5. **Mix it:** open **Mixer**, click a track's name and try a filter, some reverb, or **Duck** to
+   make it pump with the kick.
+6. **Save** with Ctrl+S and **export** with Ctrl+E.
 
-`make dist-windows` cross-compiles a Windows build on Linux and zips it with its DLLs and font:
-see [win/README.md](win/README.md). It behaves the same; projects open on either system.
+Settings > **Keys** lists every shortcut.
 
-## Example songs
+## Finding your way around
 
-**☰ > Open an example song** opens one of three songs as an untitled copy (saving asks where, so
-the example stays as it was). Each is about a minute long and made only from tinydaw's own sounds
-and effects, so they double as a tour.
+- **Top bar:**
+  - the ☰ menu: new, open, save, examples, export, settings, full-screen show, quit
+  - undo and redo
+  - play and loop
+  - tempo, snap and the metronome
+  - where you are in the song, and the master level
+- **The rail** down the left holds Sounds, Theory, Pads, Mixer, Visual and Settings. Each opens a
+  panel with its own tabs. Click the open one again, or press **Ctrl+B**, to hide it and give the
+  timeline the full width. **Ctrl+1** to **Ctrl+6** open them from the keyboard.
+- **The timeline:** tracks down the side, bars and minutes:seconds along the top.
 
-| Song | What's in it |
+## Arranging
+
+| To | Do this |
 |---|---|
-| House: Late Train | 124 BPM in A minor. Four-on-the-floor kit split over kick, clap and hats; an off-beat saw bass and chord stabs ducked by the kick (sidechain); a pad; a square lead with ping-pong delay over the drop; a reversed-pad riser and snare roll into it |
-| Hip-hop: Corner Store | 88 BPM in D minor. Swung boom-bap drums with drive, an 808-style sine bass, soft triangle keys (Dm9, Gm7, Bbmaj7, A7) with an airy upper layer, delayed bell melody, tape hiss through a high-pass |
-| Experimental: Glass Weather | 96 BPM in F Lydian. Resonant band-passed saw drones, glass bells falling every 1.25 beats (five against four) into a long ping-pong delay and big reverb, reversed bells an octave down, filtered wind, a breakbeat looping every 3.5 beats so it drifts against the bar and ducks the drones, glitched snares and a sub |
-
-The songs are written by `examples/make_examples.py`; run it to remake them.
-
-## The window
-
-Controls that step through choices when clicked (Snap, the Theory sound) also have an arrow
-that opens the whole list. Track choices (in Pads, the Mixer and Theory), the sidechain source,
-the output device and the beat style are lists too.
-
-- **Top bar:** the menu (☰: new, open, save, export, settings, the show, quit), undo and redo,
-  play and loop, tempo and snap, where the playhead is, and the master level.
-- **Rail** down the left: Sounds, Theory, Pads, Mixer, Visual and Settings. Each opens its panel
-  beside the rail, with sub-tabs inside (Mixer: Clip, Track, Effects, Live). Click the open one
-  again, or press Ctrl+B, to hide the panel and give the timeline the whole width. Ctrl+1 to
-  Ctrl+6 open them from the keyboard (F1 to F4 still open Theory, Pads, Mixer and Visual).
-- **Settings:** Look (Dark, Light, System, which follows your desktop, and three themed looks:
-  Windows XP with its blue title bar, beige windows and green buttons; Frutiger Aero with glossy
-  sky-blue glass and drifting bubbles; Blender with rounded grey widgets, blue selection and an
-  orange playhead), Audio (output device,
-  project sample rate, master volume), Input (devices and MIDI options), Keys (every shortcut)
-  and About (version and where files are kept). Theme and output device are remembered in
-  `~/.config/tinydaw/settings.conf`.
-
-## Using it
-
-| Do | How |
-|---|---|
-| Make a sound | Pick a wave (sine, square, saw, tri, noise) or drum (kick, snare, hat), set note, length, volume, attack, release, press **+ Add to library** (Sounds > New sound) |
-| Change a number | Click it and type a value (Enter sets it, Esc cancels), drag it left/right or up/down, or use the mouse wheel. Hold Shift for fine steps |
-| Import audio | Drop WAV, FLAC, OGG, MP3 (or anything libsndfile reads) onto the window |
-| Hear a sound | Click it in the library (click again to stop) |
-| Place a sound | Drag it from the library onto a track |
+| Play / stop | Space, or **Play**. Home goes to the start, End to the end |
+| Put a sound in the song | Drag it from the library onto a track |
+| Hear a sound first | Click it in the library (click again to stop) |
 | Move a clip | Drag it, in time and between tracks. Arrow keys nudge it |
-| Select several | Drag a box over empty timeline; Shift+click adds or removes a clip; Ctrl+A selects all, Esc none. Dragging, arrows, Delete, Ctrl+D, `[ ]`, Ctrl+R, Alt+wheel and the Mixer pane's clip settings act on the whole selection |
-| Copy and paste | Ctrl+C / Ctrl+X, then Ctrl+V pastes at the playhead, on the same tracks |
-| Copy a clip | Ctrl+drag (the whole selection if it's in one), or Ctrl+D to duplicate after itself |
 | Trim a clip | Drag its left or right edge |
-| Delete a clip | Right-click it (the whole selection if it's in one), or select and press Delete |
-| Scroll a pane | Mouse wheel, drag its scrollbar, click above or below the handle for a page, or Page Up/Down |
-| Snap | Click **Snap** to step through off / bar / 1/2 / 1/4 / 1/8 / 1/16, or its arrow to pick from the list. Hold Shift while dragging to ignore it |
-| Play / stop | Space, or **Play**. Home jumps back to the start |
-| Playhead | Click or drag in the ruler. The ruler shows bars above and minutes:seconds below, and the playhead's time |
-| Move around | Ctrl+Left/Right a bar, Ctrl+Shift+Left/Right a beat, Alt+Left/Right the previous/next clip edge, Home/End the start/end, F brings the playhead into view, Z zooms to fit the song |
-| Metronome | **Click** in the top bar (or M) turns it on; the arrow beside it has the sound, volume, 8th/16th ticks, accent, a 1-2 bar count-in (always or only when recording), and tempo: BPM, +/-1, half/double, tap tempo (T). The four lights show the beat |
-| Loop | Right-drag in the ruler to set a region, **Loop** or L to toggle |
-| Zoom / scroll | Ctrl+wheel to zoom, wheel to scroll; +/- also zoom |
-| Mute / solo / volume | M and S buttons and the bar under each track name |
-| Rows | **+** next to TRACKS adds a row (up to 16); placing a beat adds and names its own rows |
-| Tuning | **Tuning A4** in the generator (415–466 Hz) applies to new tones, chords and the note table |
-| Export | **☰ > Export audio...** or Ctrl+E opens the export dialog (Enter exports, Esc cancels). Files go to `~/Music` (or the current folder) |
-| Project sample rate | Settings > Audio: 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz |
-| Clip volume / fades | Alt+wheel over a clip for its gain; drag the small squares on its top corners to fade in and out |
-| Transpose / reverse a clip | `[` and `]` move it a semitone; Ctrl+R plays it backwards (or use the Mixer pane) |
-| Undo / redo | Ctrl+Z, Ctrl+Shift+Z or Ctrl+Y, or the **Undo** and **Redo** buttons (300 steps) |
-| Save / open | **File** menu, Ctrl+S, Ctrl+Shift+S, Ctrl+O, Ctrl+N. Dropping a `.tdaw` file on the window opens it |
+| Fade a clip | Drag the small squares on its top corners |
+| Make a clip louder or quieter | Alt + mouse wheel over it |
+| Transpose / reverse a clip | `[` and `]` move it a semitone, Ctrl+R plays it backwards |
+| Select several | Drag a box over empty timeline, Shift+click to add or remove, Ctrl+A for all, Esc for none. Moves, deletes, copies, transposes and gain changes then apply to all of them |
+| Copy | Ctrl+drag, Ctrl+D (a copy straight after), or Ctrl+C / Ctrl+X then Ctrl+V (pastes at the playhead) |
+| Delete | Delete, or right-click a clip |
+| Undo / redo | Ctrl+Z, Ctrl+Shift+Z (300 steps) |
+| Loop part of the song | Right-drag in the ruler, then **Loop** or L |
+| Snap to the grid | **Snap** steps through off, bar, 1/2 … 1/16; its arrow opens the list. Hold Shift while dragging to ignore it |
+| Jump around | Ctrl+←/→ a bar, Ctrl+Shift+←/→ a beat, Alt+←/→ to the next clip edge, F shows the playhead, Z zooms to fit the song |
+| Zoom / scroll | Ctrl + wheel to zoom, wheel to scroll, + and - also zoom |
+| Change any number | Click it and type, or drag it, or use the wheel (Shift for fine steps) |
+| Tempo | Click **BPM** and type, or use the metronome menu (±1, half, double, tap tempo with T) |
+| Metronome | **Click** in the top bar, or M. Its arrow sets the sound, 8th/16th ticks, accent and a 1-2 bar count-in |
+| Add a track | **+** next to TRACKS (up to 16). Each track has mute, solo and volume |
+| Bring in audio | Drop WAV, FLAC, OGG or MP3 files on the window |
 
-## Saving
+## Making sounds
 
-Projects are `.tdaw` text files (default folder `~/Music/tinydaw`). They store recipes, not audio:
-generated sounds are made again when the project opens, and imported sounds are read again from
-their files, so a project is a few kilobytes. If an imported file has moved, its clips play
-silence until it's back. Unsaved work is written to `~/.local/share/tinydaw/autosave.tdaw` every
-30 seconds; after a crash, **File > Recover unsaved work** brings it back. Closing with unsaved
-changes asks first.
+**Sounds** has your library and **New sound**: choose sine, square, saw, triangle, noise, kick,
+snare or hat. Then set the note, length, volume and envelope (attack, release), and the tuning (A4,
+415–466 Hz). Pitched and reversed copies made for clips stay out of the library list.
 
-Undo covers clips, tracks, tempo, tuning, the loop region and pad settings. A drag, a placed beat
-or a recorded take is one step. Sounds added to the library stay there.
-
-## Mixer and effects
-
-**Mixer** on the rail (or F3) opens the mixer: Clip, Track, Effects and Live pages. Click a track's
-name to pick it.
-
-| Section | What's there |
-|---|---|
-| Clip | Gain, pitch (semitones), fade in/out, reverse for the selected clip |
-| Track | Volume, pan, a filter (low-, high- or band-pass with cutoff and resonance), 3-band EQ, drive, duck amount, delay and reverb sends |
-| Delay | Tempo-synced time (1/16 to 1/2, dotted and triplet), feedback, tone, level, ping-pong |
-| Reverb | Size, damping, level |
-| Sidechain | Which track ducks the others (e.g. the kick, for the house "pump") and how fast they come back |
-| Live controls | Pitch wheel range; the MIDI pitch wheel bends pads and the instrument, the mod wheel opens the filter on the instrument's track |
-
-Each track runs drive, EQ, filter, volume, pan and ducking in that order, then sends to the shared
-delay and reverb. Pads and the instrument play through their track's effects, so what you
-record sounds like what you heard. Exports go through the same mixer, and a song with delay or
-reverb gets its tail rendered until it falls silent. Tracks with effects show `fx` under their name.
-
-A synthesized sound transposed on a clip is made again at the new pitch, so it keeps its length;
-recorded and imported sounds are resampled, so up an octave plays in half the time. Pitched and
-reversed copies don't clutter the library.
-
-## Visualizer
-
-Every track header has a level meter, and the top bar shows the master level. **Visual** on the
-rail (or F4) opens the analyzer: a spectrum (20 Hz to 20 kHz), the waveform,
-a stereo field display with its correlation (negative means the left and right cancel in mono),
-master meters with peak readouts and clip warnings (click to clear), and a meter per track.
-
-**F11** (or the button at the bottom of that pane) starts the full-screen show: a glowing blob
-for every track that's sounding, in its colour and sized by its level, going round once every
-two bars in time with the song. They swell on the kick, a ring of spectrum bars pulses around
-them, each beat sends out a ripple, and hi-hats make it glitter. Space plays and stops, the pad
-keys still play, and Esc or F11 leaves.
-
-## Pads and live input
-
-**Pads** on the rail (or F2) opens the pads panel: 16 pads that play library sounds, and an
-instrument that MIDI keyboards play chromatically.
-
-| Do | How |
-|---|---|
-| Put a sound on a pad | Drag it from the library onto the pad, or **Fill from library** |
-| Play a pad | Its key (1-4, Q-R, A-F, Z-V) while the pane is open, a controller button, a MIDI note, or click it |
-| Pad behaviour | **One-shot** plays to the end, **Hold** plays while held, **Loop** starts and stops on each press |
-| Rebind | Select a pad, **Learn input**, press any key, controller button/d-pad/stick/trigger or MIDI note/CC |
-| Play an instrument | Drop a sound on **Instrument** (or **Generator sound**) and play a MIDI keyboard; Root note is where it plays unpitched |
-| Record | **Rec**, then play the song: hits become clips on each pad's track, snapped to the grid |
-
-Devices are picked up when plugged in, including while tinydaw is running: game controllers and
-other USB controllers through SDL, MIDI keyboards and pad controllers through ALSA. MIDI notes
-36-51 (C2-D#3) trigger the pads by default, which suits pad controllers; on a piano keyboard press
-**No MIDI on pads** so every key plays the instrument. Bindings belong to your hardware, not a song,
-so they're kept in `~/.config/tinydaw/pads.conf`; the sounds on the pads are saved in the project.
-Controllers work even when the window is in the background.
-
-## Theory
-
-**Theory** on the rail (or F1) has four tabs: **Beats**, **Keys**, **Chords** and **Reference**
-(Circle, Intervals, Tempo, Notes). Everything you can hear has a **+** that puts it in the library,
-ready to drag onto a track. The strip at the top sets what those sounds are: the wave (shared with
-Sounds > New sound) and the length (a beat to two bars). Adding the same thing twice doesn't make
-a copy, and the Sounds button on the rail counts what's waiting there.
+**Theory** has four tabs. Everything you can hear in them has a **+** that adds it to the library.
+The strip at the top of each tab sets which wave and length those sounds use. Adding the same thing
+twice doesn't make a copy, and the Sounds button counts what you've added.
 
 | Tab | What's there |
 |---|---|
-| Beats | 30 styles, picked from the **Style** list (or stepped with < >): house, deep house, tech house, techno, trance, UK garage, breakbeat, drum & bass, jungle, dubstep, hip-hop, trap, UK drill, phonk, R&B, pop, rock, funk, disco, synthwave, electro, footwork, lo-fi, reggaeton, dancehall, reggae, afrobeats, amapiano, bossa nova and jazz swing. Each has a tempo and typical range, swing, a suggested key, tuning and its own drum kit. An editable step grid (kick, snare, clap, closed/open hat, perc; click to cycle hit, accent, ghost, roll). **Play** previews it, **+ Library** adds it as a loop (or one per drum with Row per drum), **Place on new row(s)** puts it at the bar nearest the playhead, and the orange handle can be **dragged** onto any row. The kick is tuned to the key root chosen in Keys |
-| Keys | Any root and 12 scales/modes: notes (click to hear, + adds all of them), steps, key signature. The chords of the key as triads or 7ths with Roman numerals: click to hear, + under each to add, or add all 7. 12 common progressions spelled in the key: + adds their chords, **Play**, and **Place** (one chord per bar on the chosen track) |
-| Chords | 19 chord types with symbol, formula and notes on the current root: click to hear, + to add |
-| Reference > Circle | Circle of fifths with relative minors and key signatures; click a key to select it |
-| Reference > Intervals | Semitones, names, just-intonation ratios, cents off in equal temperament; click to hear, + to add |
-| Reference > Tempo | Straight, dotted and triplet times in ms and Hz at the project tempo, tap tempo, tempo markings |
-| Reference > Notes | Frequency of every note C0–B8; click to hear and choose it, then add it |
+| Beats | 30 styles: house, deep house, tech house, techno, trance, UK garage, breakbeat, drum & bass, jungle, dubstep, hip-hop, trap, UK drill, phonk, R&B, pop, rock, funk, disco, synthwave, electro, footwork, lo-fi, reggaeton, dancehall, reggae, afrobeats, amapiano, bossa nova and jazz swing. Each has its own tempo, swing, key and drum kit, and a step grid you can edit. **Play** previews it, **+ Library** adds it as a loop, **Place** puts it in the song, or drag the orange bar onto any track |
+| Keys | Any key and 12 scales and modes: the notes, the chords of the key (triads or 7ths, with Roman numerals) and 12 common progressions to play, add or place |
+| Chords | 19 chord types on the chosen root |
+| Reference | The circle of fifths, intervals (with their just-intonation ratios), tempo maths (delay times in ms), and the frequency of every note |
 
-Notes are spelled with one letter per scale degree, so Eb minor contains Cb and Gm is G Bb D.
+## Mixing
 
-## Export options
+**Mixer** (or F3) has four pages:
+
+| Page | What's there |
+|---|---|
+| Clip | Gain, pitch, fades and reverse for the selected clips |
+| Track | Volume, pan, a filter (low-, high- or band-pass with cutoff and resonance), 3-band EQ, drive, how much it ducks, and how much it sends to the delay and reverb |
+| Effects | The delay (in time with the tempo, 1/16 to 1/2 including dotted and triplet, feedback, tone, ping-pong), the reverb (size, damping) and the sidechain: which track makes the others duck, and how fast they recover |
+| Live | How far the MIDI pitch wheel bends; the mod wheel opens the filter on the instrument's track |
+
+Tracks with effects show `fx` under their name, and every track has a level meter. What you export
+sounds exactly like what you hear, including the delay and reverb dying away after the last note.
+
+## Playing live: pads and MIDI
+
+**Pads** (or F2) has 16 pads. Drag library sounds onto them, or press **Fill from library**.
+
+- **Playing them:** keys 1-4, Q-R, A-F and Z-V (while the panel is open), a game-controller button,
+  a MIDI note, or a click.
+- **Modes:** **One-shot** plays to the end, **Hold** plays while you hold it, **Loop** starts and
+  stops on each press.
+- **Rebinding:** select a pad, press **Learn input**, then press any key, controller button, stick,
+  trigger, MIDI note or knob.
+- **Instrument:** a MIDI keyboard plays a chosen sound at every pitch. On a piano keyboard, press
+  **Stop MIDI notes triggering pads** in Settings > Input so every key plays the instrument.
+- **Recording:** turn on **Rec**, play the song and play along. Hits become clips, snapped to the
+  grid, and a count-in can play first.
+
+Controllers and MIDI devices are picked up when they're plugged in, even while tinydaw is running.
+Pads play through their track's effects.
+
+## Saving and exporting
+
+Projects are small `.tdaw` files, saved in `Music/tinydaw` by default. They store how each sound was
+made rather than the audio, so they open at full quality at any sample rate. Imported audio files
+are linked, not copied; if one moves, its clips play silence until it's back.
+
+Unsaved work is autosaved every 30 seconds; after a crash, ☰ > **Recover unsaved work** brings it
+back. Projects also open by dropping them on the window or naming them on the command line.
+
+**Export** (Ctrl+E):
 
 | Option | Choices |
 |---|---|
 | Format | WAV, AIFF, FLAC, OGG Vorbis, Opus, MP3 |
-| Bit depth | 16-bit, 24-bit, 32-bit float (FLAC up to 24-bit; lossy formats use a 0–1 VBR quality instead) |
-| Sample rate | the project rate, or 44.1–192 kHz, converted with libsamplerate's best-quality sinc. Opus is always 48 kHz and MP3 at most 48 kHz |
-| Channels | stereo or mono |
-| Range | whole song or the loop region |
-| Output | the mix, or stems (one file per track, ignoring mute/solo) |
-| Normalize | off, -1 dB, -0.1 dB peak (mixes only, so stems stay in balance) |
-| Dither | TPDF dither for 16-bit output |
+| Bit depth | 16-bit, 24-bit, 32-bit float (FLAC up to 24-bit; lossy formats have a quality setting instead) |
+| Sample rate | The project's, or 44.1–192 kHz (Opus is always 48 kHz, MP3 at most 48 kHz) |
+| Channels | Stereo or mono |
+| Range | The whole song or the loop |
+| Output | The mix, or one file per track |
+| Normalize | Off, -1 dB, -0.1 dB |
+| Dither | For 16-bit files |
 
-From the command line: `./tinydaw --demo --export out.flac --bits 24 --rate 96000` (see `--help`).
+Exports go to your Music folder.
 
-## High resolution
+## Watching it: the visualizer
 
-The engine mixes in 32-bit float at the project sample rate. Changing the project rate rebuilds
-generated sounds from their settings and reloads imported sounds from their files at the new rate,
-so a 192 kHz project really has content up to 96 kHz. Exporting a 48 kHz project at 96 kHz only
-changes the file format, because no detail above 24 kHz exists to keep.
+**Visual** (or F4) has a spectrum analyzer, a waveform, a stereo view (with a warning when left and
+right would cancel in mono) and level meters with clip warnings.
 
-## Design
+**F11** starts a full-screen show: a glowing blob for every track that's playing, in its colour,
+circling in time with the song. They swell on the kick, a ring of spectrum bars pulses around
+them, and every beat sends out a ripple. Space plays, the pad keys still work, and Esc leaves.
 
-- `src/audio.c`: the engine. Sounds are stored as 48 kHz stereo float; imports are converted and
-  resampled on load. Square and saw use PolyBLEP so they don't alias badly. Clips get 64-frame
-  fades at their edges so trims don't click, and the output goes through a soft limiter.
-- `src/main.c`: the UI, an immediate-mode layout redrawn every frame with SDL's 2D renderer. The
-  audio callback runs on SDL's audio thread; every edit takes the audio device lock.
-- `src/project.c`: the `.tdaw` format. `src/midi.c`: a thread on the ALSA sequencer that subscribes
-  to every MIDI output port. Live pad voices are mixed in the audio callback on top of the song.
-- Undo compares the project with the last snapshot after every frame, so no edit can forget to
-  record itself.
-- `src/fx.c`: the mixer. A state-variable filter, RBJ biquads for the EQ, tanh drive, a
-  tempo-synced delay with a damped feedback loop, and a Freeverb-style reverb (8 combs and 4
-  allpasses per side, tunings scaled to the project rate).
-- `src/analysis.c`: the FFT (radix-2, Hann window) behind the analyzer and the show. The audio
-  callback copies what it plays into a ring buffer that the UI reads each frame; the mixer
-  keeps each track's peak level.
-- No automation or MIDI output yet.
+## The example songs
 
-## Tests
+| Song | What's in it |
+|---|---|
+| House: Late Train | 124 BPM, A minor. Four-on-the-floor drums, an off-beat bass and chord stabs that pump with the kick, a pad, a lead with ping-pong delay, and a riser and snare roll into the drop |
+| Hip-hop: Corner Store | 88 BPM, D minor. Swung boom-bap drums, an 808-style bass, soft keys (Dm9, Gm7, Bbmaj7, A7), a bell melody and tape hiss |
+| Experimental: Glass Weather | 96 BPM, F Lydian. Resonant drones, glass bells falling five against four into long echoes, reversed bells, wind, and drums that loop every 3.5 beats so they drift against the bar |
+
+Each sets up the pads with its own sounds too. `examples/make_examples.py` writes them.
+
+## Settings
+
+- **Look:** Dark, Light, System (follows your desktop's dark/light setting), Windows XP, Frutiger
+  Aero or Blender.
+- **Audio:** output device, the project's sample rate (44.1 to 192 kHz) and master volume.
+- **Input:** connected controllers and MIDI devices, and MIDI options.
+- **Keys:** every shortcut.
+- **About:** the version, and where projects, pad bindings and autosaves are kept.
+
+Your theme, output device, metronome and pad bindings are remembered: in `~/.config/tinydaw/` on
+Linux and `%APPDATA%\tinydaw` on Windows.
+
+## Command line
 
 ```sh
-./tinydaw --selftest                 # simulated mouse drags through the real input code
-./tinydaw --demo --export demo.wav   # headless render of the demo
-./tinydaw --beat trap --export t.wav # render a genre beat (4 bars, its tempo and key)
-./tinydaw --demo --screenshot ui.bmp # offscreen render of the window
-./tinydaw --demo --save demo.tdaw    # write a project without opening a window
-TINYDAW_DEBUG_INPUT=1 ./tinydaw      # print every key, controller and MIDI input
+./tinydaw song.tdaw                       # open a project
+./tinydaw a.wav b.flac                    # start with these in the library
+./tinydaw --demo                          # a two-bar beat to play with
+./tinydaw --beat trap --export trap.wav   # render a genre beat (4 bars, its tempo and key)
+./tinydaw song.tdaw --export song.flac --bits 24 --rate 96000
+./tinydaw --demo --save demo.tdaw         # write a project without opening a window
+./tinydaw --version
 ```
 
-The self-test covers undo, saving and reopening (sound for sound), pads, learning, the instrument,
-recording, a virtual SDL gamepad, and every effect measured on rendered audio.
+`./tinydaw --help` lists every option.
+
+## Limits
+
+tinydaw has no automation (effect settings stay the same for the whole song), no MIDI output, no
+recording from a microphone, and no time-stretching. Its drum patterns are approximations of each
+style, meant as a starting point.
+
+## For developers
+
+**Layout of the code:**
+- `src/main.c`: the interface, drawn fresh every frame with SDL's 2D renderer, and the self-tests
+- `src/audio.c`: sounds, synthesis, import, sample-rate changes, export
+- `src/fx.c`: the mixer and effects: a state-variable filter, RBJ biquad EQ, tanh drive, a tempo-synced
+  delay and a Freeverb-style reverb
+- `src/analysis.c`: the FFT behind the analyzer and the show
+- `src/project.c`: the `.tdaw` format
+- `src/midi.c`: MIDI input (ALSA on Linux, winmm on Windows)
+- `src/theory.c`: scales, chords, progressions and the beat styles
+- `src/compat.h`: the few things that differ on Windows
+
+**How some of it works:**
+- The audio callback runs on SDL's audio thread, and every edit takes the audio device lock.
+- Undo compares the project with a snapshot after every frame, so no edit can forget to record itself.
+- Sounds are mixed in 32-bit float at the project rate. Changing the rate rebuilds synthesized sounds
+  and reloads imported ones at the new rate, rather than resampling them.
+
+**Tests:**
+
+```sh
+./tinydaw --selftest                      # 150+ checks, driving the real interface with simulated input
+./tinydaw --demo --screenshot ui.bmp      # draw the window off-screen
+TINYDAW_DEBUG_INPUT=1 ./tinydaw           # print every key, controller and MIDI input
+```
+
+The self-test covers editing, undo, saving and reopening sound for sound, pads, MIDI and controller
+input, every effect measured on rendered audio, the analyzer, the metronome, the themes and the
+example songs.
+
+**Windows builds** are cross-compiled on Linux with llvm-mingw against MSYS2's libraries:
+`make dist-windows`, see [win/README.md](win/README.md). The version lives in `VERSION`, and the
+program, saved projects, the Windows file properties and the zip name all use it.
+
+**Built with** SDL2 and SDL2_ttf (zlib licence), libsndfile and alsa-lib (LGPL-2.1), libsamplerate
+(BSD-2) and the DejaVu fonts. The Windows zip includes their licences.

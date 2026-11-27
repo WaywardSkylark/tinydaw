@@ -57,7 +57,10 @@ the output device and the beat style are lists too.
   beside the rail, with sub-tabs inside (Mixer: Clip, Track, Effects, Live). Click the open one
   again, or press Ctrl+B, to hide the panel and give the timeline the whole width. Ctrl+1 to
   Ctrl+6 open them from the keyboard (F1 to F4 still open Theory, Pads, Mixer and Visual).
-- **Settings:** Look (Dark, Light or System, which follows your desktop), Audio (output device,
+- **Settings:** Look (Dark, Light, System, which follows your desktop, and three themed looks:
+  Windows XP with its blue title bar, beige windows and green buttons; Frutiger Aero with glossy
+  sky-blue glass and drifting bubbles; Blender with rounded grey widgets, blue selection and an
+  orange playhead), Audio (output device,
   project sample rate, master volume), Input (devices and MIDI options), Keys (every shortcut)
   and About (version and where files are kept). Theme and output device are remembered in
   `~/.config/tinydaw/settings.conf`.

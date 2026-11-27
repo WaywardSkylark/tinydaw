@@ -38,34 +38,88 @@ typedef struct { Uint8 r, g, b, a; } Col;
  * with the greys inverted and the accents deepened so they read on white. */
 static Col BG, PANEL, PANEL2, PANEL3, LINE, TEXT, DIM, ACCENT, DARK, HEAD;
 static int theme_light;
-enum { THEME_DARK, THEME_LIGHT, THEME_SYSTEM };
+enum { THEME_DARK, THEME_LIGHT, THEME_SYSTEM, THEME_XP, THEME_AERO, THEME_BLENDER, THEME_COUNT };
+
+/* How controls are drawn. Dark and Light are flat; the others shape buttons, fields and the bars
+ * with gradients, gloss and rounded corners, in the spirit of their namesakes. */
+static struct {
+    int radius, gloss;                  /* corner radius; 0 flat, 1 gradient, 2 glossy */
+    Col btn_top, btn_bot, btn_border, hover_top, hover_bot, hover_border;
+    Col on_top, on_bot, on_border, on_text, btn_text;
+    Col field_bg, field_border;
+    int field_radius;
+    Col bar_top, bar_bot, bar_text, bar_dim, bar_hi;
+    Col rail_top, rail_bot, rail_text, rail_dim, rail_on;
+    int bar_gloss, bubbles, shaped;
+} ST;
+static int theme_kind;                  /* the look in use: THEME_DARK .. THEME_BLENDER (never SYSTEM) */
+static Col rgb(int r, int g, int b) { return (Col){(Uint8)r, (Uint8)g, (Uint8)b, 255}; }
 static int theme_choice = THEME_SYSTEM;
 
-static void theme_apply(int light)
+static void theme_apply(int kind)       /* THEME_DARK, THEME_LIGHT (1 also means light) or a shaped look */
 {
-    theme_light = light;
-    if (light) {
-        BG = (Col){236, 237, 241, 255};
-        PANEL = (Col){248, 248, 250, 255};
-        PANEL2 = (Col){232, 234, 239, 255};
-        PANEL3 = (Col){216, 220, 228, 255};
-        LINE = (Col){196, 200, 210, 255};
-        TEXT = (Col){28, 30, 36, 255};
-        DIM = (Col){96, 102, 116, 255};
-        ACCENT = (Col){226, 112, 34, 255};
-        HEAD = (Col){196, 128, 0, 255};
-    } else {
-        BG = (Col){22, 23, 27, 255};
-        PANEL = (Col){31, 33, 39, 255};
-        PANEL2 = (Col){41, 44, 52, 255};
-        PANEL3 = (Col){54, 58, 68, 255};
-        LINE = (Col){58, 62, 72, 255};
-        TEXT = (Col){222, 224, 230, 255};
-        DIM = (Col){138, 144, 156, 255};
-        ACCENT = (Col){240, 138, 64, 255};
-        HEAD = (Col){255, 214, 90, 255};
+    if (kind == 1) kind = THEME_LIGHT;
+    theme_kind = kind;
+    theme_light = kind == THEME_LIGHT || kind == THEME_XP || kind == THEME_AERO;
+    DARK = rgb(20, 20, 22);
+    memset(&ST, 0, sizeof ST);
+    switch (kind) {
+    case THEME_LIGHT:
+        BG = rgb(236, 237, 241); PANEL = rgb(248, 248, 250); PANEL2 = rgb(232, 234, 239); PANEL3 = rgb(216, 220, 228);
+        LINE = rgb(196, 200, 210); TEXT = rgb(28, 30, 36); DIM = rgb(96, 102, 116);
+        ACCENT = rgb(226, 112, 34); HEAD = rgb(196, 128, 0);
+        break;
+    case THEME_XP:                      /* Luna: beige windows, blue title bar, green Start button */
+        BG = rgb(255, 255, 255); PANEL = rgb(236, 233, 216); PANEL2 = rgb(245, 243, 233); PANEL3 = rgb(225, 222, 206);
+        LINE = rgb(172, 168, 153); TEXT = rgb(0, 0, 0); DIM = rgb(95, 95, 95);
+        ACCENT = rgb(49, 106, 197); HEAD = rgb(229, 128, 20);
+        ST.shaped = 1, ST.radius = 3, ST.gloss = 1;
+        ST.btn_top = rgb(255, 255, 255), ST.btn_bot = rgb(214, 208, 197), ST.btn_border = rgb(0, 60, 116);
+        ST.hover_top = rgb(255, 255, 255), ST.hover_bot = rgb(236, 225, 196), ST.hover_border = rgb(248, 179, 48);
+        ST.on_top = rgb(90, 180, 80), ST.on_bot = rgb(40, 130, 40), ST.on_border = rgb(25, 90, 25);
+        ST.on_text = rgb(255, 255, 255), ST.btn_text = rgb(0, 0, 0);
+        ST.field_bg = rgb(255, 255, 255), ST.field_border = rgb(127, 157, 185), ST.field_radius = 0;
+        ST.bar_top = rgb(64, 138, 245), ST.bar_bot = rgb(20, 78, 210), ST.bar_hi = rgb(140, 190, 255);
+        ST.bar_text = rgb(255, 255, 255), ST.bar_dim = rgb(205, 222, 255);
+        ST.rail_top = rgb(123, 162, 231), ST.rail_bot = rgb(99, 117, 214);
+        ST.rail_text = rgb(255, 255, 255), ST.rail_dim = rgb(225, 234, 255), ST.rail_on = rgb(198, 211, 247);
+        break;
+    case THEME_AERO:                    /* glossy glass, sky and aqua, fresh green */
+        BG = rgb(234, 246, 255); PANEL = rgb(244, 251, 255); PANEL2 = rgb(226, 242, 252); PANEL3 = rgb(204, 232, 250);
+        LINE = rgb(160, 205, 232); TEXT = rgb(18, 42, 72); DIM = rgb(70, 110, 145);
+        ACCENT = rgb(30, 155, 230); HEAD = rgb(80, 180, 30);
+        ST.shaped = 1, ST.radius = 8, ST.gloss = 2, ST.bar_gloss = 1, ST.bubbles = 1;
+        ST.btn_top = rgb(240, 250, 255), ST.btn_bot = rgb(170, 218, 246), ST.btn_border = rgb(95, 165, 212);
+        ST.hover_top = rgb(250, 255, 255), ST.hover_bot = rgb(190, 235, 255), ST.hover_border = rgb(40, 150, 225);
+        ST.on_top = rgb(170, 236, 120), ST.on_bot = rgb(60, 170, 40), ST.on_border = rgb(45, 130, 30);
+        ST.on_text = rgb(255, 255, 255), ST.btn_text = rgb(18, 42, 72);
+        ST.field_bg = rgb(255, 255, 255), ST.field_border = rgb(130, 190, 230), ST.field_radius = 6;
+        ST.bar_top = rgb(120, 205, 250), ST.bar_bot = rgb(30, 135, 215), ST.bar_hi = rgb(255, 255, 255);
+        ST.bar_text = rgb(255, 255, 255), ST.bar_dim = rgb(225, 245, 255);
+        ST.rail_top = rgb(215, 240, 255), ST.rail_bot = rgb(150, 205, 240);
+        ST.rail_text = rgb(18, 42, 72), ST.rail_dim = rgb(50, 95, 135), ST.rail_on = rgb(255, 255, 255);
+        break;
+    case THEME_BLENDER:                 /* neutral greys, rounded flat widgets, blue selection, orange playhead */
+        BG = rgb(40, 40, 40); PANEL = rgb(48, 48, 48); PANEL2 = rgb(84, 84, 84); PANEL3 = rgb(100, 100, 100);
+        LINE = rgb(62, 62, 62); TEXT = rgb(230, 230, 230); DIM = rgb(160, 160, 160);
+        ACCENT = rgb(71, 114, 179); HEAD = rgb(255, 140, 0);
+        ST.shaped = 1, ST.radius = 4, ST.gloss = 1;
+        ST.btn_top = rgb(88, 88, 88), ST.btn_bot = rgb(80, 80, 80), ST.btn_border = rgb(36, 36, 36);
+        ST.hover_top = rgb(102, 102, 102), ST.hover_bot = rgb(94, 94, 94), ST.hover_border = rgb(36, 36, 36);
+        ST.on_top = rgb(84, 128, 194), ST.on_bot = rgb(71, 114, 179), ST.on_border = rgb(36, 36, 36);
+        ST.on_text = rgb(255, 255, 255), ST.btn_text = rgb(230, 230, 230);
+        ST.field_bg = rgb(84, 84, 84), ST.field_border = rgb(36, 36, 36), ST.field_radius = 4;
+        ST.bar_top = rgb(48, 48, 48), ST.bar_bot = rgb(48, 48, 48), ST.bar_hi = rgb(48, 48, 48);
+        ST.bar_text = rgb(230, 230, 230), ST.bar_dim = rgb(160, 160, 160);
+        ST.rail_top = rgb(40, 40, 40), ST.rail_bot = rgb(40, 40, 40);
+        ST.rail_text = rgb(230, 230, 230), ST.rail_dim = rgb(160, 160, 160), ST.rail_on = rgb(71, 114, 179);
+        break;
+    default:
+        BG = rgb(22, 23, 27); PANEL = rgb(31, 33, 39); PANEL2 = rgb(41, 44, 52); PANEL3 = rgb(54, 58, 68);
+        LINE = rgb(58, 62, 72); TEXT = rgb(222, 224, 230); DIM = rgb(138, 144, 156);
+        ACCENT = rgb(240, 138, 64); HEAD = rgb(255, 214, 90);
+        break;
     }
-    DARK = (Col){20, 20, 22, 255};
 }
 static const Col TRACK_COL[MAX_TRACKS] = {
     {226, 104, 92, 255}, {232, 158, 70, 255}, {212, 198, 82, 255}, {118, 198, 110, 255},
@@ -113,6 +167,94 @@ static void line(int x0, int y0, int x1, int y1, Col c)
 {
     SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, c.a);
     SDL_RenderDrawLine(ren, x0, y0, x1, y1);
+}
+
+static Col mix_col(Col a, Col b, float t)
+{
+    return (Col){(Uint8)(a.r + (b.r - a.r) * t), (Uint8)(a.g + (b.g - a.g) * t), (Uint8)(a.b + (b.b - a.b) * t),
+                 (Uint8)(a.a + (b.a - a.a) * t)};
+}
+
+static int corner_inset(int radius, int yy, int h)   /* how far a rounded corner pulls row yy in */
+{
+    if (radius <= 0) return 0;
+    if (radius * 2 > h) radius = h / 2;
+    double dy = yy < radius ? radius - yy - 0.5 : yy >= h - radius ? yy - (h - radius) + 0.5 : 0;
+    if (dy <= 0) return 0;
+    return radius - (int)floor(sqrt((double)radius * radius - dy * dy) + 0.5);
+}
+
+/* A box with rounded corners, shaded from `top` to `bot`; gloss adds a glassy highlight on top */
+static void shape_fill(SDL_Rect r, Col top, Col bot, int radius, int gloss)
+{
+    Col white = {255, 255, 255, 255};
+    for (int yy = 0; yy < r.h; yy++) {
+        float t = r.h > 1 ? (float)yy / (r.h - 1) : 0;
+        Col c = mix_col(top, bot, t);
+        if (gloss && yy < r.h / 2) c = mix_col(c, white, 0.5f * (1 - (float)yy / (r.h / 2)));
+        if (gloss && yy == r.h / 2) c = mix_col(c, bot, 0.25f);      /* the glass edge */
+        int in = corner_inset(radius, yy, r.h);
+        line(r.x + in, r.y + yy, r.x + r.w - 1 - in, r.y + yy, c);
+    }
+}
+
+static void shape_outline(SDL_Rect r, Col c, int radius)
+{
+    if (radius <= 0) {
+        outline(r, c);
+        return;
+    }
+    SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, c.a);
+    int prev = corner_inset(radius, 0, r.h);
+    line(r.x + prev, r.y, r.x + r.w - 1 - prev, r.y, c);
+    line(r.x + prev, r.y + r.h - 1, r.x + r.w - 1 - prev, r.y + r.h - 1, c);
+    for (int yy = 1; yy < r.h - 1; yy++) {       /* the sides, joining each row's edge to the last */
+        int in = corner_inset(radius, yy, r.h), pin = corner_inset(radius, yy - (yy < r.h / 2 ? 1 : -1), r.h);
+        int a = in < pin ? in : pin, b = in > pin ? in : pin;
+        line(r.x + a, r.y + yy, r.x + b, r.y + yy, c);
+        line(r.x + r.w - 1 - b, r.y + yy, r.x + r.w - 1 - a, r.y + yy, c);
+    }
+}
+
+/* the theme's button: 0 normal, 1 hover, 2 on, 3 disabled */
+static void style_box(SDL_Rect r, int state)
+{
+    if (!ST.shaped) {
+        if (state == 3) {
+            fill(r, tone(PANEL2, 0.8f));
+            outline(r, tone(LINE, 0.8f));
+        } else {
+            fill(r, state == 2 ? ACCENT : state == 1 ? PANEL3 : PANEL2);
+            outline(r, state == 2 ? tone(ACCENT, 1.2f) : LINE);
+        }
+        return;
+    }
+    Col top = state == 2 ? ST.on_top : state == 1 ? ST.hover_top : ST.btn_top;
+    Col bot = state == 2 ? ST.on_bot : state == 1 ? ST.hover_bot : ST.btn_bot;
+    Col bd = state == 2 ? ST.on_border : state == 1 ? ST.hover_border : ST.btn_border;
+    if (state == 3) {
+        top = mix_col(ST.btn_top, PANEL, 0.6f);
+        bot = mix_col(ST.btn_bot, PANEL, 0.6f);
+        bd = mix_col(ST.btn_border, PANEL, 0.6f);
+    }
+    shape_fill(r, top, bot, ST.radius, ST.gloss == 2);
+    shape_outline(r, bd, ST.radius);
+    if (state == 1 && theme_kind == THEME_XP)    /* Luna's orange hover glow, inside the border */
+        shape_outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, rgb(253, 216, 137), ST.radius - 1);
+}
+
+static Col btn_fg(int on) { return on ? (ST.shaped ? ST.on_text : DARK) : (ST.shaped ? ST.btn_text : TEXT); }
+
+/* a text field's box */
+static void field_box(SDL_Rect r, int hov, int active)
+{
+    if (!ST.shaped) {
+        fill(r, active || hov ? PANEL3 : PANEL2);
+        outline(r, active ? ACCENT : LINE);
+        return;
+    }
+    shape_fill(r, ST.field_bg, ST.field_bg, ST.field_radius, 0);
+    shape_outline(r, active ? ACCENT : hov ? ST.hover_border : ST.field_border, ST.field_radius);
 }
 
 /* ---------------------------------------------------------------- text */
@@ -752,15 +894,13 @@ static void zoom(double factor, int anchor_x)
 static int button2(SDL_Rect r, const char *label, int on, int enabled)
 {
     if (!enabled) {
-        fill(r, tone(PANEL2, 0.8f));
-        outline(r, tone(LINE, 0.8f));
+        style_box(r, 3);
         text_center(r, label, tone(DIM, 0.6f));
         return 0;
     }
     int hov = hit(r) && drag.kind == D_NONE;
-    fill(r, on ? ACCENT : hov ? PANEL3 : PANEL2);
-    outline(r, on ? tone(ACCENT, 1.2f) : LINE);
-    text_center(r, label, on ? DARK : TEXT);
+    style_box(r, on ? 2 : hov ? 1 : 0);
+    text_center(r, label, btn_fg(on));
     if (hov && lpress) {
         lpress = 0;
         return 1;
@@ -791,8 +931,8 @@ static int dropdown(SDL_Rect r, const char *prefix, const char *const *items, in
     snprintf(label, sizeof label, "%s%s", prefix, items[*sel]);
     SDL_Rect arrow = {r.x + r.w - 22, r.y, 22, r.h}, body = {r.x, r.y, r.w - 22, r.h};
     int is_open = dd.open && dd.sel == sel, hov = hit(r) && drag.kind == D_NONE;
-    fill(r, is_open || hov ? PANEL3 : PANEL2);
-    outline(r, is_open ? ACCENT : LINE);
+    style_box(r, hov && !is_open ? 1 : 0);
+    if (is_open) shape_outline(r, ACCENT, ST.shaped ? ST.radius : 0);
     if (cycle) line(arrow.x, r.y + 5, arrow.x, r.y + r.h - 5, LINE);
     text_clip(body, r.x + 8, r.y + (r.h - font_h) / 2, label, TEXT);
     for (int i = 0; i < 4; i++)
@@ -955,8 +1095,7 @@ static void scrollbar(SDL_Rect area, int *scroll, int content_h)
 static void number_box(SDL_Rect r, const char *label, const char *value, int active)
 {
     int hov = hit(r) && (drag.kind == D_NONE || active);
-    fill(r, active ? PANEL3 : hov ? PANEL3 : PANEL2);
-    outline(r, active ? ACCENT : LINE);
+    field_box(r, hov, active);
     text(r.x + 8, r.y + (r.h - font_h) / 2, label, DIM);
     text(r.x + r.w - 8 - text_w(value), r.y + (r.h - font_h) / 2, value, TEXT);
 }
@@ -2956,7 +3095,7 @@ static Col meter_col(float db)
 /* A level meter, -60..0 dB, in r: vertical or horizontal. */
 static void meter_draw(SDL_Rect r, const Meter *m, int vertical)
 {
-    fill(r, tone(PANEL, 0.7f));
+    fill(r, ST.shaped && theme_light ? rgb(28, 44, 78) : tone(PANEL, 0.7f));   /* dark well on bright themes */
     float db = to_db(m->level), pk = to_db(m->peak);
     float k = (db + 60) / 60, kp = (pk + 60) / 60;
     k = k < 0 ? 0 : k > 1 ? 1 : k;
@@ -3354,15 +3493,22 @@ static void rail_icon(int kind, int cx, int cy, Col c)
 static void rail(void)
 {
     SDL_Rect r = {0, L.top, RAIL_W, H - L.top - L.status};
-    fill(r, tone(PANEL, 0.8f));
+    if (ST.shaped) shape_fill(r, ST.rail_top, ST.rail_bot, 0, theme_kind == THEME_AERO);
+    else fill(r, tone(PANEL, 0.8f));
     line(RAIL_W - 1, r.y, RAIL_W - 1, r.y + r.h, LINE);
     for (int i = 0; i < RI_COUNT; i++) {
         int y = i == RI_SETTINGS ? r.y + r.h - 62 : r.y + 6 + i * 62;
         SDL_Rect b = {4, y, RAIL_W - 8, 56};
         int on = *RAIL_FLAG[i], hov = hit(b) && drag.kind == D_NONE;
-        if (on || hov) fill(b, on ? PANEL3 : PANEL2);
-        if (on) fill((SDL_Rect){0, y + 6, 3, 44}, ACCENT);
-        Col c = on ? ACCENT : hov ? TEXT : DIM;
+        if (ST.shaped) {
+            if (on) shape_fill(b, ST.rail_on, ST.rail_on, ST.radius, theme_kind == THEME_AERO);
+            else if (hov) shape_fill(b, alpha(rgb(255, 255, 255), 50), alpha(rgb(255, 255, 255), 30), ST.radius, 0);
+        } else if (on || hov) {
+            fill(b, on ? PANEL3 : PANEL2);
+        }
+        if (on && !ST.shaped) fill((SDL_Rect){0, y + 6, 3, 44}, ACCENT);
+        Col rtext = ST.shaped ? ST.rail_text : TEXT, rdim = ST.shaped ? ST.rail_dim : DIM;
+        Col c = on ? (theme_kind == THEME_BLENDER ? rgb(255, 255, 255) : ACCENT) : hov ? rtext : rdim;
         rail_icon(i, RAIL_W / 2, y + 20, c);
         if (i == RI_SOUNDS) {
             if (on) lib_badge = 0;
@@ -3376,7 +3522,8 @@ static void rail(void)
                 text(pb.x + 4, pb.y + 1, bd, DARK);
             }
         }
-        text(RAIL_W / 2 - text_w(RAIL_NAME[i]) / 2, y + 36, RAIL_NAME[i], on ? TEXT : DIM);
+        Col label = on ? (ST.shaped ? (theme_kind == THEME_BLENDER ? rgb(255, 255, 255) : TEXT) : TEXT) : rdim;
+        text(RAIL_W / 2 - text_w(RAIL_NAME[i]) / 2, y + 36, RAIL_NAME[i], label);
         if (hov && lpress) {
             open_panel(i);
             lpress = 0;
@@ -3545,18 +3692,21 @@ static int settings_content(int x, int y, int w)
     switch (settings_sub) {
     case 0: {
         y = section(x, y, w, "THEME");
-        static const char *const T[] = {"Dark", "Light", "System"};
-        for (int i = 0; i < 3; i++)
-            if (button((SDL_Rect){x + i * (tw + 4), y, tw, 30}, T[i], theme_choice == i)) {
+        static const char *const T[THEME_COUNT] = {"Dark", "Light", "System", "Windows XP", "Frutiger Aero", "Blender"};
+        for (int i = 0; i < THEME_COUNT; i++)
+            if (button((SDL_Rect){x + (i % 3) * (tw + 4), y + (i / 3) * 36, tw, 30}, T[i], theme_choice == i)) {
                 theme_choice = i;
                 if (i == THEME_SYSTEM) theme_follow();
-                else theme_apply(i == THEME_LIGHT);
+                else theme_apply(i);
                 settings_save();
             }
-        y += 40;
-        text(x, y, theme_choice == THEME_SYSTEM ? (theme_light ? "Following your desktop: light right now."
-                                                               : "Following your desktop: dark right now.")
-                                                 : "System follows your desktop's dark/light setting.", DIM);
+        y += 76;
+        const char *const ABOUT[THEME_COUNT] = {
+            "Dark: the original look.", "Light: the same layout on white.",
+            theme_light ? "Following your desktop: light right now." : "Following your desktop: dark right now.",
+            "Windows XP: blue title bar, beige windows, green for on.",
+            "Frutiger Aero: glossy glass, sky and aqua, bubbles.", "Blender: rounded grey widgets, blue and orange."};
+        text(x, y, ABOUT[theme_choice], DIM);
         y += font_h + 16;
         y = section(x, y, w, "PREVIEW");
         for (int t = 0; t < 8; t++) {             /* the track colours on this background */
@@ -3728,7 +3878,7 @@ static void settings_load(void)
     while (fgets(line_, sizeof line_, f)) {
         line_[strcspn(line_, "\r\n")] = 0;
         int v;
-        if (sscanf(line_, "theme %d", &v) == 1 && v >= 0 && v <= 2) theme_choice = v;
+        if (sscanf(line_, "theme %d", &v) == 1 && v >= 0 && v < THEME_COUNT) theme_choice = v;
         else if (!strncmp(line_, "audio_output ", 13)) snprintf(audio_out, sizeof audio_out, "%.255s", line_ + 13);
         else if (sscanf(line_, "panel %d", &v) == 1 && v >= 0 && v < RI_COUNT) last_panel = v;
         else if (!strncmp(line_, "metronome ", 10)) {
@@ -3808,23 +3958,39 @@ static void theme_poll(void)
 static void top_bar(void)
 {
     char buf[96];
-    fill((SDL_Rect){0, 0, W, L.top}, PANEL);
-    line(0, L.top - 1, W, L.top - 1, LINE);
+    Col bar_text = ST.shaped ? ST.bar_text : TEXT, bar_dim = ST.shaped ? ST.bar_dim : DIM;
+    Col bar_head = ST.shaped && theme_kind != THEME_BLENDER ? ST.bar_text : HEAD;
+    Col sep = ST.shaped ? alpha(ST.bar_dim, 110) : LINE;
+    if (ST.shaped) {                             /* the theme's title bar */
+        shape_fill((SDL_Rect){0, 0, W, L.top}, ST.bar_top, ST.bar_bot, 0, ST.bar_gloss);
+        line(0, 0, W, 0, ST.bar_hi);
+        if (ST.bubbles)                          /* Aero: a few soft bubbles drifting in the glass */
+            for (int i = 0; i < 9; i++) {
+                int bx = (int)(fmod(i * 397.0 + SDL_GetTicks() * 0.004 * (1 + i % 3), W + 80)) - 40;
+                int by = 8 + (i * 13) % 30, br = 4 + (i * 7) % 9;
+                ring(bx, by, br, alpha(ST.bar_hi, 110));
+                disc(bx - br / 3, by - br / 3, br / 4 + 1, alpha(ST.bar_hi, 140));
+            }
+        line(0, L.top - 1, W, L.top - 1, theme_kind == THEME_BLENDER ? rgb(30, 30, 30) : tone(ST.bar_bot, 0.7f));
+    } else {
+        fill((SDL_Rect){0, 0, W, L.top}, PANEL);
+        line(0, L.top - 1, W, L.top - 1, LINE);
+    }
     int x = 10, y = 9, h = 30;
     file_btn = (SDL_Rect){x, y, 44, h};          /* the menu: files, export, settings, show */
     if (button(file_btn, "", menu_open)) menu_open = !menu_open;
-    for (int i = 0; i < 3; i++) fill((SDL_Rect){x + 13, y + 9 + i * 5, 18, 2}, menu_open ? DARK : TEXT);
+    for (int i = 0; i < 3; i++) fill((SDL_Rect){x + 13, y + 9 + i * 5, 18, 2}, btn_fg(menu_open));
     x += 54;
     if (button2((SDL_Rect){x, y, 54, h}, "Undo", 0, nundo > 0 || !state_same(&committed))) undo_redo(0);
     x += 58;
     if (button2((SDL_Rect){x, y, 54, h}, "Redo", 0, nredo > 0)) undo_redo(1);
     x += 66;
-    line(x - 6, y + 4, x - 6, y + h - 4, LINE);
+    line(x - 6, y + 4, x - 6, y + h - 4, sep);
     if (button((SDL_Rect){x, y, 72, h}, P.playing ? "Stop" : "Play", P.playing)) toggle_play();
     x += 76;
     if (button((SDL_Rect){x, y, 62, h}, "Loop", P.loop)) toggle_loop();
     x += 72;
-    line(x - 6, y + 4, x - 6, y + h - 4, LINE);
+    line(x - 6, y + 4, x - 6, y + h - 4, sep);
     number((SDL_Rect){x, y, 100, h}, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
     x += 104;
     snap_rect = (SDL_Rect){x, y, 110, h};
@@ -3837,7 +4003,7 @@ static void top_bar(void)
     met_btn = (SDL_Rect){x + 64, y, 22, h};
     if (button(met_btn, "", met_open)) met_open = !met_open;
     for (int i = 0; i < 4; i++)                     /* a small down arrow */
-        line(met_btn.x + 7 + i, y + 13 + i, met_btn.x + 15 - i, y + 13 + i, met_open ? DARK : TEXT);
+        line(met_btn.x + 7 + i, y + 13 + i, met_btn.x + 15 - i, y + 13 + i, btn_fg(met_open));
     x += 92;
     {                                               /* the beat: four lights, the first is the bar */
         double bt = countin_left > 0 ? (double)(countin_total - countin_left) / beat_frames()
@@ -3853,14 +4019,14 @@ static void top_bar(void)
         }
     }
     x += 70;
-    line(x - 6, y + 4, x - 6, y + h - 4, LINE);
+    line(x - 6, y + 4, x - 6, y + h - 4, sep);
 
     double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
     snprintf(buf, sizeof buf, "bar %d  beat %.2f", (int)(beats / 4) + 1, fmod(beats, 4.0) + 1);
-    text(x + 6, y + (h - font_h) / 2, buf, HEAD);
+    text(x + 6, y + (h - font_h) / 2, buf, bar_head);
     x += text_w("bar 000  beat 0.00") + 26;
     snprintf(buf, sizeof buf, "%02d:%06.3f", (int)(secs / 60), fmod(secs, 60.0));
-    text(x, y + (h - font_h) / 2, buf, TEXT);
+    text(x, y + (h - font_h) / 2, buf, bar_text);
     x += text_w("00:00.000") + 16;
 
     if (W - 110 > x) {                          /* master level */
@@ -3869,7 +4035,7 @@ static void top_bar(void)
         snprintf(buf, sizeof buf, "%.80s%s", proj_path[0] ? base_name(proj_path) : "untitled", is_dirty() ? " *" : "");
         int pw = W - 116 - x;                    /* and the project's name, when there's room */
         if (pw > 60) text_clip((SDL_Rect){x, y, pw, h}, W - 116 - text_w(buf) > x ? W - 116 - text_w(buf) : x,
-                               y + (h - font_h) / 2, buf, DIM);
+                               y + (h - font_h) / 2, buf, bar_dim);
     }
 }
 
@@ -5351,6 +5517,15 @@ static int selftest(void)
         check(BG.r > 200 && TEXT.r < 60, "the light theme is light, with dark text");
         theme_apply(0);
         check(BG.r == bg_dark.r, "and the dark theme comes back exactly");
+        int shaped_ok = 1;
+        for (int k = THEME_XP; k <= THEME_BLENDER; k++) {     /* each shaped theme draws a whole frame */
+            theme_apply(k);
+            frame();
+            shaped_ok &= ST.shaped && theme_kind == k && (theme_light == (k != THEME_BLENDER));
+        }
+        check(shaped_ok, "Windows XP, Frutiger Aero and Blender themes each draw a frame in their own style");
+        theme_apply(0);
+        check(!ST.shaped && BG.r == bg_dark.r, "and switching back leaves no trace of them");
         open_panel(RI_SOUNDS);
     }
 
@@ -7149,7 +7324,7 @@ int main(int argc, char **argv)
     } else {
         settings_load();
         if (theme_choice == THEME_SYSTEM) theme_follow();
-        else theme_apply(theme_choice == THEME_LIGHT);
+        else theme_apply(theme_choice);
         if (audio_out[0]) open_audio();          /* the saved output device */
         metronome_prepare();
         open_panel(last_panel);
@@ -7185,7 +7360,7 @@ int main(int argc, char **argv)
             pads_content_h = 2000;
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
-        if (getenv("TINYDAW_SHOT_LIGHT")) theme_apply(1);
+        if (getenv("TINYDAW_SHOT_LIGHT")) theme_apply(atoi(getenv("TINYDAW_SHOT_LIGHT")));   /* 1 light, 3-5 the others */
         if (getenv("TINYDAW_SHOT_FIT")) {
             for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
             layout();

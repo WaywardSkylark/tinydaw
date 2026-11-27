@@ -7,6 +7,7 @@
 #include "theory.h"
 #include "midi.h"
 #include "scenes.h"
+#include "midifile.h"
 #include "compat.h"
 
 #include <ctype.h>
@@ -358,18 +359,35 @@ static SDL_Keymod mods;
 static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h; }
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
-       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED };
+       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
-/* the clip editor window (further down) */
-static SDL_Window *ewin;
-static SDL_Renderer *eren;
-static Uint32 ewin_id;
-static int ed_clip = -1, ed_handle, drag_in_editor;
+/* Pop-out windows: the clip editor and the mixing console. Each has its own renderer and mouse;
+ * a drag belongs to the window it started in (drag_pop, -1 = the main window). */
+typedef struct { int mx, my, ldown, lpress, lrel, rpress, wheel_x, wheel_y, ldouble; } PopIn;
+typedef struct { SDL_Window *win; SDL_Renderer *ren; Uint32 id; PopIn in; } Pop;
+enum { POP_EDITOR, POP_MIXER, NPOPS };
+static Pop pops[NPOPS];
+static int drag_pop = -1;
+#define ewin (pops[POP_EDITOR].win)
+#define eren (pops[POP_EDITOR].ren)
+#define ewin_id (pops[POP_EDITOR].id)
+#define ein (pops[POP_EDITOR].in)
+#define drag_in_editor (drag_pop >= 0)
+static int pop_of(Uint32 id)            /* which pop-out window an event is for, or -1 */
+{
+    for (int k = 0; k < NPOPS; k++)
+        if (pops[k].win && pops[k].id == id) return k;
+    return -1;
+}
+static void pop_close(int k);
+static void mixwin_open(void);
+static void mixwin_frame(void);
+static SDL_Rect lv_fader[MAX_TRACKS], cs_fader[MAX_TRACKS], cs_mute[MAX_TRACKS];   /* where they were drawn (self-test) */
+static int ed_clip = -1, ed_handle;
 static Clip ed_last, ed_orig;            /* the clip as last seen (to find it again), and at a drag's start */
 static int ed_nclips;
 static long ed_v0, ed_v1;                /* the part of the sound shown, in frames */
 static SDL_Rect ed_wave, ed_btn[8];
-static struct { int mx, my, ldown, lpress, lrel, rpress, wheel_x, wheel_y, ldouble; } ein;
 static void editor_drag(void);
 static void editor_open(int clip);
 static void editor_close(void);
@@ -433,6 +451,8 @@ static double pps = 110;                /* pixels per second */
 static int selected = -1;              /* the clip clicked last (the Mixer pane edits it) */
 static unsigned char csel[MAX_CLIPS];   /* every selected clip; selected is always one of them */
 static int lib_scroll = 0;
+static Loud live_loud;                  /* the output's loudness, since play last started */
+static int loudness_readout(int x, int y, int w);
 /* A tempo edit by hand (BPM box, its menu, tap tempo): the tempo it started from, and when it
  * last moved. Once it settles, the selected clips are matched to the new tempo (tempo_apply). */
 static double tempo_from;
@@ -504,17 +524,122 @@ static int lane_at(int y)
         if (y < track_y(t + 1)) return t;
     return P.ntracks - 1;
 }
-static long beat_frames(void) { return (long)llround(60.0 / P.bpm * SR); }
-static long snap_frames(void)
+/* ---- the tempo map in the interface: bars and beats where they fall, with tempo and time
+ * signature changes taken into account */
+static long beat_at(long f) { return (long)llround(60.0 / meter_bpm_at(&P, f) * SR); }   /* a quarter note there */
+static long beat_frames(void) { return beat_at(P.playhead); }
+static long bar_floor(long f) { return meter_bar_frame(&P, floor(meter_bars(&P, f) + 1e-9)); }
+static long bar_ceil(long f) { return meter_bar_frame(&P, ceil(meter_bars(&P, f) - 1e-9)); }
+static long bar_round(long f) { return meter_bar_frame(&P, round(meter_bars(&P, f))); }
+static long bar_len_at(long f)
 {
-    return SNAP_BEATS[snap_i] > 0 ? (long)llround(SNAP_BEATS[snap_i] * 60.0 / P.bpm * SR) : 0;
+    long l;
+    meter_at(&P, f, NULL, NULL, NULL, NULL, NULL, &l);
+    return l;
+}
+/* `f` to the nearest point of a grid `g` quarter notes apart (or whole bars when g < 0), counted
+ * from the start of its bar so the grid lines up with odd time signatures */
+static long grid_snap(long f, double g)
+{
+    if (g < 0) return bar_round(f);
+    double bar = floor(meter_bars(&P, f) + 1e-9), bs = meter_beats(&P, meter_bar_frame(&P, bar)), b = meter_beats(&P, f);
+    double q = bs + round((b - bs) / g) * g, nb = meter_beats(&P, meter_bar_frame(&P, bar + 1));
+    if (q > nb) q = nb;                         /* a grid step can't run past the next bar */
+    return meter_beats_frame(&P, q);
+}
+static double snap_beats(void) { return snap_i == 1 ? -1 : SNAP_BEATS[snap_i]; }   /* 0 = off, -1 = bar */
+/* "bar 3 beat 2.50": the bar, and the beat of its time signature (eighths in 6/8) */
+static void pos_text(long f, char *buf, size_t n)
+{
+    int bar, num;
+    long bs, bl;
+    meter_at(&P, f < 0 ? 0 : f, NULL, &num, NULL, &bar, &bs, &bl);
+    snprintf(buf, n, "bar %d  beat %.2f", bar + 1, (double)(f - bs) / ((double)bl / num) + 1);
+}
+/* the next (dir 1) or previous (-1) bar line, or beat line, from f */
+static long meter_step(long f, int dir, int beat)
+{
+    int num;
+    long bs, bl;
+    meter_at(&P, f, NULL, &num, NULL, NULL, &bs, &bl);
+    if (!beat) {
+        double b = meter_bars(&P, f);
+        double t = dir > 0 ? floor(b + 1e-9) + 1 : ceil(b - 1e-9) - 1;
+        return meter_bar_frame(&P, t < 0 ? 0 : t);
+    }
+    double unit = (double)bl / num, k = (f - bs) / unit;
+    double t = dir > 0 ? floor(k + 1e-9) + 1 : ceil(k - 1e-9) - 1;
+    if (t < 0) {                                /* back into the bar before */
+        if (bs <= 0) return 0;
+        meter_at(&P, bs - 1, NULL, &num, NULL, NULL, &bs, &bl);
+        return bs + (long)llround((num - 1) * (double)bl / num);
+    }
+    return bs + (long)llround(t * unit);
+}
+static long snap_frames(void)           /* the grid's size where the playhead is (for nudging) */
+{
+    if (!SNAP_BEATS[snap_i]) return 0;
+    return snap_i == 1 ? bar_len_at(P.playhead) : (long)llround(SNAP_BEATS[snap_i] * beat_frames());
 }
 static long snap(long f)                /* Shift held = no snapping */
 {
-    long s = snap_frames();
-    if (!s || (mods & KMOD_SHIFT)) return f;
-    return (long)llround((double)f / s) * s;
+    if (!SNAP_BEATS[snap_i] || (mods & KMOD_SHIFT)) return f;
+    return grid_snap(f, snap_beats());
 }
+/* the grid for quantizing, in quarter notes: the Snap setting, or 1/16 when it's off */
+static double quant_grid(void) { return SNAP_BEATS[snap_i] ? snap_beats() : 0.25; }
+
+/* Moves note starts (of `pattern`, those in `mask` or all of them) onto the grid, measured in the
+ * song (origin = where the pattern's frame 0 is). strength 1 = right on it. Returns how many. */
+static int notes_quantize(int pattern, long origin, const unsigned char *mask, double grid, double strength)
+{
+    int n = 0;
+    LOCK();
+    for (int i = 0; i < P.nnotes; i++) {
+        Note *nt = &P.notes[i];
+        if (nt->pattern != pattern || (mask && !mask[i])) continue;
+        long abs = origin + nt->start, q = grid_snap(abs, grid);
+        long ns = abs + (long)llround((q - abs) * strength) - origin;
+        nt->start = ns < 0 ? 0 : ns;
+        n++;
+    }
+    UNLOCK();
+    return n;
+}
+
+/* Loosens notes up the way a player would: a little early or late (up to `ms`), a little softer or
+ * harder, a little shorter or longer. */
+static int notes_humanize(int pattern, const unsigned char *mask, double ms)
+{
+    static uint32_t r = 0x9e3779b9u;
+    int n = 0;
+    LOCK();
+    for (int i = 0; i < P.nnotes; i++) {
+        Note *nt = &P.notes[i];
+        if (nt->pattern != pattern || (mask && !mask[i])) continue;
+        double u[3];
+        for (int k = 0; k < 3; k++) {            /* triangular: small nudges more often than big ones */
+            r ^= r << 13;
+            r ^= r >> 17;
+            r ^= r << 5;
+            double a = (r & 0xffff) / 65535.0;
+            r ^= r << 13;
+            r ^= r >> 17;
+            r ^= r << 5;
+            u[k] = a + (r & 0xffff) / 65535.0 - 1;   /* -1..1 */
+        }
+        long d = (long)llround(u[0] * ms / 1000 * SR);
+        nt->start = nt->start + d < 0 ? 0 : nt->start + d;
+        float v = nt->vel * (float)(1 + 0.12 * u[1]);
+        nt->vel = v < 0.05f ? 0.05f : v > 1 ? 1 : v;
+        long len = (long)llround(nt->length * (1 + 0.05 * u[2]));
+        nt->length = len < SR / 100 ? SR / 100 : len;
+        n++;
+    }
+    UNLOCK();
+    return n;
+}
+
 static SDL_Rect clip_rect(const Clip *c)
 {
     int x0 = (int)floor(frame_to_x(c->start)), x1 = (int)ceil(frame_to_x(c->start + c->length));
@@ -803,19 +928,42 @@ static void metronome_prepare(void)     /* (re)make the click sounds at the proj
 }
 
 /* Adds the clicks for song frames [start, start + n) to out (audio thread). force: count-in */
-static void metronome_mix(float *out, long start, int n, int force)
+/* The next click at or after `pos` and what kind it is (0 accent, 1 beat, 2 subdivision). Song
+ * clicks follow the tempo map: a click on each beat of the bar's time signature (eighths in 6/8),
+ * the first one accented. The count-in counts a bar of the time signature where play starts. */
+static long next_click(long pos, int countin, int *kind)
+{
+    int sub = MET.sub < 1 ? 1 : MET.sub, num, den;
+    long bs, bl;
+    if (countin) {                             /* its own clock, from 0 */
+        double bpm;
+        meter_at(&P, P.playhead, &bpm, &num, &den, NULL, NULL, &bl);
+        bs = pos / bl * bl;
+    } else {
+        meter_at(&P, pos, NULL, &num, &den, NULL, &bs, &bl);
+    }
+    double unit = (double)bl / (num * sub);
+    long k = (long)ceil((pos - bs) / unit - 1e-9);
+    if (k >= num * sub) {                       /* past the last one: the next bar's first */
+        long nb = bs + bl;
+        if (!countin) meter_at(&P, nb, NULL, &num, &den, NULL, &bs, &bl);
+        else bs = nb;
+        k = 0;
+    }
+    *kind = k == 0 && MET.accent ? 0 : k % sub == 0 ? 1 : 2;
+    return bs + (long)llround(k * unit);
+}
+
+static void metronome_mix_ex(float *out, long start, int n, int force, int countin)
 {
     if ((!MET.on && !force) || !click_buf[0] || click_rate != SR) return;
-    int sub = MET.sub < 1 ? 1 : MET.sub;
-    double tick = 60.0 / P.bpm * SR / sub;
-    long k = (long)ceil(start / tick - 1e-9);
-    long next = (long)llround(k * tick);
+    int kind;
+    long next = next_click(start, countin, &kind);
     for (int i = 0; i < n; i++) {
         if (start + i == next) {
             click_pos = 0;
-            click_kind = k % (4 * sub) == 0 && MET.accent ? 0 : k % sub == 0 ? 1 : 2;
-            k++;
-            next = (long)llround(k * tick);
+            click_kind = kind;
+            next = next_click(start + i + 1, countin, &kind);
         }
         if (click_pos >= 0) {
             out[2 * i] += click_buf[click_kind][2 * click_pos] * MET.volume;
@@ -825,6 +973,8 @@ static void metronome_mix(float *out, long start, int n, int force)
     }
 }
 
+static void metronome_mix(float *out, long start, int n, int force) { metronome_mix_ex(out, start, n, force, 0); }
+
 static long play_from;                  /* where playback last started: Stop goes back there */
 
 static void toggle_play(void)
@@ -832,9 +982,10 @@ static void toggle_play(void)
     LOCK();
     P.playing = !P.playing;
     if (P.playing) play_from = P.playhead;
+    if (P.playing) loud_reset(&live_loud);   /* the song's loudness, from here */
     countin_left = 0;
     if (P.playing && MET.countin > 0 && (!MET.countin_rec_only || pads_rec)) {
-        countin_total = countin_left = MET.countin * 4 * beat_frames();   /* a bar or two of clicks first */
+        countin_total = countin_left = MET.countin * bar_len_at(P.playhead);   /* a bar or two of clicks first */
         click_pos = -1;
     }
     UNLOCK();
@@ -885,12 +1036,6 @@ static void playhead_to(long f)
     view_show(P.playhead);
 }
 
-static void playhead_step(long unit, int dir)  /* to the previous/next multiple of unit */
-{
-    long ph = P.playhead, k = ph / unit;
-    if (dir > 0) playhead_to((k + 1) * unit);
-    else playhead_to(ph % unit ? k * unit : (k - 1) * unit);
-}
 
 static void playhead_to_edge(int dir)   /* the next/previous clip start or end, on any track */
 {
@@ -1569,6 +1714,8 @@ typedef struct {
     Track tracks[MAX_TRACKS];
     int ntracks;
     double bpm, a4;
+    int ts_num, ts_den, nchanges;
+    MeterChange changes[MAX_METER];
     long loop_start, loop_end;
     Pad pads[NPADS];
     int inst_sample, inst_root, inst_track;
@@ -1618,6 +1765,10 @@ static void state_capture(State *s)
     memcpy(s->tracks, P.tracks, sizeof s->tracks);
     s->ntracks = P.ntracks;
     s->bpm = P.bpm;
+    s->ts_num = P.ts_num;
+    s->ts_den = P.ts_den;
+    s->nchanges = P.nchanges;
+    memcpy(s->changes, P.changes, sizeof s->changes);
     s->a4 = P.a4;
     s->loop_start = P.loop_start;
     s->loop_end = P.loop_end;
@@ -1643,7 +1794,8 @@ static int state_same(const State *s)
     return s->nclips == P.nclips && !memcmp(s->clips, P.clips, (size_t)P.nclips * sizeof(Clip)) &&
            s->nnotes == P.nnotes && !memcmp(s->notes, P.notes, (size_t)P.nnotes * sizeof(Note)) &&
            s->nautos == P.nautos && !memcmp(s->autos, P.autos, (size_t)P.nautos * sizeof(AutoPoint)) &&
-           s->ntracks == P.ntracks && !memcmp(s->tracks, P.tracks, sizeof s->tracks) && s->bpm == P.bpm &&
+           s->ntracks == P.ntracks && !memcmp(s->tracks, P.tracks, sizeof s->tracks) && s->bpm == P.bpm && s->ts_num == P.ts_num && s->ts_den == P.ts_den && s->nchanges == P.nchanges &&
+           !memcmp(s->changes, P.changes, (size_t)P.nchanges * sizeof(MeterChange)) &&
            s->a4 == P.a4 && s->loop_start == P.loop_start && s->loop_end == P.loop_end &&
            !memcmp(s->pads, P.pads, sizeof s->pads) && s->inst_sample == P.inst_sample &&
            s->inst_root == P.inst_root && s->inst_track == P.inst_track && !memcmp(&s->fx, &P.fx, sizeof s->fx) &&
@@ -1662,6 +1814,10 @@ static void state_restore(const State *s)
     memcpy(P.tracks, s->tracks, sizeof s->tracks);
     P.ntracks = s->ntracks;
     P.bpm = s->bpm;
+    P.ts_num = s->ts_num;
+    P.ts_den = s->ts_den;
+    P.nchanges = s->nchanges;
+    memcpy(P.changes, s->changes, sizeof P.changes);
     P.a4 = s->a4;
     P.loop_start = s->loop_start;
     P.loop_end = s->loop_end;
@@ -1697,6 +1853,9 @@ static void describe(const State *s, char *buf, size_t n)
     else if (memcmp(s->tracks, P.tracks, sizeof s->tracks)) snprintf(buf, n, "track settings");
     else if (memcmp(&s->fx, &P.fx, sizeof s->fx)) snprintf(buf, n, "effects");
     else if (s->bpm != P.bpm) snprintf(buf, n, "tempo %.0f BPM", s->bpm);
+    else if (s->ts_num != P.ts_num || s->ts_den != P.ts_den || s->nchanges != P.nchanges ||
+             memcmp(s->changes, P.changes, (size_t)P.nchanges * sizeof(MeterChange)))
+        snprintf(buf, n, "tempo / time signature change");
     else if (s->loop_start != P.loop_start || s->loop_end != P.loop_end) snprintf(buf, n, "loop region");
     else if (memcmp(s->pads, P.pads, sizeof s->pads) || s->inst_sample != P.inst_sample || s->inst_root != P.inst_root)
         snprintf(buf, n, "pad settings");
@@ -1954,7 +2113,7 @@ static void autosave_tick(void)
 
 static SDL_atomic_t fd_state;           /* 0 idle, 1 open, 2 finished */
 static int fd_saving;
-static int fd_export;                   /* choosing where an export goes (else a project) */
+static int fd_export;                   /* 0 a project, 1 where an export goes, 2 a MIDI file to import, 3 to export to */
 static char fd_result[1024];
 #ifndef _WIN32
 static char fd_cmd[4000];
@@ -1988,8 +2147,9 @@ static void win_file_dialog(void)
     o.hwndOwner = fd_owner;
     wchar_t filter[256], ext[16];
     char f8[256];
-    const char *e8 = fd_export ? EXPORT_FORMATS[EXO.format].ext : "tdaw";
-    if (fd_export) snprintf(f8, sizeof f8, "%s audio (*.%s)|*.%s|All files|*.*|", EXPORT_FORMATS[EXO.format].name, e8, e8);
+    const char *e8 = fd_export == 1 ? EXPORT_FORMATS[EXO.format].ext : fd_export >= 2 ? "mid" : "tdaw";
+    if (fd_export == 1) snprintf(f8, sizeof f8, "%s audio (*.%s)|*.%s|All files|*.*|", EXPORT_FORMATS[EXO.format].name, e8, e8);
+    else if (fd_export >= 2) snprintf(f8, sizeof f8, "MIDI files (*.mid)|*.mid;*.midi|All files|*.*|");
     else snprintf(f8, sizeof f8, "tinydaw projects (*.tdaw)|*.tdaw|All files|*.*|");
     int fl = MultiByteToWideChar(CP_UTF8, 0, f8, -1, filter, 255);
     for (int i = 0; i < fl; i++)
@@ -2000,7 +2160,8 @@ static void win_file_dialog(void)
     o.nMaxFile = 1024;
     o.lpstrInitialDir = dir[0] ? dir : NULL;
     o.lpstrDefExt = ext;
-    o.lpstrTitle = fd_export ? L"Export to" : fd_saving ? L"Save project" : L"Open project";
+    o.lpstrTitle = fd_export == 1 ? L"Export to" : fd_export == 2 ? L"Import a MIDI file" : fd_export == 3 ? L"Export MIDI"
+                 : fd_saving ? L"Save project" : L"Open project";
     o.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
               (fd_saving ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     BOOL ok = fd_saving ? GetSaveFileNameW(&o) : GetOpenFileNameW(&o);
@@ -2150,6 +2311,62 @@ static void export_file_dialog(void)
     }
 }
 
+static void midi_import(const char *path);
+static void midi_export(const char *path);
+
+/* The system dialog for a MIDI file: to import (open) or export (save). */
+static void midi_file_dialog(int save)
+{
+    if (SDL_AtomicGet(&fd_state) != 0) return;
+    char start[1300];
+    if (!export_dir[0]) {
+        user_dir("music", export_dir, sizeof export_dir);
+        if (!dir_writable(export_dir) && !getcwd(export_dir, sizeof export_dir)) snprintf(export_dir, sizeof export_dir, ".");
+    }
+    if (save) {
+        char name[256];
+        snprintf(name, sizeof name, "%.250s", proj_path[0] ? path_base(proj_path) : "tinydaw.tdaw");
+        size_t n = strlen(name);
+        if (n > 5 && !strcmp(name + n - 5, ".tdaw")) name[n - 5] = 0;
+        snprintf(start, sizeof start, "%s/%s.mid", export_dir, name);
+    } else {
+        snprintf(start, sizeof start, "%s/", export_dir);
+    }
+    fd_saving = save;
+#ifdef _WIN32
+    snprintf(fd_start, sizeof fd_start, "%s", start);
+    SDL_SysWMinfo wm;
+    SDL_VERSION(&wm.version);
+    fd_owner = SDL_GetWindowWMInfo(win, &wm) ? wm.info.win.window : NULL;
+#else
+    char q[2700];
+    shell_quote(q, sizeof q, start);
+    if (have_program("zenity")) {
+        snprintf(fd_cmd, sizeof fd_cmd,
+                 "zenity --file-selection %s --title=%s --filename=%s "
+                 "--file-filter='MIDI files | *.mid *.midi *.MID' --file-filter='All files | *' 2>/dev/null",
+                 save ? "--save --confirm-overwrite" : "", save ? "'Export MIDI'" : "'Import a MIDI file'", q);
+    } else if (have_program("kdialog")) {
+        snprintf(fd_cmd, sizeof fd_cmd, "kdialog %s %s '*.mid *.midi' 2>/dev/null",
+                 save ? "--getsavefilename" : "--getopenfilename", q);
+    } else if (save) {                      /* no dialog: next to the audio exports */
+        midi_export(start);
+        return;
+    } else {
+        status("No file dialog available (install zenity): drop a .mid file on the window instead");
+        return;
+    }
+#endif
+    fd_export = save ? 3 : 2;
+    SDL_AtomicSet(&fd_state, 1);
+    SDL_Thread *t = SDL_CreateThread(fd_thread, "filedialog", NULL);
+    if (t) SDL_DetachThread(t);
+    else {
+        SDL_AtomicSet(&fd_state, 0);
+        fd_export = 0;
+    }
+}
+
 /* a chosen export file: its folder and name go into the dialog (its extension picks the format) */
 static void export_take_path(const char *path)
 {
@@ -2164,6 +2381,21 @@ static void file_dialog_poll(void)
 {
     if (SDL_AtomicGet(&fd_state) != 2) return;
     SDL_AtomicSet(&fd_state, 0);
+    if (fd_export >= 2) {                   /* a MIDI file */
+        int k = fd_export;
+        fd_export = 0;
+        if (fd_result[0]) {
+            if (k == 2) midi_import(fd_result);
+            else {
+                char path[1100];
+                size_t n = strlen(fd_result);
+                snprintf(path, sizeof path, "%s%s", fd_result,
+                         (n > 4 && !strcasecmp(fd_result + n - 4, ".mid")) || (n > 5 && !strcasecmp(fd_result + n - 5, ".midi")) ? "" : ".mid");
+                midi_export(path);
+            }
+        }
+        return;
+    }
     if (fd_export) {                        /* Export > Choose: back to the export dialog */
         fd_export = 0;
         if (fd_result[0]) export_take_path(fd_result);
@@ -2254,7 +2486,7 @@ static int stick_axis[MAX_JOYS][4];
 static SDL_GameController *joy_ctl[MAX_JOYS];
 
 /* hits waiting to be written onto the timeline (filled under the audio lock, from any thread) */
-typedef struct { int pad, note, down; long frame; } RecEv;
+typedef struct { int pad, note, down, vel; long frame; } RecEv;
 static RecEv recq[512];
 static int nrecq;
 
@@ -2339,11 +2571,12 @@ static void bind_label(int pad, char *buf, size_t n)   /* short, for the pad its
     snprintf(buf, n, "%s  %s", binds[pad].joy >= 0 ? a : "", binds[pad].midi >= 0 ? b : "");
 }
 
-static void rec_push(int pad, int note, int down)
+static void rec_push_vel(int pad, int note, int down, int vel)
 {
     if (!pads_rec || !P.playing || countin_left > 0 || nrecq >= (int)(sizeof recq / sizeof *recq)) return;
-    recq[nrecq++] = (RecEv){pad, note, down, P.playhead};
+    recq[nrecq++] = (RecEv){pad, note, down, vel, P.playhead};
 }
+static void rec_push(int pad, int note, int down) { rec_push_vel(pad, note, down, 100); }
 
 static void pad_hit(int pad, int vel, int down)
 {
@@ -2385,7 +2618,7 @@ static void inst_note(int note, int vel, int down)
         return;
     }
     voice_start(&P, P.inst_sample, pow(2.0, (note - P.inst_root) / 12.0), 0.9f * (float)vel / 127.0f, 0, -1, note);
-    rec_push(-1, note, 1);
+    rec_push_vel(-1, note, 1, vel);
 }
 
 /* Every live input ends up here, from the UI thread or the MIDI thread. */
@@ -2557,7 +2790,7 @@ static void joy_event(const SDL_Event *e)
 /* ---- recording hits onto the timeline */
 
 typedef struct { int on; long start; int sample; int track; int loop; } Held;
-static Held held_pad[NPADS], held_note[128];
+static Held held_pad[NPADS];
 
 static void rec_close(Held *h, long end)
 {
@@ -2582,7 +2815,10 @@ static struct {
     int on, track, hits, number;
     long start;                         /* where in the song it began */
     Uint32 since;                       /* when (for the timer) */
+    int note_clip, notes;               /* played on the instrument: a note clip, and how many notes */
+    int held[128];                      /* the note (index in P.notes) each key is holding, or -1 */
 } take;
+static int rec_quantize = 1;            /* recorded notes snap to the grid when the take ends */
 
 static void disc_small(int cx, int cy, int r, Col c)
 {
@@ -2591,6 +2827,11 @@ static void disc_small(int cx, int cy, int r, Col c)
         line(cx - dx, cy + dy, cx + dx, cy + dy, c);
     }
 }
+
+static void take_note_off(int note, long frame);
+static void take_notes_finish(void);
+static void rec_drain(void);
+static int note_add(int pattern, int note, long start, long len, float vel);
 
 static int take_track_for(int from_track)
 {
@@ -2628,6 +2869,79 @@ static int take_track_for(int from_track)
     return from_track >= 0 && from_track < P.ntracks ? from_track : 0;   /* full: where it was playing */
 }
 
+/* Notes played on the instrument go into one note clip per take, on the take's track. */
+static int take_note_clip(long at)
+{
+    if (take.note_clip >= 0 && take.note_clip < P.nclips) return take.note_clip;
+    int s = sample_base(&P, P.inst_sample);
+    if (s < 0 || s >= P.nsamples) return -1;
+    long start = bar_floor(at);
+    int t = take_track_for(P.inst_track < P.ntracks ? P.inst_track : 0);
+    int c = clip_add(s, t, start, 0, bar_len_at(start));
+    if (c < 0) return -1;
+    LOCK();
+    P.clips[c].pattern = pattern_new_id(&P);
+    P.clips[c].root = P.inst_root;
+    UNLOCK();
+    return take.note_clip = c;
+}
+
+static void take_note_fit(void)                 /* the clip grows by bars to hold every note */
+{
+    Clip *c = &P.clips[take.note_clip];
+    long end = c->start - c->offset + pattern_end(&P, c->pattern), len = bar_ceil(end) - c->start;
+    if (len > c->length) {
+        LOCK();
+        c->length = len;
+        UNLOCK();
+    }
+}
+
+static void take_note_on(int note, int vel, long frame)
+{
+    int c = take_note_clip(frame);
+    if (c < 0) return;
+    Clip *cl = &P.clips[c];
+    if (frame < cl->start) {                     /* the loop came round to before the clip: it starts earlier */
+        long ns = bar_floor(frame), d = cl->start - ns;
+        LOCK();
+        for (int i = 0; i < P.nnotes; i++)
+            if (P.notes[i].pattern == cl->pattern) P.notes[i].start += d;
+        cl->start = ns;
+        cl->length += d;
+        UNLOCK();
+    }
+    if (take.held[note] >= 0) take_note_off(note, frame);
+    int i = note_add(cl->pattern, note, frame - cl->start + cl->offset, SR / 8, vel / 127.0f);
+    take.held[note] = i;
+    take.notes++;
+    take_note_fit();
+}
+
+static void take_note_off(int note, long frame)
+{
+    int i = take.held[note];
+    take.held[note] = -1;
+    if (i < 0 || i >= P.nnotes || take.note_clip < 0 || take.note_clip >= P.nclips) return;
+    Clip *cl = &P.clips[take.note_clip];
+    long abs = cl->start - cl->offset + P.notes[i].start, len = frame - abs;
+    if (len <= 0) len = P.loop_end > abs ? P.loop_end - abs : SR / 10;   /* held round the end of a loop */
+    LOCK();
+    P.notes[i].length = len < SR / 100 ? SR / 100 : len;
+    UNLOCK();
+    take_note_fit();
+}
+
+static void take_notes_finish(void)
+{
+    if (take.note_clip < 0 || take.note_clip >= P.nclips) return;
+    for (int k = 0; k < 128; k++)
+        if (take.held[k] >= 0) take_note_off(k, P.playhead);
+    Clip *cl = &P.clips[take.note_clip];
+    if (rec_quantize) notes_quantize(cl->pattern, cl->start - cl->offset, NULL, quant_grid(), 1.0);
+    take_note_fit();
+}
+
 /* each frame: a take starts once play and Rec are both on (after any count-in), and ends when
  * either stops */
 static void take_check(void)
@@ -2640,12 +2954,21 @@ static void take_check(void)
         take.number++;
         take.start = P.playhead;
         take.since = SDL_GetTicks();
+        take.note_clip = -1;
+        take.notes = 0;
+        for (int i = 0; i < 128; i++) take.held[i] = -1;
     } else if (!now && take.on) {
         take.on = 0;
         double secs = (SDL_GetTicks() - take.since) / 1000.0;
-        if (take.hits)
-            status("Recorded %d hit%s in %.1f s onto track %d (%s)", take.hits, take.hits == 1 ? "" : "s", secs,
-                   take.track + 1, P.tracks[take.track].name);
+        rec_drain();                            /* what was played up to the end belongs to this take */
+        take_notes_finish();
+        if (take.notes && !take.hits)
+            status("Recorded %d note%s in %.1f s into a note clip on track %d (%s)%s", take.notes,
+                   take.notes == 1 ? "" : "s", secs, take.track + 1, P.tracks[take.track].name,
+                   rec_quantize ? ", quantized" : "");
+        else if (take.hits)
+            status("Recorded %d hit%s%s in %.1f s onto track %d (%s)", take.hits, take.hits == 1 ? "" : "s",
+                   take.notes ? " and some notes" : "", secs, take.track + 1, P.tracks[take.track].name);
         else
             status("Recording stopped: nothing was played (%.1f s)", secs);
     }
@@ -2707,25 +3030,13 @@ static void rec_drain(void)
             rec_close(h, e->frame);
             if (pd->mode == PAD_ONESHOT) clip_add(s, track, snap(e->frame), 0, P.samples[s].frames);
             else *h = (Held){1, snap(e->frame), s, track, pd->mode == PAD_LOOP};
-        } else if (e->note >= 0 && e->note < 128) {
-            Held *h = &held_note[e->note];
-            if (!e->down) {
-                rec_close(h, e->frame);
-                continue;
-            }
-            if (P.inst_sample < 0) continue;
-            LOCK();
-            int s = sample_pitched(&P, P.inst_sample, e->note - P.inst_root);
-            UNLOCK();
-            if (s < 0) continue;
-            rec_close(h, e->frame);
-            take.hits++;
-            *h = (Held){1, snap(e->frame), s, take_track_for(P.inst_track < P.ntracks ? P.inst_track : 0), 0};
+        } else if (e->note >= 0 && e->note < 128) {   /* the instrument: notes in a note clip */
+            if (!e->down) take_note_off(e->note, e->frame);
+            else if (P.inst_sample >= 0) take_note_on(e->note, e->vel, e->frame);
         }
     }
     if (!P.playing || !pads_rec) {          /* stopped: finish anything still held */
         for (int i = 0; i < NPADS; i++) rec_close(&held_pad[i], P.playhead);
-        for (int i = 0; i < 128; i++) rec_close(&held_note[i], P.playhead);
     }
 }
 
@@ -2838,9 +3149,13 @@ static int pads_content(int x, int y, int w)
     y += font_h + 10;
     y += 6;
     if (button((SDL_Rect){x, y, 76, 28}, pads_rec ? "● Rec" : "Rec", pads_rec)) rec_toggle();
-    snprintf(buf, sizeof buf, "record hits while playing (snap %s)", SNAP_NAMES[snap_i]);
+    snprintf(buf, sizeof buf, "pads record hits (snap %s), MIDI keys record notes", SNAP_NAMES[snap_i]);
     text_clip((SDL_Rect){x + 86, y, w - 86, 28}, x + 86, y + (28 - font_h) / 2, buf, pads_rec ? HEAD : DIM);
-    y += 40;
+    y += 34;
+    if (button((SDL_Rect){x, y, w, 26}, rec_quantize ? "Quantize recorded notes: on (to the Snap grid)"
+                                                     : "Quantize recorded notes: off (as played)", rec_quantize))
+        rec_quantize = !rec_quantize;
+    y += 36;
 
     {                                           /* preset layouts: fill all 16 pads at once */
         static int preset;
@@ -3057,7 +3372,7 @@ static int pads_take_key(SDL_Keysym k)
 
 /* ---- File menu and the "save changes?" question */
 
-static SDL_Rect file_btn, met_btn, snap_rect, bpm_rect, a4_rect;
+static SDL_Rect file_btn, met_btn, snap_rect, bpm_rect, a4_rect, ts_rect, change_flag[MAX_METER];
 static int met_open;
 
 static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int enabled)
@@ -3143,7 +3458,8 @@ static void file_menu(void)
         {"New", "Ctrl+N"}, {"Open...", "Ctrl+O"}, {"Save", "Ctrl+S"}, {"Save As...", "Ctrl+Shift+S"},
         {"Recover unsaved work", NULL}, {NULL, NULL}, {"Export audio...", "Ctrl+E"}, {NULL, NULL},
         {"Settings", "Ctrl+,"}, {"Full-screen show", "F11"}, {NULL, NULL}, {"Quit", "Ctrl+Q"},
-        {NULL, NULL}, {"Open an example song", NULL}};
+        {NULL, NULL}, {"Open an example song", NULL}, {"Import a MIDI file...", NULL}, {"Export MIDI...", NULL},
+        {"Mixing console", NULL}};
     int n = sizeof ITEMS / sizeof *ITEMS, hgt = 8;
     for (int i = 0; i < n; i++) hgt += ITEMS[i].label ? ih : 9;
     SDL_Rect m = {file_btn.x, file_btn.y + file_btn.h + 2, w, hgt + font_h + 12};
@@ -3174,14 +3490,76 @@ static void file_menu(void)
     case 8: if (!settings_open) open_panel(RI_SETTINGS); break;
     case 9: show_toggle(); break;
     case 11: request(ACT_QUIT, NULL); break;
-    case 13: examples_menu((SDL_Rect){m.x + m.w - 4, y - ih - font_h, 4, 4}); break;
+    case 13: examples_menu((SDL_Rect){m.x + m.w - 4, y - 4 * ih - font_h, 4, 4}); break;
+    case 14: midi_file_dialog(0); break;
+    case 15: midi_file_dialog(1); break;
+    case 16: mixwin_open(); break;
     }
+}
+
+
+/* ---- editing the tempo map: the section the playhead is in */
+
+static const char *const TS_NAMES[] = {"2/4", "3/4", "4/4", "5/4", "6/8", "7/8", "9/8", "12/8"};
+static const int TS_NUM[] = {2, 3, 4, 5, 6, 7, 9, 12}, TS_DEN[] = {4, 4, 4, 4, 8, 8, 8, 8};
+#define NTS 8
+
+/* the change in force at frame f (index into P.changes), or -1 for the song's start */
+static int change_at(long f)
+{
+    int bar = (int)floor(meter_bars(&P, f) + 1e-9), k = -1;
+    for (int i = 0; i < P.nchanges; i++)
+        if (P.changes[i].bar <= bar) k = i;
+    return k;
+}
+
+/* A change at the playhead's bar, starting with what's in force there. Returns its index. */
+static int change_add_here(void)
+{
+    int bar = (int)floor(meter_bars(&P, P.playhead) + 1e-9);
+    if (bar < 1) {
+        status("Bar 1's tempo and time signature are the song's own: set them with BPM and the box beside it");
+        return -1;
+    }
+    for (int i = 0; i < P.nchanges; i++)
+        if (P.changes[i].bar == bar) {
+            status("Bar %d already has a change: BPM and the time signature box edit it", bar + 1);
+            return i;
+        }
+    if (P.nchanges >= MAX_METER) {
+        status("That's as many changes as a song can have (%d)", MAX_METER);
+        return -1;
+    }
+    double bpm;
+    int num, den;
+    meter_at(&P, P.playhead, &bpm, &num, &den, NULL, NULL, NULL);
+    int k = P.nchanges;
+    while (k > 0 && P.changes[k - 1].bar > bar) k--;
+    LOCK();
+    memmove(&P.changes[k + 1], &P.changes[k], (size_t)(P.nchanges - k) * sizeof(MeterChange));
+    P.changes[k] = (MeterChange){bar, bpm, num, den};
+    P.nchanges++;
+    P.playhead = meter_bar_frame(&P, bar);
+    UNLOCK();
+    status("A change at bar %d: set its tempo with BPM and its time signature in the box beside it", bar + 1);
+    return k;
+}
+
+static void change_remove(int k)
+{
+    if (k < 0 || k >= P.nchanges) return;
+    int bar = P.changes[k].bar;
+    LOCK();
+    memmove(&P.changes[k], &P.changes[k + 1], (size_t)(P.nchanges - k - 1) * sizeof(MeterChange));
+    P.nchanges--;
+    UNLOCK();
+    status("Removed the change at bar %d", bar + 1);
 }
 
 /* The metronome's options and the tempo, under the arrow next to Click. */
 static void metronome_menu(void)
 {
-    int w = 380, h = 404;
+    int w = 380, h = 404 + 44 + (P.nchanges ? 30 : 0);
     SDL_Rect m = {met_btn.x + met_btn.w - w, met_btn.y + met_btn.h + 2, w, h};
     if (m.x < 4) m.x = 4;
     fill(m, PANEL);
@@ -3236,11 +3614,28 @@ static void metronome_menu(void)
     tempo_touch(tempo_before);
     y += 36;
     if (button((SDL_Rect){x, y, 150, 28}, "Tap tempo (T)", 0)) tap_tempo();
-    snprintf(buf, sizeof buf, "beat %.0f ms, bar %.2f s", 60000.0 / P.bpm, 240.0 / P.bpm);
+    {
+        double bpm;
+        long bl;
+        meter_at(&P, P.playhead, &bpm, NULL, NULL, NULL, NULL, &bl);
+        snprintf(buf, sizeof buf, "beat %.0f ms, bar %.2f s", 60000.0 / bpm, (double)bl / SR);
+    }
     text_clip((SDL_Rect){x + 158, y, iw - 158, 28}, x + 158, y + 7, buf, DIM);
     y += 34;
-    text(x, y + 2, "M toggles the click. Clips keep their times", DIM);
-    text(x, y + font_h + 4, "when the tempo changes.", DIM);
+    {                                               /* tempo and time signature changes */
+        int here = change_at(P.playhead), at_bar = here >= 0 && P.changes[here].bar ==
+                                                   (int)floor(meter_bars(&P, P.playhead) + 1e-9);
+        if (button((SDL_Rect){x, y, 220, 28}, "+ Change tempo / time here", 0)) change_add_here();
+        if (button2((SDL_Rect){x + 226, y, iw - 226, 28}, "Remove it", 0, at_bar)) change_remove(here);
+        y += 34;
+        if (P.nchanges) {
+            snprintf(buf, sizeof buf, "%d change%s: they show above the bar numbers", P.nchanges, P.nchanges == 1 ? "" : "s");
+            text(x, y + 4, buf, DIM);
+            y += 30;
+        }
+    }
+    text(x, y + 2, "M toggles the click. BPM and the box beside it edit", DIM);
+    text(x, y + font_h + 4, "the part of the song the playhead is in.", DIM);
     if (changed) settings_save();
     if ((lpress || rpress) && !hit(m) && !hit(met_btn)) met_open = 0;   /* a click outside closes it */
     if (hit(m)) lpress = rpress = 0;
@@ -3348,14 +3743,17 @@ static int section(int x, int y, int w, const char *title)
     return y + font_h + 10;
 }
 
+static int levels_tab(int x, int y, int w);
+
 static int mixer_content(int x, int y, int w)
 {
     char buf[160], b2[48];
     int hw = (w - 8) / 2, tw = (w - 16) / 3, rh = 34;
 
-    static const char *const SUBS[] = {"Clip", "Track", "Effects", "Live"};
-    y = subtabs(x, y, w, SUBS, 4, &mixer_sub);
-    if (mixer_sub == 0) {
+    static const char *const SUBS[] = {"Levels", "Clip", "Track", "Effects", "Live"};
+    y = subtabs(x, y, w, SUBS, 5, &mixer_sub);
+    if (mixer_sub == 0) y = levels_tab(x, y, w);
+    if (mixer_sub == 1) {
     /* the selected clips: the one clicked last shows its values; a change applies to all of them */
     y = section(x, y, w, "CLIP");
     if (selected >= 0 && selected < P.nclips) {
@@ -3419,7 +3817,7 @@ static int mixer_content(int x, int y, int w)
     }
 
     }
-    if (mixer_sub == 1) {
+    if (mixer_sub == 2) {
     /* the selected track */
     if (sel_track >= P.ntracks) sel_track = P.ntracks - 1;
     Track *t = &P.tracks[sel_track];
@@ -3490,10 +3888,34 @@ static int mixer_content(int x, int y, int w)
     fnumber((SDL_Rect){x, y, hw, 26}, "Delay send", &t->delay_send, 0, 1, 0.004, "%.2f");
     fnumber((SDL_Rect){x + hw + 8, y, hw, 26}, "Reverb send", &t->reverb_send, 0, 1, 0.004, "%.2f");
     y += rh + 8;
+    y = section(x, y, w, "WIDTH AND COMPRESSOR");
+    fnumber((SDL_Rect){x, y, hw, 26}, "Stereo width", &t->width, 0, 2, 0.004, "%.2f");
+    if (button((SDL_Rect){x + hw + 8, y, hw, 26}, t->comp_on ? "Compressor: on" : "Compressor: off", t->comp_on)) {
+        LOCK();
+        t->comp_on = !t->comp_on;
+        UNLOCK();
+    }
+    y += rh;
+    fnumber((SDL_Rect){x, y, tw, 26}, "Threshold", &t->comp_thresh, -48, 0, 0.1, "%.0f dB");
+    fnumber((SDL_Rect){x + tw + 8, y, tw, 26}, "Ratio", &t->comp_ratio, 1, 20, 0.02, "%.1f:1");
+    fnumber((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Makeup", &t->comp_makeup, 0, 24, 0.05, "%+.1f dB");
+    y += rh;
+    fnumber((SDL_Rect){x, y, tw, 26}, "Attack", &t->comp_attack, 0.5, 200, 0.2, "%.0f ms");
+    fnumber((SDL_Rect){x + tw + 8, y, tw, 26}, "Release", &t->comp_release, 20, 2000, 2, "%.0f ms");
+    {
+        LOCK();
+        float gr = mixer_track_gr(MX, sel_track);
+        UNLOCK();
+        snprintf(buf, sizeof buf, "-%.1f dB", gr);
+        text(x + 2 * (tw + 8) + 6, y + 6, t->comp_on ? buf : "", gr > 0.1f ? HEAD : DIM);
+    }
+    y += rh;
+    text(x, y, "Width 0 is mono, 1 as it is, 2 twice as wide.", DIM);
+    y += font_h + 14;
 
     }
     MasterFx *fx = &P.fx;
-    if (mixer_sub == 2) {
+    if (mixer_sub == 3) {
     /* shared effects */
     y = section(x, y, w, "DELAY");
     int dw = (w - 7 * 4) / 8;
@@ -3544,8 +3966,64 @@ static int mixer_content(int x, int y, int w)
     text(x, y, "Tracks with Duck above 0 dip whenever the source hits", DIM);
     y += font_h + 16;
 
+    y = section(x, y, w, "MASTER: LOUDNESS AND PEAKS");
+    {                                           /* one click to a finished sound, then the details */
+        static const char *const PRE[3] = {"Off", "Glue", "Loud"};
+        int cur = !fx->comp_on && !fx->limit_on ? 0 : fx->comp_on && fx->comp_ratio <= 2.6f && fx->comp_thresh >= -19 ? 1
+                : fx->comp_on ? 2 : -1;
+        int bw = (w - 8) / 3;
+        for (int i = 0; i < 3; i++)
+            if (button((SDL_Rect){x + i * (bw + 4), y, bw, 28}, PRE[i], cur == i)) {
+                LOCK();
+                if (i == 0) fx->comp_on = fx->limit_on = 0;
+                else if (i == 1) {                /* gentle: holds the mix together, catches peaks */
+                    fx->comp_on = fx->limit_on = 1;
+                    fx->comp_thresh = -18, fx->comp_ratio = 2.5f, fx->comp_attack = 15, fx->comp_release = 180;
+                    fx->comp_makeup = 3, fx->limit_ceiling = -1;
+                } else {                          /* loud: pushes it up hard against the limiter */
+                    fx->comp_on = fx->limit_on = 1;
+                    fx->comp_thresh = -24, fx->comp_ratio = 4, fx->comp_attack = 8, fx->comp_release = 120;
+                    fx->comp_makeup = 8, fx->limit_ceiling = -1;
+                }
+                UNLOCK();
+            }
+        y += 34;
+        static const char *const ABOUT[3] = {"Off: the mix as it is", "Glue: gentle compression, peaks held under -1 dB",
+                                             "Loud: hard compression into the limiter, like a release"};
+        text(x, y, cur >= 0 ? ABOUT[cur] : "Your own settings", DIM);
+        y += font_h + 10;
+        if (button((SDL_Rect){x, y, hw, 26}, fx->comp_on ? "Compressor: on" : "Compressor: off", fx->comp_on)) {
+            LOCK();
+            fx->comp_on = !fx->comp_on;
+            UNLOCK();
+        }
+        if (button((SDL_Rect){x + hw + 8, y, hw, 26}, fx->limit_on ? "Limiter: on" : "Limiter: off", fx->limit_on)) {
+            LOCK();
+            fx->limit_on = !fx->limit_on;
+            UNLOCK();
+        }
+        y += rh;
+        fnumber((SDL_Rect){x, y, tw, 26}, "Threshold", &fx->comp_thresh, -48, 0, 0.1, "%.0f dB");
+        fnumber((SDL_Rect){x + tw + 8, y, tw, 26}, "Ratio", &fx->comp_ratio, 1, 20, 0.02, "%.1f:1");
+        fnumber((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Makeup", &fx->comp_makeup, 0, 24, 0.05, "%+.1f dB");
+        y += rh;
+        fnumber((SDL_Rect){x, y, tw, 26}, "Attack", &fx->comp_attack, 0.5, 200, 0.2, "%.0f ms");
+        fnumber((SDL_Rect){x + tw + 8, y, tw, 26}, "Release", &fx->comp_release, 20, 2000, 2, "%.0f ms");
+        fnumber((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Ceiling", &fx->limit_ceiling, -12, 0, 0.02, "%.1f dB");
+        y += rh;
+        float cgr, lgr;                           /* how hard they're working */
+        LOCK();
+        mixer_dynamics_meter(MX, &cgr, &lgr);
+        UNLOCK();
+        snprintf(buf, sizeof buf, "Turning down: compressor %.1f dB, limiter %.1f dB", cgr, lgr);
+        text(x, y, buf, cgr > 0.1f || lgr > 0.1f ? HEAD : DIM);
+        y += font_h + 8;
+        y = loudness_readout(x, y, w);
+        y += 8;
     }
-    if (mixer_sub == 3) {
+
+    }
+    if (mixer_sub == 4) {
     y = section(x, y, w, "LIVE CONTROLS");
     fnumber((SDL_Rect){x, y, hw, 26}, "Bend range", &fx->bend_range, 1, 24, 0.05, "%.0f st");
     SDL_Rect meter = {x + hw + 8, y + 4, hw, 18};
@@ -3626,6 +4104,24 @@ static void meter_feed(Meter *m, float v, float dt)
     if (v > 1.0f) m->clipped = 1;
 }
 
+/* momentary, short-term and integrated LUFS, with a reset */
+static int loudness_readout(int x, int y, int w)
+{
+    char buf[160], a[16], b[16], c[16];
+    double v[3] = {loud_momentary(&live_loud), loud_short(&live_loud), loud_integrated(&live_loud)};
+    char *o[3] = {a, b, c};
+    for (int i = 0; i < 3; i++) {
+        if (isfinite(v[i])) snprintf(o[i], 16, "%.1f", v[i]);
+        else snprintf(o[i], 16, "--");
+    }
+    snprintf(buf, sizeof buf, "Loudness  now %s   3 s %s   song %s LUFS", a, b, c);
+    text_clip((SDL_Rect){x, y + 4, w - 70, font_h + 2}, x, y + 4, buf, TEXT);
+    if (button((SDL_Rect){x + w - 64, y, 64, 24}, "Reset", 0)) loud_reset(&live_loud);
+    y += 28;
+    text(x, y, "Streaming services play songs at about -14 LUFS.", DIM);
+    return y + font_h + 4;
+}
+
 static void vis_update(void)
 {
     Uint32 now = SDL_GetTicks();
@@ -3634,6 +4130,20 @@ static void vis_update(void)
     float levels[MAX_TRACKS][2];
     LOCK();
     int pos = vis_pos;
+    {                                           /* everything new since last time, to the loudness meter */
+        static int last = -1;
+        static float chunk[2 * 4096];
+        if (last < 0) last = pos;
+        int fresh = (pos - last + VIS_RING) % VIS_RING;
+        if (fresh > 4096) fresh = 4096;
+        for (int i = 0; i < fresh; i++) {
+            int k = (pos - fresh + i + VIS_RING) % VIS_RING;
+            chunk[2 * i] = vis_ring[2 * k];
+            chunk[2 * i + 1] = vis_ring[2 * k + 1];
+        }
+        last = pos;
+        if (P.playing && fresh) loud_feed(&live_loud, chunk, fresh);
+    }
     for (int i = 0; i < VIS_FFT; i++) {
         int k = (pos - VIS_FFT + i + VIS_RING) % VIS_RING;
         vis_buf[2 * i] = vis_ring[2 * k];
@@ -3841,6 +4351,8 @@ static int vis_content(int x, int y, int w)
         }
     }
     y += 46;
+    y = loudness_readout(x, y, w);              /* LUFS, as streaming services measure it */
+    y += 12;
     text(x, y, "TRACKS", DIM);
     y += font_h + 6;
     for (int t = 0; t < P.ntracks; t++) {
@@ -4028,9 +4540,11 @@ static void show_text(int x, int y, const char *s, Col c)
 static void show_overlay(const char *name, const char *caption)
 {
     char buf[200];
-    double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
-    snprintf(buf, sizeof buf, "%.60s   bar %d  beat %d   %.0f BPM   %02d:%02d", proj_path[0] ? base_name(proj_path) : "tinydaw",
-             (int)(beats / 4) + 1, (int)fmod(beats, 4.0) + 1, P.bpm, (int)(secs / 60), (int)fmod(secs, 60.0));
+    double secs = (double)P.playhead / SR;
+    char pos[48];
+    pos_text(P.playhead, pos, sizeof pos);
+    snprintf(buf, sizeof buf, "%.60s   %s   %.0f BPM   %02d:%02d", proj_path[0] ? base_name(proj_path) : "tinydaw", pos,
+             meter_bpm_at(&P, P.playhead), (int)(secs / 60), (int)fmod(secs, 60.0));
     show_text(20, H - font_h - 16, buf, rgb(230, 230, 236));
     snprintf(buf, sizeof buf, "%d/%d  %s", show_scene + 1, scene_count() + 1, name);
     show_text(20, 16, buf, rgb(255, 214, 90));
@@ -5643,12 +6157,37 @@ static void top_bar(void)
     x += 72;
     line(x - 6, y + 4, x - 6, y + h - 4, sep);
     bpm_rect = (SDL_Rect){x, y, 100, h};
-    {
-        double before = P.bpm;
-        number(bpm_rect, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
-        tempo_touch(before);
+    {                                           /* the tempo and time signature where the playhead is */
+        int k = change_at(P.playhead);
+        double *bp = k >= 0 ? &P.changes[k].bpm : &P.bpm, before = *bp;
+        number(bpm_rect, k >= 0 ? "BPM*" : "BPM", bp, 40, 300, 0.25, "%.0f");
+        if (bp == &P.bpm && !P.nchanges) tempo_touch(before);   /* selected clips follow a one-tempo song */
+        x += 104;
+        int *pn = k >= 0 ? &P.changes[k].num : &P.ts_num, *pd = k >= 0 ? &P.changes[k].den : &P.ts_den;
+        static int tsel;
+        if (!(dd.open && dd.sel == &tsel)) {
+            tsel = -1;
+            for (int i = 0; i < NTS; i++)
+                if (TS_NUM[i] == *pn && TS_DEN[i] == *pd) tsel = i;
+        }
+        ts_rect = (SDL_Rect){x, y, 64, h};
+        static char other[16];
+        const char *items[NTS];
+        for (int i = 0; i < NTS; i++) items[i] = TS_NAMES[i];
+        if (tsel < 0) {                         /* an unusual one from a MIDI file: show it as it is */
+            snprintf(other, sizeof other, "%d/%d", *pn, *pd);
+            fill(ts_rect, PANEL2);
+            text_center(ts_rect, other, TEXT);
+            if (hit(ts_rect) && lpress) tsel = 2;
+        }
+        if (tsel >= 0 && dropdown(ts_rect, "", items, NTS, &tsel, 0)) {
+            LOCK();
+            *pn = TS_NUM[tsel];
+            *pd = TS_DEN[tsel];
+            UNLOCK();
+        }
+        x += 68;
     }
-    x += 104;
     a4_rect = (SDL_Rect){x, y, 116, h};
     number(a4_rect, "A4", &P.a4, 415, 466, 0.05, "%.1f Hz");   /* tuning for new sounds */
     x += 120;
@@ -5665,23 +6204,27 @@ static void top_bar(void)
         line(met_btn.x + 7 + i, y + 13 + i, met_btn.x + 15 - i, y + 13 + i, btn_fg(met_open));
     x += 92;
     {                                               /* the beat: four lights, the first is the bar */
-        double bt = countin_left > 0 ? (double)(countin_total - countin_left) / beat_frames()
-                                     : (double)P.playhead / beat_frames();
-        int beat = (int)floor(bt) % 4, lit = P.playing && bt - floor(bt) < 0.35;
-        for (int i = 0; i < 4; i++) {
-            SDL_Rect d = {x + i * 12, y + 11, 8, 8};
-            fill(d, lit && i == beat ? (i == 0 ? ACCENT : HEAD) : PANEL3);
+        int num;                                /* one light a beat of the time signature (up to 6) */
+        long bs, bl;
+        meter_at(&P, P.playhead, NULL, &num, NULL, NULL, &bs, &bl);
+        double unit = (double)bl / num;
+        double bt = countin_left > 0 ? fmod((double)(countin_total - countin_left), (double)bl) / unit
+                                     : (double)(P.playhead - bs) / unit;
+        int beat = (int)floor(bt), lit = P.playing && bt - floor(bt) < 0.35, shown = num < 6 ? num : 6;
+        for (int i = 0; i < shown; i++) {
+            SDL_Rect d = {x + i * 10, y + 11, 7, 8};
+            fill(d, lit && (num <= 6 ? i == beat : i == beat * 6 / num) ? (i == 0 ? ACCENT : HEAD) : PANEL3);
         }
         if (countin_left > 0) {
-            snprintf(buf, sizeof buf, "%d", (int)((countin_left - 1) / beat_frames()) + 1);
-            text(x + 52, y + (h - font_h) / 2, buf, ACCENT);
+            snprintf(buf, sizeof buf, "%d", (int)((countin_left - 1) / unit) + 1);
+            text(x + 62, y + (h - font_h) / 2, buf, ACCENT);
         }
     }
     x += 70;
     line(x - 6, y + 4, x - 6, y + h - 4, sep);
 
-    double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
-    snprintf(buf, sizeof buf, "bar %d  beat %.2f", (int)(beats / 4) + 1, fmod(beats, 4.0) + 1);
+    double secs = (double)P.playhead / SR;
+    pos_text(P.playhead, buf, sizeof buf);
     text(x + 6, y + (h - font_h) / 2, buf, bar_head);
     x += text_w("bar 000  beat 0.00") + 26;
     snprintf(buf, sizeof buf, "%02d:%06.3f", (int)(secs / 60), fmod(secs, 60.0));
@@ -5734,9 +6277,9 @@ static void auto_status(int i)
     const AutoPoint *a = &P.autos[i];
     char v[32];
     auto_text(a->param, a->v, v, sizeof v);
-    double beats = (double)a->at / beat_frames();
-    status("%s: %s %s at bar %d beat %.2f", P.tracks[a->track].name, AUTO_NAMES[a->param], v, (int)(beats / 4) + 1,
-           fmod(beats, 4) + 1);
+    char pos[48];
+    pos_text(a->at, pos, sizeof pos);
+    status("%s: %s %s at %s", P.tracks[a->track].name, AUTO_NAMES[a->param], v, pos);
 }
 
 static int auto_add(int t, int param, long at, float v)   /* returns the new point's index */
@@ -6020,9 +6563,9 @@ static void nsel_only(int i)
 static void roll_fit_clip(void)                 /* the clip grows (by bars) to take in every note */
 {
     Clip *c = &P.clips[roll_clip];
-    long end = roll_origin() + pattern_end(&P, roll_pattern), bar = 4 * beat_frames();
+    long end = roll_origin() + pattern_end(&P, roll_pattern);
     if (end <= c->start + c->length) return;
-    long len = ((end - c->start + bar - 1) / bar) * bar;
+    long len = bar_ceil(end) - c->start;
     LOCK();
     c->length = len;
     UNLOCK();
@@ -6074,10 +6617,172 @@ static void roll_make_unique(void)              /* this clip gets its own copy o
     status("This clip's notes are its own now; the other copies keep theirs");
 }
 
+
+/* ---- MIDI files: note clips in and out */
+
+/* the first track with nothing on it from `at` on, or a new one; -1 when there's no room */
+static int open_track_from(long at, int *fresh)
+{
+    *fresh = 0;
+    for (int t = 0; t < P.ntracks; t++) {
+        int busy = 0, any = 0;
+        for (int c = 0; c < P.nclips; c++)
+            if (P.clips[c].track == t) {
+                any = 1;
+                busy |= P.clips[c].start + P.clips[c].length > at;
+            }
+        if (!busy) {
+            *fresh = !any;
+            return t;
+        }
+    }
+    if (P.ntracks >= MAX_TRACKS) return -1;
+    LOCK();
+    int t = project_add_track(&P, NULL);
+    UNLOCK();
+    *fresh = t >= 0;
+    return t;
+}
+
+/* A file's later tempo and time signature changes, onto bar lines of the project's map. */
+static void meter_from_file(const MfFile *f)
+{
+    P.nchanges = 0;
+    for (int i = 0; i < f->nmeter && P.nchanges < MAX_METER; i++) {
+        const MfMeter *m = &f->meter[i];
+        if (m->beat <= 0) continue;
+        long fr = meter_beats_frame(&P, m->beat);
+        int bar = (int)lround(meter_bars(&P, fr));
+        if (bar < 1 || (P.nchanges && bar <= P.changes[P.nchanges - 1].bar)) continue;
+        double bpm;
+        int num, den;
+        meter_at(&P, fr, &bpm, &num, &den, NULL, NULL, NULL);
+        P.changes[P.nchanges++] = (MeterChange){bar, m->bpm > 0 ? m->bpm : bpm, m->num > 0 ? m->num : num,
+                                                m->den > 0 ? m->den : den};
+    }
+}
+
+static void midi_import(const char *path)
+{
+    static MfFile f;
+    char err[300];
+    if (mf_read(path, &f, err, sizeof err) != 0) {
+        status("Couldn't import %s: %s", path_base(path), err);
+        return;
+    }
+    if (P.nclips == 0 && f.bpm >= 20 && f.bpm <= 999) {   /* an empty song takes its tempo and time signature */
+        P.bpm = round(f.bpm * 100) / 100;
+        if (f.has_meter && f.num >= 1 && f.num <= 32 && (f.den == 2 || f.den == 4 || f.den == 8 || f.den == 16)) {
+            P.ts_num = f.num;
+            P.ts_den = f.den;
+        }
+        meter_from_file(&f);
+    }
+    long at = bar_floor(P.playhead);
+    double at_b = meter_beats(&P, at);
+    int s = P.inst_sample, root = P.inst_root;
+    if (s < 0 || s >= P.nsamples || P.samples[s].removed) {   /* no instrument chosen: a plain saw */
+        int c4 = 60;
+        s = chord_sample(&c4, 1, "C4", 4);
+        root = 60;
+    } else {
+        s = sample_base(&P, s);
+    }
+    int parts = 0, notes = 0;
+    for (int k = 0; k < f.ntracks && s >= 0; k++) {
+        const MfTrack *mt = &f.tracks[k];
+        if (!mt->n) continue;
+        int fresh, t = open_track_from(at, &fresh);
+        if (t < 0) {
+            status("Imported %d parts: no room for more tracks", parts);
+            break;
+        }
+        int pat = pattern_new_id(&P);
+        double end = 0;
+        for (int i = 0; i < mt->n; i++) {          /* beats to frames through the tempo map */
+            const MfNote *n = &mt->notes[i];
+            long st = meter_beats_frame(&P, at_b + n->start) - at, ln = meter_beats_frame(&P, at_b + n->start + n->len) - at - st;
+            if (note_add(pat, n->note, st, ln < SR / 100 ? SR / 100 : ln, n->vel / 127.0f) >= 0) notes++;
+            if (n->start + n->len > end) end = n->start + n->len;
+        }
+        long len = bar_ceil(meter_beats_frame(&P, at_b + end)) - at;
+        if (len < bar_len_at(at)) len = bar_len_at(at);
+        int c = clip_add(s, t, at, 0, len);
+        if (c < 0) break;
+        LOCK();
+        P.clips[c].pattern = pat;
+        P.clips[c].root = root;
+        if (fresh && mt->name[0]) snprintf(P.tracks[t].name, sizeof P.tracks[t].name, "%.31s", mt->name);
+        UNLOCK();
+        parts++;
+    }
+    mf_free(&f);
+    if (parts)
+        status("Imported %s: %d part%s, %d notes, from bar %d. Double-click a clip to edit its notes", path_base(path), parts,
+               parts == 1 ? "" : "s", notes, (int)floor(meter_bars(&P, at) + 1e-9) + 1);
+}
+
+static void midi_export(const char *path)
+{
+    static MfFile f;
+    memset(&f, 0, sizeof f);
+    f.bpm = P.bpm;
+    f.num = P.ts_num;
+    f.den = P.ts_den;
+    f.meter[f.nmeter++] = (MfMeter){0, P.bpm, P.ts_num, P.ts_den};   /* the tempo map, at its beats */
+    for (int i = 0; i < P.nchanges && f.nmeter < MF_MAX_METER; i++)
+        f.meter[f.nmeter++] = (MfMeter){meter_beats(&P, meter_bar_frame(&P, P.changes[i].bar)), P.changes[i].bpm,
+                                         P.changes[i].num, P.changes[i].den};
+    int total = 0;
+    for (int t = 0; t < P.ntracks && f.ntracks < MF_MAX_TRACKS; t++) {
+        MfTrack *mt = NULL;
+        for (int c = 0; c < P.nclips; c++) {
+            const Clip *cl = &P.clips[c];
+            if (cl->track != t || cl->pattern <= 0) continue;
+            long origin = cl->start - cl->offset;
+            for (int i = 0; i < P.nnotes; i++) {
+                const Note *n = &P.notes[i];
+                if (n->pattern != cl->pattern) continue;
+                long a = origin + n->start, b = a + n->length;
+                if (b <= cl->start || a >= cl->start + cl->length) continue;   /* outside the clip */
+                if (a < cl->start) a = cl->start;
+                if (b > cl->start + cl->length) b = cl->start + cl->length;
+                if (!mt) {
+                    mt = &f.tracks[f.ntracks++];
+                    snprintf(mt->name, sizeof mt->name, "%s", P.tracks[t].name);
+                    mt->channel = (t < 9 ? t : t + 1) % 16;   /* channel 10 is drums by convention */
+                }
+                if (mt->n == mt->cap) {
+                    int cap = mt->cap ? mt->cap * 2 : 256;
+                    MfNote *nn = realloc(mt->notes, (size_t)cap * sizeof *nn);
+                    if (!nn) break;
+                    mt->notes = nn;
+                    mt->cap = cap;
+                }
+                double qa = meter_beats(&P, a);
+                mt->notes[mt->n++] = (MfNote){n->note, qa, meter_beats(&P, b) - qa, (int)lroundf(n->vel * 127)};
+                total++;
+            }
+        }
+    }
+    if (!total) {
+        mf_free(&f);
+        status("Nothing to export: MIDI holds notes, so it needs note clips (audio clips stay out)");
+        return;
+    }
+    char err[300];
+    int nt = f.ntracks;
+    if (mf_write(path, &f, err, sizeof err) == 0)
+        status("Exported %d track%s, %d notes, to %s", nt, nt == 1 ? "" : "s", total, path_base(path));
+    else
+        status("MIDI export failed: %s", err);
+    mf_free(&f);
+}
+
 static int new_note_clip(int t, long at)        /* an empty one-bar note clip, opened in the roll */
 {
-    long bar = 4 * beat_frames();
-    at = at / bar * bar;
+    at = bar_floor(at);
+    long bar = bar_len_at(at);
     int s = P.inst_sample, root = P.inst_root;
     if (s < 0 || s >= P.nsamples || P.samples[s].removed) {   /* no instrument chosen: a plain saw */
         int c4 = 60;
@@ -6230,6 +6935,76 @@ static int roll_key(SDL_Keysym k)               /* the roll's own keys; 0 = not 
     return 0;
 }
 
+
+/* Each bar and beat line of the tempo map that falls between xmin and xmax, to `fn`: kind 0 a
+ * bar (labelled when there's room for its number), 1 a beat of its time signature, 2 a finer
+ * grid line (every `sub` quarter notes, 0 for none). Lines thin out when they'd crowd. */
+typedef void (*GridFn)(int x, int bar, int kind, int labelled, void *ud);
+static void grid_walk(int xmin, int xmax, double sub, GridFn fn, void *ud)
+{
+    long f0 = (long)x_to_frame_raw(xmin);
+    if (f0 < 0) f0 = 0;
+    for (double b = floor(meter_bars(&P, f0) + 1e-9);; b++) {
+        long bf = meter_bar_frame(&P, b);
+        int x = (int)frame_to_x(bf);
+        if (x > xmax) break;
+        int num, den;
+        long bl;
+        meter_at(&P, bf, NULL, &num, &den, NULL, NULL, &bl);
+        double bar_px = (double)bl / SR * pps;
+        long label_every = 1, line_every = 1;
+        while (bar_px * label_every < 34) label_every *= 2;
+        while (bar_px * line_every < 9) line_every *= 2;
+        int bi = (int)b;
+        if (bi % line_every == 0 && x >= xmin) fn(x, bi, 0, bi % label_every == 0, ud);
+        if (bar_px / num >= 9)
+            for (int k = 1; k < num; k++) {
+                int xx = (int)frame_to_x(bf + (long)llround(k * (double)bl / num));
+                if (xx >= xmin && xx <= xmax) fn(xx, bi, 1, 0, ud);
+            }
+        if (sub > 0) {                          /* the snap grid inside the beats */
+            double bs = meter_beats(&P, bf), be = meter_beats(&P, bf + bl), unit = (double)num ? (be - bs) / num : 1;
+            if ((double)sub * bar_px / (be - bs) >= 8 && sub < unit - 1e-9)
+                for (double q = bs + sub; q < be - 1e-9; q += sub) {
+                    double rel = (q - bs) / unit;
+                    if (fabs(rel - round(rel)) < 1e-6) continue;   /* a beat line already */
+                    int xx = (int)frame_to_x(meter_beats_frame(&P, q));
+                    if (xx >= xmin && xx <= xmax) fn(xx, bi, 2, 0, ud);
+                }
+        }
+    }
+}
+
+typedef struct { SDL_Rect area; } TlGrid;
+static void tl_grid_fn(int x, int bar, int kind, int labelled, void *ud)
+{
+    const SDL_Rect *area = &((TlGrid *)ud)->area;
+    if (kind == 2) return;
+    line(x, area->y, x, area->y + area->h, kind == 0 ? LINE : tone(LINE, 0.62f));
+    line(x, L.top + 24 - (kind == 0 ? 8 : 4), x, L.top + 24, DIM);
+    if (kind == 0 && labelled) {
+        char buf[24];
+        snprintf(buf, sizeof buf, "%d", bar + 1);
+        text(x + 4, L.top + 3, buf, DIM);
+    }
+}
+
+static void roll_grid_fn(int x, int bar, int kind, int labelled, void *ud)
+{
+    (void)ud;
+    if (kind == 2) {
+        line(x, roll_grid.y, x, roll_grid.y + roll_grid.h, alpha(LINE, 70));
+        return;
+    }
+    line(x, roll_grid.y, x, roll_vel.y + roll_vel.h, kind == 0 ? tone(LINE, 1.3f) : tone(LINE, 0.75f));
+    if (kind == 0 && labelled) {
+        char buf[24];
+        snprintf(buf, sizeof buf, "%d", bar + 1);
+        text(x + 4, roll_ruler.y + 3, buf, DIM);
+        line(x, roll_ruler.y + 12, x, roll_ruler.y + roll_ruler.h, DIM);
+    }
+}
+
 static void piano_roll(void)
 {
     Clip *c = &P.clips[roll_clip];
@@ -6254,7 +7029,7 @@ static void piano_roll(void)
             snames[ns++] = P.samples[i].name;
         }
     if (dd.changed_for != &ssel && !(dd.open && dd.sel == &ssel)) ssel = cur;
-    int sw = W - x - 560 > 320 ? 320 : W - x - 560 > 160 ? W - x - 560 : 160;
+    int sw = W - x - 760 > 320 ? 320 : W - x - 760 > 160 ? W - x - 760 : 160;
     if (ns && dropdown((SDL_Rect){x, by, sw, bh}, "Sound: ", snames, ns, &ssel, 0) && ssel != cur) {
         int s = smap[ssel];
         LOCK();
@@ -6267,17 +7042,32 @@ static void piano_roll(void)
     note_number((SDL_Rect){x, by, 108, bh}, "Root", &c->root);
     x += 116;
     static double bars;
-    long barf = 4 * beat_frames();
-    if (!(drag.kind == D_NUM && drag.num == &bars) && !(numedit.active && numedit.v == &bars)) bars = (double)c->length / barf;
+    double b0 = meter_bars(&P, c->start);         /* bars by the tempo map, from where the clip starts */
+    if (!(drag.kind == D_NUM && drag.num == &bars) && !(numedit.active && numedit.v == &bars))
+        bars = meter_bars(&P, c->start + c->length) - b0;
     double bars0 = bars;
     number((SDL_Rect){x, by, 104, bh}, "Bars", &bars, 0.25, 64, 0.02, "%.2f");
     if (bars != bars0) {
         LOCK();
-        c->length = llround(bars * barf);
+        c->length = meter_bar_frame(&P, b0 + bars) - c->start;
         if (c->length < 1) c->length = 1;
         UNLOCK();
     }
     x += 112;
+    {                                           /* tidy the timing, or loosen it */
+        int sel = nsel_count();
+        if (button((SDL_Rect){x, by, 92, bh}, "Quantize", 0)) {
+            int q = notes_quantize(roll_pattern, roll_origin(), sel ? nsel : NULL, quant_grid(), 1.0);
+            status("Quantized %d note%s to %s (Snap sets the grid)", q, q == 1 ? "" : "s",
+                   snap_frames() ? SNAP_NAMES[snap_i] : "1/16");
+        }
+        if (button((SDL_Rect){x + 98, by, 96, bh}, "Humanize", 0)) {
+            int q = notes_humanize(roll_pattern, sel ? nsel : NULL, 12);
+            roll_fit_clip();
+            status("Humanized %d note%s: a little looser in time and touch (again for more)", q, q == 1 ? "" : "s");
+        }
+        x += 202;
+    }
     int shared = 0;
     for (int i = 0; i < P.nclips; i++) shared += P.clips[i].pattern == roll_pattern;
     if (shared > 1) {
@@ -6312,9 +7102,6 @@ static void piano_roll(void)
     /* the ruler: bar numbers; click or drag it to move the playhead */
     fill(roll_ruler, PANEL);
     fill((SDL_Rect){x0, roll_ruler.y, L.tl_x - x0, roll_ruler.h}, PANEL);
-    double spb = 60.0 / P.bpm, beat_px = spb * pps;
-    long stepb = 1;
-    while (beat_px * stepb < 9) stepb *= 2;
     SDL_Rect gridall = {x0, roll_ruler.y, W - x0, roll_vel.y + roll_vel.h - roll_ruler.y};
     SDL_RenderSetClipRect(ren, &gridall);
 
@@ -6333,27 +7120,7 @@ static void piano_roll(void)
             text(L.tl_x - text_w(buf) - 8, y + (roll_kh - font_h) / 2, buf, note % 12 == 0 ? rgb(20, 20, 26) : rgb(110, 110, 120));
         }
     }
-    long b = (long)floor(view_start / spb);
-    b -= b % stepb;
-    for (;; b += stepb) {                       /* the beat grid and bar numbers */
-        double xd = L.tl_x + (b * spb - view_start) * pps;
-        if (xd > W) break;
-        if (xd < L.tl_x) continue;
-        int xx = (int)xd, isbar = b % 4 == 0;
-        line(xx, roll_grid.y, xx, roll_vel.y + roll_vel.h, isbar ? tone(LINE, 1.3f) : tone(LINE, 0.75f));
-        if (isbar) {
-            snprintf(buf, sizeof buf, "%ld", b / 4 + 1);
-            text(xx + 4, roll_ruler.y + 3, buf, DIM);
-            line(xx, roll_ruler.y + 12, xx, roll_ruler.y + roll_ruler.h, DIM);
-        }
-    }
-    long sf = snap_frames();                    /* finer snap lines inside a beat */
-    if (sf && sf < beat_frames() && sf / (double)SR * pps >= 8) {
-        long f0 = (long)(view_start * SR) / sf * sf;
-        for (long f = f0; frame_to_x(f) < W; f += sf)
-            if (f % beat_frames() && frame_to_x(f) >= L.tl_x)
-                line((int)frame_to_x(f), roll_grid.y, (int)frame_to_x(f), roll_grid.y + roll_grid.h, alpha(LINE, 70));
-    }
+    grid_walk(L.tl_x, W, snap_beats() > 0 ? snap_beats() : 0, roll_grid_fn, NULL);   /* bars, beats, the snap grid */
     int cx0 = (int)frame_to_x(c->start), cx1 = (int)frame_to_x(c->start + c->length);   /* outside the clip: dimmed */
     if (cx0 > L.tl_x) fill((SDL_Rect){L.tl_x, roll_grid.y, cx0 - L.tl_x, roll_grid.h}, alpha(DARK, 110));
     if (cx1 < W) fill((SDL_Rect){cx1, roll_grid.y, W - cx1, roll_grid.h}, alpha(DARK, 110));
@@ -6522,7 +7289,7 @@ static void track_headers(void)
         SDL_Rect name_r = {L.left + 4, y, L.head - 92, L.lane_h - 16};
         if (drag.kind == D_NONE && hit(name_r) && lpress) {      /* pick it for the Mixer pane */
             sel_track = t;
-            if (mixer_open) mixer_sub = 1;
+            if (mixer_open) mixer_sub = 2;
             lpress = 0;
         }
         SDL_Rect m = {L.left + L.head - 58, by, 22, bh}, s = {L.left + L.head - 32, by, 22, bh};
@@ -6615,25 +7382,31 @@ static void timeline(void)
         if (P.loop) fill((SDL_Rect){x0, area.y, x1 - x0, area.h}, alpha(ACCENT, 14));
     }
 
-    /* beat grid and bar numbers */
-    double spb = 60.0 / P.bpm, beat_px = spb * pps;
-    long step = 1;
-    while (beat_px * step < 9) step *= 2;
-    long label_every = 1;
-    while (4 * beat_px * label_every < 34) label_every *= 2;
-    long b = (long)floor(view_start / spb);
-    b -= b % step;
-    for (;; b += step) {
-        double xd = L.tl_x + (b * spb - view_start) * pps;
-        if (xd > W) break;
-        if (xd < L.tl_x) continue;
-        int x = (int)xd, bar = b % 4 == 0;
-        line(x, area.y, x, area.y + area.h, bar ? LINE : tone(LINE, 0.62f));
-        line(x, L.top + 24 - (bar ? 8 : 4), x, L.top + 24, DIM);
-        if (bar && (b / 4) % label_every == 0) {
-            char buf[24];
-            snprintf(buf, sizeof buf, "%ld", b / 4 + 1);
-            text(x + 4, L.top + 3, buf, DIM);
+    /* beat grid and bar numbers, by the tempo map */
+    TlGrid tg = {area};
+    grid_walk(L.tl_x, W, 0, tl_grid_fn, &tg);
+    for (int i = 0; i < P.nchanges; i++) {       /* tempo / time signature changes: a flag each */
+        const MeterChange *mc = &P.changes[i];
+        int x = (int)frame_to_x(meter_bar_frame(&P, mc->bar));
+        if (x < L.tl_x - 80 || x > W) continue;
+        char lab[32], num[12];
+        snprintf(num, sizeof num, "%d", mc->bar + 1);
+        snprintf(lab, sizeof lab, "%.0f %d/%d", mc->bpm, mc->num, mc->den);
+        SDL_Rect f = {x + 8 + text_w(num), L.top + 2, text_w(lab) + 10, font_h + 2};
+        change_flag[i] = f;
+        int hov = hit(f) && drag.kind == D_NONE;
+        fill(f, hov ? ACCENT : alpha(ACCENT, 170));
+        text(f.x + 5, f.y + 1, lab, DARK);
+        line(x, L.top + 2, x, L.top + 24, ACCENT);
+        if (hov && lpress) {                     /* to it: BPM and the box edit it */
+            lpress = 0;
+            playhead_to(meter_bar_frame(&P, mc->bar));
+            status("Bar %d: %.0f BPM, %d/%d. BPM and the time signature box edit it; right-click the flag removes it",
+                   mc->bar + 1, mc->bpm, mc->num, mc->den);
+        } else if (hov && rpress) {
+            rpress = 0;
+            change_remove(i);
+            break;
         }
     }
     time_scale((SDL_Rect){L.tl_x, L.top + 24, L.tl_w, L.ruler - 24});
@@ -6922,17 +7695,16 @@ static void status_bar(void)
     line(0, y, W, y, LINE);
     int bw = 30, gap = 3, n = 8, tw = n * bw + (n - 1) * gap, tx = (W - tw) / 2, by = y + 2, bh = L.status - 4;
     transport_rect = (SDL_Rect){tx, by, tw, bh};
-    long bar = 4 * beat_frames();
     Col none = {0, 0, 0, 0};
     if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_START, 0, none)) playhead_to(0);
     tx += bw + gap;
-    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_BACK, 0, none)) playhead_step(bar, -1);
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_BACK, 0, none)) playhead_to(meter_step(P.playhead, -1, 0));
     tx += bw + gap;
     if (transport_button((SDL_Rect){tx, by, bw, bh}, P.playing ? TI_PAUSE : TI_PLAY, P.playing, none)) toggle_play();
     tx += bw + gap;
     if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_STOP, 0, none)) transport_stop();
     tx += bw + gap;
-    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_FWD, 0, none)) playhead_step(bar, 1);
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_FWD, 0, none)) playhead_to(meter_step(P.playhead, 1, 0));
     tx += bw + gap;
     if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_END, 0, none)) playhead_to(project_end(&P));
     tx += bw + gap;
@@ -7040,6 +7812,17 @@ static void update_drag(void)
         double d = ((mx - drag.sx) - (my - drag.sy)) * drag.nstep * ((mods & KMOD_SHIFT) ? 0.1 : 1.0);
         double v = drag.norig + d;
         *drag.num = v < drag.nmin ? drag.nmin : v > drag.nmax ? drag.nmax : v;
+        break;
+    }
+    case D_FADER: {                     /* a volume fader: track (or -1, the master) */
+        double p = drag.sample ? 1.0 - (double)(my - drag.sy) / (drag.b > 1 ? drag.b : 1)
+                               : (double)(mx - drag.sx) / (drag.a > 1 ? drag.a : 1);
+        p = p < 0 ? 0 : p > 1 ? 1 : p;
+        float v = (float)(1.5 * p * p);             /* the fader's law: a square root of the gain */
+        LOCK();
+        if (drag.track < 0) P.master = v;
+        else P.tracks[drag.track].volume = v;
+        UNLOCK();
         break;
     }
     case D_ED:                          /* a handle in the clip editor window */
@@ -7410,7 +8193,7 @@ static void key(SDL_Keysym k)
     case SDLK_LEFT:
     case SDLK_RIGHT:
         if (k.mod & KMOD_CTRL) {        /* Ctrl: the playhead by a bar, Ctrl+Shift by a beat */
-            playhead_step(k.mod & KMOD_SHIFT ? beat_frames() : 4 * beat_frames(), k.sym == SDLK_RIGHT ? 1 : -1);
+            playhead_to(meter_step(P.playhead, k.sym == SDLK_RIGHT ? 1 : -1, (k.mod & KMOD_SHIFT) != 0));
             break;
         }
         if (k.mod & KMOD_ALT) {         /* Alt: to the next/previous clip edge */
@@ -7478,7 +8261,7 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
     if (P.playing && countin_left > 0) {        /* the count-in: clicks only, the song waits */
         int n = countin_left < frames ? (int)countin_left : frames;
         mixer_run(MX, &P, P.playhead, 0, out, n, -1, 1);
-        metronome_mix(out, countin_total - countin_left, n, 1);
+        metronome_mix_ex(out, countin_total - countin_left, n, 1, 1);
         countin_left -= n;
         done = n;
     }
@@ -7513,8 +8296,9 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
             out[2 * i + 1] += scratch[2 * scratch_pos + 1];
         }
     }
-    for (int i = 0; i < 2 * frames; i++)
-        out[i] = soft_clip(out[i] * P.master);
+    for (int i = 0; i < 2 * frames; i++) out[i] *= P.master;
+    master_dynamics(MX, &P, out, frames);         /* the master's compressor and limiter */
+    for (int i = 0; i < 2 * frames; i++) out[i] = soft_clip(out[i]);
     for (int i = 0; i < frames; i++) {          /* for the meters and the visualizer */
         vis_ring[2 * vis_pos] = out[2 * i];
         vis_ring[2 * vis_pos + 1] = out[2 * i + 1];
@@ -8595,7 +9379,7 @@ static int selftest(void)
     /* the example songs open, sound right, and open as untitled copies */
     {
         examples_scan();
-        check(nexamples == 3, "the three example songs are found next to the program");
+        check(nexamples == 6, "the six example songs are found next to the program");
         int good = 0;
         for (int i = 0; i < nexamples; i++) {
             Project *q = malloc(sizeof *q);
@@ -8619,7 +9403,10 @@ static int selftest(void)
         }
         check(good == nexamples && good > 0, "each example opens, runs about a minute and is playing sound mid-song");
         if (nexamples) {
-            snprintf(act_path, sizeof act_path, "%s", example_path[0]);
+            int pick = 0;                       /* the one the tests after this were written against */
+            for (int i = 0; i < nexamples; i++)
+                if (strstr(example_title[i], "Experimental")) pick = i;
+            snprintf(act_path, sizeof act_path, "%s", example_path[pick]);
             run_action(ACT_OPEN_EXAMPLE);
             check(proj_path[0] == 0 && !is_dirty() && P.nclips > 100, "an example opens as an untitled copy, nothing to save yet");
         }
@@ -9769,6 +10556,463 @@ static int selftest(void)
         make_demo();
     }
 
+
+    /* ---- MIDI keys record notes into a note clip; quantize and humanize */
+    {
+        new_project();
+        P.bpm = 120;
+        binds_default();
+        int c4 = 60;
+        P.inst_sample = chord_sample(&c4, 1, "C4", 4);
+        P.inst_root = 60;
+        frame();
+        history_check();
+        long beat = beat_frames(), bar = 4 * beat;
+        int was_paused = !dev || SDL_GetAudioDeviceStatus(dev) == SDL_AUDIO_PAUSED;
+        if (dev) SDL_PauseAudioDevice(dev, 1);  /* the playhead moves only when the test moves it */
+        for (int pass = 0; pass < 2; pass++) {   /* quantized, then as played */
+            rec_quantize = pass == 0;
+            int nc = P.nclips, nn = P.nnotes, u0 = nundo;
+            pads_rec = 1;
+            LOCK();
+            P.playing = 1;
+            P.loop = 0;
+            P.playhead = 2 * bar + beat + SR / 50;   /* 20 ms late */
+            UNLOCK();
+            frame();
+            input_event(SRC_MIDI, 64, 100, 1, 0);
+            frame();
+            LOCK();
+            P.playhead += beat / 2;
+            UNLOCK();
+            input_event(SRC_MIDI, 64, 0, 0, 0);
+            frame();
+            LOCK();
+            P.playhead = 2 * bar + 2 * beat - SR / 100;   /* 10 ms early */
+            UNLOCK();
+            input_event(SRC_MIDI, 67, 50, 1, 0);
+            frame();
+            LOCK();
+            P.playing = 0;                          /* stopped while 67 is still held */
+            UNLOCK();
+            pads_rec = 0;
+            frame();
+            int c = nc < P.nclips ? nc : -1, a = -1, b = -1;
+            for (int i = nn; i < P.nnotes; i++) {
+                if (P.notes[i].note == 64) a = i;
+                if (P.notes[i].note == 67) b = i;
+            }
+            if (pass == 0) {
+                check(c >= 0 && P.clips[c].pattern > 0 && P.clips[c].start == 2 * bar && P.nnotes == nn + 2 && a >= 0 &&
+                          b >= 0 && P.notes[a].start == beat && P.notes[b].start == 2 * beat &&
+                          fabs(P.notes[a].vel - 100 / 127.0) < 1e-3 && labs(P.notes[a].length - beat / 2) < SR / 100 &&
+                          P.notes[b].length > 0,
+                      "MIDI keys record notes into a note clip, quantized to the grid, with their velocities");
+                check(nundo == u0 + 1 && P.clips[c].sample == sample_base(&P, P.inst_sample),
+                      "the take is one undo step, and the clip plays the instrument");
+                undo_redo(0);
+                check(P.nclips == nc && P.nnotes == nn, "undo takes the recorded notes away");
+            } else {
+                check(c >= 0 && a >= 0 && P.notes[a].start == beat + SR / 50 && b >= 0 && P.notes[b].start == 2 * beat - SR / 100,
+                      "with quantize off, notes keep the timing they were played with");
+            }
+            frame();
+            history_check();
+        }
+        if (dev && !was_paused) SDL_PauseAudioDevice(dev, 0);
+        rec_quantize = 1;
+        int pat = pattern_new_id(&P);            /* humanize: small, varied nudges */
+        for (int k = 0; k < 32; k++) note_add(pat, 60, k * beat, beat / 2, 0.8f);
+        Note before[32];
+        int first = P.nnotes - 32;
+        memcpy(before, &P.notes[first], sizeof before);
+        notes_humanize(pat, NULL, 12);
+        int moved = 0, within = 1, vel = 0;
+        for (int k = 0; k < 32; k++) {
+            long d = P.notes[first + k].start - before[k].start;
+            moved += d != 0;
+            within &= labs(d) <= (long)(0.012 * SR) + 1 && fabsf(P.notes[first + k].vel - 0.8f) <= 0.8f * 0.12f + 1e-4f;
+            vel += P.notes[first + k].vel != 0.8f;
+        }
+        check(moved > 20 && vel > 20 && within, "Humanize nudges timing (up to 12 ms) and velocity (up to 12%)");
+        int q = notes_quantize(pat, 0, NULL, 1.0, 1.0), on = 0;
+        for (int k = 0; k < 32; k++) on += P.notes[first + k].start == k * beat;
+        check(q == 32 && on == 32, "Quantize puts them back on the grid");
+        new_project();
+        make_demo();
+    }
+
+
+    /* ---- MIDI files */
+    {
+        static const unsigned char smf[] = {      /* type 0, 96 ticks a beat: two channels in one track */
+            'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1, 0, 96,
+            'M', 'T', 'r', 'k', 0, 0, 0, 44,
+            0x00, 0xFF, 0x51, 0x03, 0x09, 0x27, 0xC0,  /* 600000 us a beat: 100 BPM */
+            0x00, 0xFF, 0x58, 0x04, 3, 2, 24, 8,       /* 3/4 */
+            0x00, 0x90, 60, 100,                       /* C4 on */
+            0x60, 64, 90,                              /* a beat later, E4 on (running status) */
+            0x00, 60, 0,                               /* C4 off (velocity 0) */
+            0x00, 0x99, 36, 120,                       /* a kick on channel 10 */
+            0x30, 0x89, 36, 0,                         /* half a beat later, its off */
+            0x30, 0x80, 64, 0,                         /* E4 off */
+            0x00, 0xFF, 0x2F, 0x00};
+        char mpath[1100];
+        const char *tmpd = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(mpath, sizeof mpath, "%s/tinydaw-selftest-%u.mid", tmpd, (unsigned)SDL_GetTicks());
+        FILE *mf = fopen(mpath, "wb");
+        if (mf) {
+            fwrite(smf, 1, sizeof smf, mf);
+            fclose(mf);
+        }
+        static MfFile rf;
+        char err[300];
+        int ok = mf_read(mpath, &rf, err, sizeof err) == 0;
+        const MfTrack *mel = NULL, *drum = NULL;
+        for (int k = 0; ok && k < rf.ntracks; k++) {
+            if (rf.tracks[k].channel == 0) mel = &rf.tracks[k];
+            if (rf.tracks[k].channel == 9) drum = &rf.tracks[k];
+        }
+        check(ok && fabs(rf.bpm - 100) < 1e-6 && rf.num == 3 && rf.den == 4 && rf.ntracks == 2 && mel && mel->n == 2 &&
+                  drum && drum->n == 1 && fabs(drum->notes[0].start - 1) < 1e-9 && fabs(drum->notes[0].len - 0.5) < 1e-9,
+              "a MIDI file is read: tempo, time signature, running status, and each channel as its own part");
+        int c4 = -1, e4 = -1;
+        for (int i = 0; mel && i < mel->n; i++) {
+            if (mel->notes[i].note == 60) c4 = i;
+            if (mel->notes[i].note == 64) e4 = i;
+        }
+        check(c4 >= 0 && e4 >= 0 && fabs(mel->notes[c4].len - 1) < 1e-9 && mel->notes[c4].vel == 100 &&
+                  fabs(mel->notes[e4].start - 1) < 1e-9 && fabs(mel->notes[e4].len - 1) < 1e-9,
+              "note-on with velocity 0 ends a note, and notes keep their timing and velocity");
+        mf_free(&rf);
+
+        new_project();                            /* into an empty song: it takes the file's tempo */
+        LOCK();
+        P.playhead = 0;
+        UNLOCK();
+        int nc = P.nclips;
+        midi_import(mpath);
+        long beat = beat_frames();
+        int pc = 0, kick = 0;
+        for (int c = nc; c < P.nclips; c++)
+            if (P.clips[c].pattern > 0) pc++;
+        for (int i = 0; i < P.nnotes; i++) kick += P.notes[i].note == 36 && P.notes[i].start == beat && P.notes[i].length == beat / 2;
+        check(fabs(P.bpm - 100) < 1e-6 && pc == 2 && kick == 1 && P.clips[nc].track != P.clips[nc + 1].track,
+              "importing makes a note clip per part, on its own track, at the file's tempo");
+        char opath[1100];
+        snprintf(opath, sizeof opath, "%s/tinydaw-selftest-out-%u.mid", tmpd, (unsigned)SDL_GetTicks());
+        midi_export(opath);                       /* and back out: the same notes */
+        ok = mf_read(opath, &rf, err, sizeof err) == 0;
+        int same = ok && rf.ntracks == 2 && fabs(rf.bpm - 100) < 1e-3;
+        for (int k = 0; same && k < rf.ntracks; k++)
+            for (int i = 0; i < rf.tracks[k].n; i++) {
+                const MfNote *n = &rf.tracks[k].notes[i];
+                int found = 0;
+                for (int j = 0; j < P.nnotes && !found; j++)
+                    found = P.notes[j].note == n->note && labs(P.notes[j].start - (long)llround(n->start * beat)) <= SR / 200 &&
+                            abs((int)lroundf(P.notes[j].vel * 127) - n->vel) <= 1;
+                same &= found;
+            }
+        check(same, "exporting MIDI writes the note clips back out, note for note");
+        mf_free(&rf);
+        remove(mpath);
+        remove(opath);
+        new_project();
+        make_demo();
+    }
+
+
+    /* ---- time signatures and tempo changes */
+    {
+        new_project();
+        P.bpm = 120;                             /* 4/4 at 120: a bar is 2 s */
+        P.changes[0] = (MeterChange){2, 60, 3, 4};   /* from bar 3: 3/4 at 60, a bar is 3 s */
+        P.changes[1] = (MeterChange){4, 120, 6, 8};  /* from bar 5: 6/8 at 120, a bar is 1.5 s */
+        P.nchanges = 2;
+        long s1 = SR;
+        check(meter_bar_frame(&P, 2) == 4 * s1 && meter_bar_frame(&P, 3) == 7 * s1 && meter_bar_frame(&P, 4) == 10 * s1 &&
+                  meter_bar_frame(&P, 5) == 11 * s1 + s1 / 2 && fabs(meter_bars(&P, 7 * s1) - 3) < 1e-9 &&
+                  fabs(meter_beats(&P, 7 * s1) - 11) < 1e-9 && meter_beats_frame(&P, 11) == 7 * s1,
+              "the tempo map turns bars, beats and frames into each other across changes");
+        int num, den, bar;
+        long bs, bl;
+        meter_at(&P, 8 * s1, NULL, &num, &den, &bar, &bs, &bl);
+        check(num == 3 && den == 4 && bar == 3 && bs == 7 * s1 && bl == 3 * s1 && meter_bpm_at(&P, 8 * s1) == 60,
+              "what's in force at a moment: its time signature, bar, and tempo");
+        snap_i = 1;                              /* snapping to bars, and to quarters from each bar line */
+        long sb = snap(8 * s1 + s1 / 3);
+        snap_i = 3;
+        long sq = snap(10 * s1 + s1 / 4 + 10);   /* 6/8 at 120: quarters are 0.5 s from 10 s */
+        check(sb == 7 * s1 && sq == 10 * s1 + s1 / 2, "snapping follows the bars and beats of each section");
+        int kinds[16], nk = 0;
+        long pos = 4 * s1;                       /* the clicks in a 3/4 bar: an accent and two beats */
+        MET.sub = 1;
+        MET.accent = 1;
+        for (int i = 0; i < 4; i++) {
+            int kd;
+            long nx = next_click(pos, 0, &kd);
+            kinds[nk++] = kd;
+            if (i == 0 && nx != 4 * s1) kinds[0] = 9;
+            pos = nx + 1;
+        }
+        check(kinds[0] == 0 && kinds[1] == 1 && kinds[2] == 1 && kinds[3] == 0, "the metronome counts three in a 3/4 bar");
+        pos = 10 * s1;
+        nk = 0;
+        for (int i = 0; i < 7; i++) {
+            int kd;
+            long nx = next_click(pos, 0, &kd);
+            kinds[nk++] = kd;
+            pos = nx + 1;
+        }
+        check(kinds[0] == 0 && kinds[5] == 1 && kinds[6] == 0, "and six eighths in a 6/8 bar");
+        LOCK();
+        P.playhead = 6 * s1;
+        UNLOCK();
+        long st[3];
+        for (int i = 0; i < 3; i++) {
+            key((SDL_Keysym){.sym = SDLK_RIGHT, .mod = KMOD_CTRL});
+            st[i] = P.playhead;
+        }
+        check(st[0] == 7 * s1 && st[1] == 10 * s1 && st[2] == 11 * s1 + s1 / 2, "Ctrl+Right steps bar to bar, whatever their length");
+        frame();
+        history_check();
+        LOCK();
+        P.playhead = 13 * s1;                    /* bar 7 (in 6/8): a new change there */
+        UNLOCK();
+        int k = change_add_here();
+        check(k == 2 && P.nchanges == 3 && P.changes[2].bar == 6 && P.changes[2].num == 6 && P.changes[2].bpm == 120,
+              "a change added at the playhead starts out as what's in force there");
+        frame();
+        history_check();
+        undo_redo(0);
+        check(P.nchanges == 2, "and undo takes it out");
+        char msg[1200];
+        P.ts_num = 3;
+        P.ts_den = 4;
+        int saved = project_save(&P, tpath, msg, sizeof msg) == 0;
+        Project *U = malloc(sizeof *U);
+        int loaded = saved && project_load(U, tpath, msg, sizeof msg) == 0;
+        check(loaded && U->ts_num == 3 && U->ts_den == 4 && U->nchanges == 2 && U->changes[1].bar == 4 &&
+                  U->changes[1].num == 6 && U->changes[1].den == 8 && U->changes[0].bpm == 60,
+              "time signatures and tempo changes are saved with the project");
+        if (loaded) project_free(U);
+        free(U);
+        remove(tpath);
+        P.ts_num = P.ts_den = 4;
+        int pat = pattern_new_id(&P);            /* and in MIDI files, both ways */
+        int c4 = 60, sm = chord_sample(&c4, 1, "C4", 4);
+        int cc = clip_add(sm, 0, 0, 0, meter_bar_frame(&P, 6));
+        P.clips[cc].pattern = pat;
+        note_add(pat, 60, 0, s1 / 2, 0.8f);
+        note_add(pat, 64, meter_bar_frame(&P, 3), s1 / 2, 0.8f);   /* in the 3/4 part */
+        note_add(pat, 67, meter_bar_frame(&P, 5), s1 / 4, 0.8f);   /* in the 6/8 part */
+        const char *tmpd = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        char mp[1100];
+        snprintf(mp, sizeof mp, "%s/tinydaw-selftest-meter-%u.mid", tmpd, (unsigned)SDL_GetTicks());
+        midi_export(mp);
+        new_project();
+        P.playhead = 0;
+        midi_import(mp);
+        int g4 = -1, e4 = -1;
+        for (int i = 0; i < P.nnotes; i++) {
+            if (P.notes[i].note == 67) g4 = i;
+            if (P.notes[i].note == 64) e4 = i;
+        }
+        check(P.nchanges == 2 && P.changes[0].bar == 2 && P.changes[0].num == 3 && P.changes[1].num == 6 &&
+                  P.changes[1].den == 8 && e4 >= 0 && labs(P.notes[e4].start - 7 * s1) < SR / 200 && g4 >= 0 &&
+                  labs(P.notes[g4].start - (11 * s1 + s1 / 2)) < SR / 200,
+              "a MIDI file carries the tempo map out and back in, and notes land where they were");
+        remove(mp);
+        snap_i = 4;
+        new_project();
+        make_demo();
+    }
+
+
+    /* ---- loudness, the master compressor and limiter, loudness on export */
+    {
+        long n = 10L * SR;
+        float *tone = malloc((size_t)n * 2 * sizeof(float));
+        for (long i = 0; i < n; i++) tone[2 * i] = tone[2 * i + 1] = (float)(0.1 * sin(2 * 3.14159265358979 * 997 * i / (double)SR));
+        double l1 = loudness_of(tone, n);
+        check(fabs(l1 - (-20)) < 0.2, "a 997 Hz tone at -20 dBFS measures -20 LUFS");
+        for (long i = n / 2; i < n; i++) tone[2 * i] = tone[2 * i + 1] = 0;   /* half of it silent */
+        double l2 = loudness_of(tone, n);
+        for (long i = 0; i < n; i++) tone[2 * i] = tone[2 * i + 1] = (float)(0.1 * sin(2 * 3.14159265358979 * 20 * i / (double)SR));
+        double l3 = loudness_of(tone, n);
+        check(fabs(l2 - (-20)) < 0.2 && l3 < -30, "silence doesn't pull the song's loudness down, and deep rumble counts for less");
+
+        Project *T = malloc(sizeof *T);          /* the compressor and limiter, on a loud tone */
+        project_init(T);
+        Mixer *mm = mixer_new();
+        for (long i = 0; i < n; i++) tone[2 * i] = tone[2 * i + 1] = (float)(1.8 * sin(2 * 3.14159265358979 * 220 * i / (double)SR));
+        T->fx.limit_on = 1;
+        T->fx.limit_ceiling = -1;
+        long blk = 512;
+        for (long pos = 0; pos < n; pos += blk) master_dynamics(mm, T, tone + 2 * pos, (int)(n - pos < blk ? n - pos : blk));
+        float pk = 0;
+        for (long i = 0; i < 2 * n; i++) pk = fmaxf(pk, fabsf(tone[i]));
+        check(pk <= powf(10, -1 / 20.0f) + 1e-5f && pk > 0.85f, "the limiter never lets the sound past its ceiling");
+        mixer_free(mm);
+        mm = mixer_new();
+        T->fx.limit_on = 0;
+        T->fx.comp_on = 1;
+        T->fx.comp_thresh = -18;
+        T->fx.comp_ratio = 4;
+        T->fx.comp_makeup = 0;
+        for (long i = 0; i < n; i++) tone[2 * i] = tone[2 * i + 1] = (float)(0.5 * sin(2 * 3.14159265358979 * 220 * i / (double)SR));
+        for (long pos = 0; pos < n; pos += blk) master_dynamics(mm, T, tone + 2 * pos, (int)(n - pos < blk ? n - pos : blk));
+        pk = 0;
+        for (long i = n / 2; i < n; i++) pk = fmaxf(pk, fabsf(tone[2 * i]));
+        double want = 20 * log10(0.5) - (20 * log10(0.5) + 18) * 0.75;   /* -6 dB in, 12 dB over: 9 dB off */
+        check(fabs(20 * log10(pk) - want) < 1.0, "the compressor turns what's over the threshold down by its ratio");
+        mixer_free(mm);
+        project_free(T);
+        free(T);
+        free(tone);
+
+        new_project();                            /* a whole export, to -14 LUFS */
+        make_demo();
+        char opath[1100];
+        const char *tmpd = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(opath, sizeof opath, "%s/tinydaw-selftest-loud-%u", tmpd, (unsigned)SDL_GetTicks());
+        ExportOptions eo;
+        export_defaults(&eo);
+        eo.format = EXP_WAV;
+        eo.bits = 32;
+        eo.loudness = 1;
+        char msg[1500];
+        int ok = project_export(&P, &eo, opath, msg, sizeof msg) == 0;
+        char wav[1200];
+        snprintf(wav, sizeof wav, "%s.wav", opath);
+        Project *U = malloc(sizeof *U);
+        project_init(U);
+        char err[200];
+        int si = ok ? sample_import(U, wav, err, sizeof err) : -1;
+        double lu = si >= 0 ? loudness_of(U->samples[si].data, U->samples[si].frames) : 0;
+        float upk = 0;
+        for (long i = 0; si >= 0 && i < 2 * U->samples[si].frames; i++) upk = fmaxf(upk, fabsf(U->samples[si].data[i]));
+        check(ok && si >= 0 && fabs(lu - (-14)) < 0.6 && upk <= powf(10, -1 / 20.0f) + 1e-4f,
+              "exporting at -14 LUFS comes out at -14 LUFS, with peaks under -1 dB");
+        project_free(U);
+        free(U);
+        remove(wav);
+    }
+
+
+    /* ---- mixing: faders in dB, per-track compressor and width, the console window */
+    {
+        new_project();
+        make_demo();
+        show_panel(RI_MIXER);
+        mixer_sub = 0;
+        frame();
+        history_check();
+        SDL_Rect r = lv_fader[1];
+        int ux = r.x + (int)(r.w * sqrtf(1 / 1.5f));    /* drag it to the 0 dB mark */
+        sim_drag(r.x + 5, r.y + r.h / 2, ux, r.y + r.h / 2, 0);
+        check(fabsf(20 * log10f(P.tracks[1].volume)) < 0.3f, "dragging a fader to its 0 dB mark sets 0 dB");
+        frame();
+        history_check();
+        undo_redo(0);
+        check(fabsf(P.tracks[1].volume - 0.8f) < 1e-6f, "a fader move undoes");
+        frame();
+        r = lv_fader[2];
+        ldouble = 1;
+        sim(r.x + 10, r.y + r.h / 2, 1, 1, 0, 0);
+        ldouble = 0;
+        float v0 = P.tracks[2].volume;
+        mx = r.x + 10;
+        my = r.y + r.h / 2;
+        wheel_y = 2;
+        lpress = lrel = rpress = 0;
+        frame();
+        check(v0 == 1.0f && fabsf(20 * log10f(P.tracks[2].volume) - 1.0f) < 0.01f,
+              "double-click puts a fader at 0 dB, and each wheel notch is half a dB");
+        auto_add(3, AUTO_VOLUME, 0, 0.2f);       /* an automated track's fader won't move */
+        float a0 = P.tracks[3].volume;
+        frame();
+        r = lv_fader[3];
+        sim_drag(r.x + 5, r.y + r.h / 2, r.x + r.w - 5, r.y + r.h / 2, 0);
+        check(P.tracks[3].volume == a0, "a fader whose volume is automated stays where the automation has it");
+
+        Project *T = malloc(sizeof *T);          /* the track compressor and width, in rendered sound */
+        project_init(T);
+        long n = SR;
+        float *d = malloc((size_t)n * 2 * sizeof(float));
+        for (long i = 0; i < n; i++) {
+            d[2 * i] = (float)(0.7 * sin(2 * 3.14159265358979 * 220 * i / SR));
+            d[2 * i + 1] = (float)(0.7 * sin(2 * 3.14159265358979 * 330 * i / SR));
+        }
+        int sm = sample_add(T, "two tones", d, n);
+        T->clips[0] = (Clip){sm, 0, 0, 0, n, 0, 0, 0, 0, 0};
+        T->nclips = 1;
+        T->tracks[0].volume = 1;
+        float *b0 = test_render(T, 0, n, 0);
+        T->tracks[0].comp_on = 1;
+        T->tracks[0].comp_thresh = -20;
+        T->tracks[0].comp_ratio = 4;
+        float *b1 = test_render(T, 0, n, 0);
+        T->tracks[0].comp_on = 0;
+        T->tracks[0].width = 0;
+        float *b2 = test_render(T, 0, n, 0);
+        double r0 = test_rms(b0, n / 2, n, 2), r1 = test_rms(b1, n / 2, n, 2), side = 0;
+        for (long i = n / 2; i < n; i++) side += fabs(b2[2 * i] - b2[2 * i + 1]);
+        check(r1 < r0 * 0.5, "a track's compressor turns a loud track down");
+        check(side / (n / 2) < 1e-4, "width 0 makes a track mono");
+        free(b0);
+        free(b1);
+        free(b2);
+        T->tracks[0].width = 1.5f;
+        T->tracks[0].comp_on = 1;
+        char msg[1200];
+        Project *U = malloc(sizeof *U);
+        int ok = project_save(T, tpath, msg, sizeof msg) == 0 && project_load(U, tpath, msg, sizeof msg) == 0;
+        check(ok && U->tracks[0].width == 1.5f && U->tracks[0].comp_on && U->tracks[0].comp_thresh == -20 &&
+                  U->tracks[0].comp_ratio == 4,
+              "width and compressor settings are saved with the project");
+        if (ok) project_free(U);
+        free(U);
+        project_free(T);
+        free(T);
+        remove(tpath);
+
+        frame();                                 /* the console, in its own window */
+        sim(lv_fader[0].x, lv_fader[0].y - 80, 0, 0, 0, 0);
+        mixwin_open();
+        check(pops[POP_MIXER].win != NULL, "the mixing console opens in its own window");
+        if (pops[POP_MIXER].win) {
+            PopIn *in = &pops[POP_MIXER].in;
+            in->mx = in->my = -100;
+            mixwin_frame();
+            SDL_Rect f = cs_fader[0];
+            in->mx = f.x + f.w / 2;              /* drag track 1's fader to the bottom: silence */
+            in->my = f.y + f.h / 2;
+            in->lpress = in->ldown = 1;
+            mixwin_frame();
+            in->my = f.y + f.h + 20;
+            mixwin_frame();
+            in->lrel = 1;
+            in->ldown = 0;
+            mixwin_frame();
+            check(P.tracks[0].volume == 0 && drag.kind == D_NONE, "a console fader drags, in the console window");
+            SDL_Rect m = cs_mute[1];
+            in->mx = m.x + 5;
+            in->my = m.y + 5;
+            in->lpress = 1;
+            in->ldown = 1;
+            mixwin_frame();
+            in->lrel = 1;
+            in->ldown = 0;
+            mixwin_frame();
+            check(P.tracks[1].mute == 1, "and its M mutes the track");
+            pop_close(POP_MIXER);
+        }
+        mixer_sub = 0;
+        new_project();
+        make_demo();
+    }
+
     /* ---- Export: choosing the folder and file name */
     {
         char keep_proj[1024];
@@ -10002,7 +11246,8 @@ static long roll_insert_at(void)
 static int roll_put_chords(const int (*notes)[6], const int *counts, int nch, double beats, const char *what)
 {
     if (roll_clip < 0) return 0;
-    long at = roll_insert_at(), len = (long)llround(beats * beat_frames()), added = 0;
+    long at = roll_insert_at(), added = 0;
+    long len = (long)llround(beats * beat_at(P.clips[roll_clip].start + at - P.clips[roll_clip].offset));
     memset(nsel, 0, sizeof nsel);
     for (int k = 0; k < nch; k++)
         for (int i = 0; i < counts[k]; i++) {
@@ -10025,9 +11270,8 @@ static int roll_put_chords(const int (*notes)[6], const int *counts, int nch, do
     LOCK();
     P.playhead = c->start + (at + nch * len - c->offset);   /* the next one goes after these */
     UNLOCK();
-    long bar = 4 * beat_frames();
-    status("Put %s in the roll at bar %ld (%ld notes): arrows move them, Ctrl+Z takes them out", what,
-           (c->start + at - c->offset) / bar + 1, added);
+    status("Put %s in the roll at bar %d (%ld notes): arrows move them, Ctrl+Z takes them out", what,
+           (int)floor(meter_bars(&P, c->start + at - c->offset) + 1e-9) + 1, added);
     return (int)added;
 }
 
@@ -10106,8 +11350,7 @@ static void play_progression(const Progression *pr)
 
 static void place_progression(const Progression *pr)
 {
-    long bar = 4 * beat_frames();
-    long start = (long)llround((double)P.playhead / bar) * bar;
+    double b0 = round(meter_bars(&P, P.playhead));   /* one chord a bar, from the bar nearest the playhead */
     int flats = prog_flats(pr), placed = 0;
     for (int i = 0; i < pr->n; i++) {
         int notes[6], n = chord_notes((th_root + pr->root[i]) % 12, pr->type[i], 48, notes);
@@ -10115,11 +11358,12 @@ static void place_progression(const Progression *pr)
         chord_name((th_root + pr->root[i]) % 12, pr->type[i], flats, name, sizeof name);
         int s = chord_sample(notes, n, name, 4);
         if (s < 0) break;
+        long at = meter_bar_frame(&P, b0 + i), bar = meter_bar_frame(&P, b0 + i + 1) - at;
         long len = P.samples[s].frames < bar ? P.samples[s].frames : bar;
-        if (clip_add(s, th_track, start + i * bar, 0, len) >= 0) placed++;
+        if (clip_add(s, th_track, at, 0, len) >= 0) placed++;
     }
-    status("Placed %s in %s on track %d: %d bars from bar %ld", pr->numerals, pitch_name(th_root, flats),
-           th_track + 1, placed, start / bar + 1);
+    status("Placed %s in %s on track %d: %d bars from bar %.0f", pr->numerals, pitch_name(th_root, flats),
+           th_track + 1, placed, b0 + 1);
 }
 
 static int chord_button(SDL_Rect r, const char *top, const char *bottom)
@@ -11050,9 +12294,7 @@ static int tab_genres(int x, int y, int w)
     if (button((SDL_Rect){x, y, 140, 30}, buf, 0)) play_beat(gn_sel);
     if (button((SDL_Rect){x + 146, y, 120, 30}, "+ Library", 0)) add_beat_to_library(gn_sel);
     if (button((SDL_Rect){x + 272, y, w - 272, 30}, "Place on new row(s)", 0)) {
-        long bar = 4 * beat_frames();
-        long start = (long)llround((double)P.playhead / bar) * bar;
-        place_beat(gn_sel, start, -1);
+        place_beat(gn_sel, bar_round(P.playhead), -1);
     }
     y += 38;
     gn_handle = (SDL_Rect){x, y, w, 34};
@@ -11202,12 +12444,16 @@ static void export_dialog(void)
     if (button((SDL_Rect){ox + 136, y, 200, bh}, "Stems (file per track)", EXO.stems)) EXO.stems = 1;
     y += row;
 
-    ROW("Normalize");
-    static const char *norm_names[3] = {"Off", "-1 dB", "-0.1 dB"};
-    for (int i = 0; i < 3; i++)
-        if (button2((SDL_Rect){ox + i * 86, y, 80, bh}, norm_names[i], EXO.normalize == i && !EXO.stems, !EXO.stems))
-            EXO.normalize = i;
-    if (EXO.stems) text(ox + 270, y + (bh - font_h) / 2, "(mixes only: keeps stems in balance)", DIM);
+    ROW("Level");                                /* as mixed, peak-normalized, or to a loudness */
+    {
+        static const char *names[5] = {"As mixed", "Peak -1 dB", "Peak -0.1", "-14 LUFS", "-9 LUFS"};
+        int cur = EXO.loudness ? 2 + EXO.loudness : EXO.normalize, lw = (w - (ox - d.x) - 18 - 4 * 6) / 5;
+        for (int i = 0; i < 5; i++)
+            if (button2((SDL_Rect){ox + i * (lw + 6), y, lw, bh}, names[i], cur == i && !EXO.stems, !EXO.stems)) {
+                EXO.normalize = i <= 2 ? i : 0;
+                EXO.loudness = i >= 3 ? i - 2 : 0;
+            }
+    }
     y += row;
 
     ROW("Dither");
@@ -11240,9 +12486,10 @@ static void export_dialog(void)
     char depth[24];
     if (f->lossy) snprintf(depth, sizeof depth, "quality %.2f", EXO.quality);
     else snprintf(depth, sizeof depth, bits == 32 ? "32-bit float" : "%d-bit", bits);
-    snprintf(buf, sizeof buf, "%s  %g kHz  %s  %s  %.2f s%s", f->name, rate / 1000.0, depth,
+    snprintf(buf, sizeof buf, "%s  %g kHz  %s  %s  %.2f s%s%s", f->name, rate / 1000.0, depth,
              EXO.mono ? "mono" : "stereo", b > a ? (double)(b - a) / SR : 0.0,
-             rate != SR ? "  (resampled, best quality)" : "");
+             EXO.loudness && !EXO.stems ? (EXO.loudness == 1 ? "  at -14 LUFS (streaming)" : "  at -9 LUFS (loud)") : "",
+             rate != SR ? "  (resampled)" : "");
     text(lx, y, buf, HEAD);
     y += font_h + 6;
     export_make_base();
@@ -11294,16 +12541,102 @@ static void export_dialog(void)
  * size and mouse are swapped for the editor's. */
 
 
+static void pop_close(int k)
+{
+    Pop *pw = &pops[k];
+    if (!pw->win) return;
+    if (drag_pop == k) {
+        drag.kind = D_NONE;
+        drag_pop = -1;
+    }
+    text_forget(pw->ren);
+    SDL_DestroyRenderer(pw->ren);
+    SDL_DestroyWindow(pw->win);
+    pw->win = NULL;
+    pw->ren = NULL;
+}
+
+/* Opens pop-out k (or raises it): a resizable window with its own renderer. 0 when it can't. */
+static int pop_open(int k, const char *title, int w, int h, int minw, int minh)
+{
+    Pop *pw = &pops[k];
+    if (pw->win) {
+        SDL_SetWindowTitle(pw->win, title);
+        SDL_RaiseWindow(pw->win);
+        return 1;
+    }
+    pw->win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, SDL_WINDOW_RESIZABLE);
+    if (!pw->win) {
+        status("Couldn't open a window: %s", SDL_GetError());
+        return 0;
+    }
+    pw->ren = SDL_CreateRenderer(pw->win, -1, SDL_RENDERER_ACCELERATED);
+    if (!pw->ren) pw->ren = SDL_CreateRenderer(pw->win, -1, SDL_RENDERER_SOFTWARE);
+    if (!pw->ren) {
+        SDL_DestroyWindow(pw->win);
+        pw->win = NULL;
+        status("Couldn't open a window: %s", SDL_GetError());
+        return 0;
+    }
+    SDL_SetRenderDrawBlendMode(pw->ren, SDL_BLENDMODE_BLEND);
+    SDL_SetWindowMinimumSize(pw->win, minw, minh);
+    pw->id = SDL_GetWindowID(pw->win);
+    memset(&pw->in, 0, sizeof pw->in);
+    pw->in.mx = pw->in.my = -1000;
+    return 1;
+}
+
+/* A pop-out's pass: its renderer, size and mouse in place of the main window's while `draw` runs.
+ * Drags that start in it are followed and ended here. */
+static void pop_pass(int k, void (*draw)(void))
+{
+    Pop *pw = &pops[k];
+    if (!pw->win) return;
+    SDL_Renderer *m_ren = ren;
+    int mW = W, mH = H, smx = mx, smy = my, sld = ldown, slp = lpress, slr = lrel, srp = rpress, swx = wheel_x,
+        swy = wheel_y, sdb = ldouble;
+    ren = pw->ren;
+    SDL_GetWindowSize(pw->win, &W, &H);
+    mx = pw->in.mx;
+    my = pw->in.my;
+    ldown = pw->in.ldown;
+    lpress = pw->in.lpress;
+    lrel = pw->in.lrel;
+    rpress = pw->in.rpress;
+    wheel_x = pw->in.wheel_x;
+    wheel_y = pw->in.wheel_y;
+    ldouble = pw->in.ldouble;
+    int had = drag.kind != D_NONE;
+    if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
+    SDL_SetRenderDrawColor(ren, BG.r, BG.g, BG.b, 255);
+    SDL_RenderClear(ren);
+    draw();
+    if (pw->win) {
+        if (drag_pop == k && drag.kind != D_NONE && ldown) update_drag();
+        if (drag_pop == k && lrel && drag.kind != D_NONE) end_drag();
+        if (!had && drag.kind != D_NONE) drag_pop = k;
+        if (drag.kind == D_NONE && drag_pop == k) drag_pop = -1;
+        SDL_RenderPresent(ren);
+    }
+    ren = m_ren;
+    W = mW;
+    H = mH;
+    mx = smx;
+    my = smy;
+    ldown = sld;
+    lpress = slp;
+    lrel = slr;
+    rpress = srp;
+    wheel_x = swx;
+    wheel_y = swy;
+    ldouble = sdb;
+    pw->in.lpress = pw->in.lrel = pw->in.rpress = pw->in.wheel_x = pw->in.wheel_y = 0;
+}
+
 static void editor_close(void)
 {
     if (!ewin) return;
-    if (drag_in_editor) drag.kind = D_NONE;
-    drag_in_editor = 0;
-    text_forget(eren);
-    SDL_DestroyRenderer(eren);
-    SDL_DestroyWindow(ewin);
-    ewin = NULL;
-    eren = NULL;
+    pop_close(POP_EDITOR);
     ed_clip = -1;
 }
 
@@ -11326,29 +12659,7 @@ static void editor_open(int c)
     editor_view_clip();
     char title[160];
     snprintf(title, sizeof title, "%s - clip editor - tinydaw", P.samples[sample_base(&P, P.clips[c].sample)].name);
-    if (!ewin) {
-        ewin = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 840, 660, SDL_WINDOW_RESIZABLE);
-        if (!ewin) {
-            status("Couldn't open the editor window: %s", SDL_GetError());
-            return;
-        }
-        eren = SDL_CreateRenderer(ewin, -1, SDL_RENDERER_ACCELERATED);
-        if (!eren) eren = SDL_CreateRenderer(ewin, -1, SDL_RENDERER_SOFTWARE);
-        if (!eren) {
-            SDL_DestroyWindow(ewin);
-            ewin = NULL;
-            status("Couldn't open the editor window: %s", SDL_GetError());
-            return;
-        }
-        SDL_SetRenderDrawBlendMode(eren, SDL_BLENDMODE_BLEND);
-        SDL_SetWindowMinimumSize(ewin, 640, 560);
-        ewin_id = SDL_GetWindowID(ewin);
-        memset(&ein, 0, sizeof ein);
-        ein.mx = ein.my = -1000;
-    } else {
-        SDL_SetWindowTitle(ewin, title);
-        SDL_RaiseWindow(ewin);
-    }
+    if (!pop_open(POP_EDITOR, title, 840, 660, 640, 560)) return;
     status("Editing \"%s\" in its own window", P.samples[sample_base(&P, P.clips[c].sample)].name);
 }
 
@@ -11615,15 +12926,16 @@ static void editor_draw(void)
         break;
     }
     case 2: {
-        long bar = 4 * beat_frames(), n = (c->length + bar / 2) / bar;
+        double b0 = meter_bars(&P, c->start);
+        long n = lround(meter_bars(&P, c->start + c->length) - b0);
         if (n < 1) n = 1;
-        long len = n * bar;
+        long len = meter_bar_frame(&P, b0 + n) - c->start, full = len;
         if (len > s->frames - c->offset) len = s->frames - c->offset;
         LOCK();
         c->length = len;
         if (c->fade_in + c->fade_out > c->length) c->fade_in = c->fade_out = 0;
         UNLOCK();
-        status("Length: %ld bar%s%s", n, n == 1 ? "" : "s", len < n * bar ? " (as much as the sound has)" : "");
+        status("Length: %ld bar%s%s", n, n == 1 ? "" : "s", len < full ? " (as much as the sound has)" : "");
         break;
     }
     case 3:
@@ -11669,7 +12981,328 @@ static void editor_draw(void)
     text(x, y + font_h + 3, "Click the waveform to hear it from there. Ctrl+Z undoes, Esc closes.", DIM);
 }
 
-/* The editor's pass: its renderer, size and mouse in place of the main window's. */
+
+/* ---------------------------------------------------------------- mixing: faders, strips, console
+ *
+ * The same controls in two layouts: rows in the Mixer panel's Levels tab, and channel strips side by
+ * side in the pop-out console. Faders show dB; their travel is the square root of the gain, so 0 dB
+ * sits about four fifths up and the quiet end has room. Double-click puts a fader back to 0 dB. */
+
+static float *fader_target(int t) { return t < 0 ? &P.master : &P.tracks[t].volume; }
+
+static void db_text(float v, char *buf, size_t n)
+{
+    if (v < 0.0005f) snprintf(buf, n, "-inf");
+    else snprintf(buf, n, "%+.1f dB", 20 * log10f(v));
+}
+
+/* A fader for track t (-1: master), across `r` (or up it, when vertical). Returns its value. */
+static float fader(SDL_Rect r, int t, int vertical)
+{
+    float *v = fader_target(t);
+    int first, automated = t >= 0 && auto_lane(&P, t, AUTO_VOLUME, &first) > 0;
+    float shown = *v;
+    if (automated) {                            /* automation decides: show what it says now */
+        int has;
+        shown = auto_to_value(AUTO_VOLUME, auto_at(&P, t, AUTO_VOLUME, P.playhead, &has));
+    }
+    float p = sqrtf(shown / 1.5f);
+    p = p < 0 ? 0 : p > 1 ? 1 : p;
+    int active = drag.kind == D_FADER && drag.track == t, hov = hit(r);
+    fill(r, tone(PANEL, 0.72f));
+    Col col = automated ? ACCENT : t >= 0 ? TRACK_COL[t % MAX_TRACKS] : HEAD;
+    float unity = sqrtf(1 / 1.5f);              /* a mark at 0 dB */
+    if (vertical) {
+        int h = (int)(r.h * p);
+        fill((SDL_Rect){r.x + r.w / 2 - 2, r.y, 4, r.h}, tone(PANEL3, 0.9f));
+        fill((SDL_Rect){r.x + r.w / 2 - 2, r.y + r.h - h, 4, h}, col);
+        int uy = r.y + r.h - (int)(r.h * unity);
+        line(r.x, uy, r.x + r.w, uy, DIM);
+        SDL_Rect cap = {r.x + 2, r.y + r.h - h - 7, r.w - 4, 14};
+        fill(cap, active ? HEAD : hov ? tone(col, 1.25f) : col);
+        outline(cap, DARK);
+    } else {
+        int w = (int)(r.w * p);
+        fill((SDL_Rect){r.x, r.y + r.h / 2 - 2, r.w, 4}, tone(PANEL3, 0.9f));
+        fill((SDL_Rect){r.x, r.y + r.h / 2 - 2, w, 4}, col);
+        int ux = r.x + (int)(r.w * unity);
+        line(ux, r.y, ux, r.y + r.h, DIM);
+        SDL_Rect cap = {r.x + w - 6, r.y + 2, 12, r.h - 4};
+        fill(cap, active ? HEAD : hov ? tone(col, 1.25f) : col);
+        outline(cap, DARK);
+    }
+    if (drag.kind == D_NONE && hov) {
+        if (automated && (lpress || wheel_y)) {
+            status("This track's volume is automated: edit its lane (A on the track), or clear it to use the fader");
+            lpress = 0;
+            wheel_y = 0;
+        } else if (lpress && ldouble) {
+            lpress = 0;
+            LOCK();
+            *v = 1.0f;
+            UNLOCK();
+            status("%s back to 0 dB", t < 0 ? "Master" : P.tracks[t].name);
+        } else if (lpress) {
+            lpress = 0;
+            drag = (typeof(drag)){.kind = D_FADER, .track = t, .sample = vertical, .sx = r.x, .sy = r.y, .a = r.w, .b = r.h};
+            double q = vertical ? 1.0 - (double)(my - r.y) / r.h : (double)(mx - r.x) / r.w;
+            q = q < 0 ? 0 : q > 1 ? 1 : q;
+            LOCK();
+            *v = (float)(1.5 * q * q);
+            UNLOCK();
+        } else if (wheel_y) {                   /* half a dB a notch (Shift: a tenth) */
+            float db = *v > 0.0005f ? 20 * log10f(*v) : -60;
+            db += wheel_y * ((mods & KMOD_SHIFT) ? 0.1f : 0.5f);
+            float nv = db <= -60 ? 0 : powf(10, db / 20);
+            LOCK();
+            *v = nv > 1.5f ? 1.5f : nv;
+            UNLOCK();
+            wheel_y = 0;
+        }
+    }
+    return shown;
+}
+
+static void mute_solo(SDL_Rect m, SDL_Rect so, int t)
+{
+    Track *tr = &P.tracks[t];
+    if (button(m, "M", tr->mute)) {
+        LOCK();
+        tr->mute = !tr->mute;
+        UNLOCK();
+    }
+    if (button(so, "S", tr->solo)) {
+        LOCK();
+        tr->solo = !tr->solo;
+        UNLOCK();
+    }
+}
+
+static void pan_box(SDL_Rect r, const char *label, int t)
+{
+    Track *tr = &P.tracks[t];
+    double *d = fproxy(&tr->pan);
+    char buf[24];
+    pan_text((float)*d, buf, sizeof buf);
+    number_text(r, label, d, -1, 1, 0.005, buf);
+    fcommit(&tr->pan, d);
+}
+
+/* The Levels tab: a row a track (fader, meter, pan, mute, solo), then the master. */
+static int levels_tab(int x, int y, int w)
+{
+    char buf[48];
+    if (button((SDL_Rect){x, y, w, 28}, pops[POP_MIXER].win ? "The mixing console is open (in its own window)"
+                                                             : "Open the mixing console in its own window", 0))
+        mixwin_open();
+    y += 38;
+    int nw = 92, fx0 = x + nw + 58, fw = w - (fx0 - x) - 120;
+    for (int t = 0; t < P.ntracks; t++) {
+        Track *tr = &P.tracks[t];
+        fill((SDL_Rect){x, y + 2, 4, 30}, TRACK_COL[t]);
+        text_clip((SDL_Rect){x + 8, y, nw - 14, 18}, x + 8, y, tr->name, sel_track == t ? HEAD : TEXT);
+        if (hit((SDL_Rect){x, y, nw, 34}) && lpress) {   /* a click on the name: its Track settings */
+            lpress = 0;
+            sel_track = t;
+            mixer_sub = 2;
+        }
+        float gr = mixer_track_gr(MX, t);
+        snprintf(buf, sizeof buf, "%s%s", tr->comp_on ? "comp " : "", fabsf(tr->width - 1) > 0.01f ? "width" : "");
+        text_clip((SDL_Rect){x + 8, y + 17, nw - 14, 16}, x + 8, y + 17, gr > 0.1f ? "comp working" : buf, DIM);
+        mute_solo((SDL_Rect){x + nw, y + 4, 24, 24}, (SDL_Rect){x + nw + 26, y + 4, 24, 24}, t);
+        lv_fader[t] = (SDL_Rect){fx0, y + 2, fw, 18};
+        float v = fader(lv_fader[t], t, 0);
+        meter_draw((SDL_Rect){fx0, y + 23, fw, 6}, &track_meter[t], 0);
+        db_text(v, buf, sizeof buf);
+        text(fx0 + fw + 8, y + 3, buf, TEXT);
+        pan_box((SDL_Rect){fx0 + fw + 8, y + 20, 104, 14}, "", t);
+        y += 40;
+    }
+    line(x, y, x + w, y, LINE);
+    y += 8;
+    text(x + 8, y + 2, "Master", HEAD);
+    float v = fader((SDL_Rect){fx0, y + 2, fw, 18}, -1, 0);
+    meter_draw((SDL_Rect){fx0, y + 23, fw, 3}, &master_meter[0], 0);
+    meter_draw((SDL_Rect){fx0, y + 27, fw, 3}, &master_meter[1], 0);
+    db_text(v, buf, sizeof buf);
+    text(fx0 + fw + 8, y + 3, buf, TEXT);
+    y += 42;
+    y = loudness_readout(x, y, w);
+    y += 6;
+    text(x, y, "Drag a fader, or use the wheel over it (half a dB a", DIM);
+    text(x, y + font_h + 2, "notch); double-click puts it back to 0 dB. Click a", DIM);
+    text(x, y + 2 * (font_h + 2), "name for that track's effects.", DIM);
+    return y + 3 * (font_h + 2) + 10;
+}
+
+/* ---- the pop-out console */
+
+static int console_scroll;
+
+/* One channel strip: name, EQ, compressor, width, sends, pan, a tall fader and meter, mute, solo. */
+static void mix_strip(SDL_Rect r, int t)
+{
+    Track *tr = &P.tracks[t];
+    char buf[48];
+    fill(r, sel_track == t ? tone(PANEL2, 1.12f) : PANEL2);
+    outline(r, LINE);
+    fill((SDL_Rect){r.x, r.y, r.w, 4}, TRACK_COL[t]);
+    SDL_Rect name = {r.x + 4, r.y + 6, r.w - 8, font_h + 4};
+    text_clip(name, r.x + 6, r.y + 7, tr->name, sel_track == t ? HEAD : TEXT);
+    if (hit(name) && lpress) {
+        lpress = 0;
+        sel_track = t;
+        status("Track %d: %s (its details are in the Mixer panel's Track tab)", t + 1, tr->name);
+    }
+    int x = r.x + 4, w = r.w - 8, y = r.y + font_h + 14, rh = 24;
+    fnumber((SDL_Rect){x, y, w, 20}, "Lo", &tr->eq[0], -12, 12, 0.05, "%+.0f");
+    y += rh;
+    fnumber((SDL_Rect){x, y, w, 20}, "Mid", &tr->eq[1], -12, 12, 0.05, "%+.0f");
+    y += rh;
+    fnumber((SDL_Rect){x, y, w, 20}, "Hi", &tr->eq[2], -12, 12, 0.05, "%+.0f");
+    y += rh + 4;
+    float gr = mixer_track_gr(MX, t);
+    if (button((SDL_Rect){x, y, w, 20}, tr->comp_on ? (gr > 0.1f ? (snprintf(buf, sizeof buf, "Comp -%.0f", gr), buf) : "Comp on")
+                                                     : "Comp", tr->comp_on)) {
+        LOCK();
+        tr->comp_on = !tr->comp_on;
+        UNLOCK();
+    }
+    y += rh;
+    fnumber((SDL_Rect){x, y, w, 20}, "Thr", &tr->comp_thresh, -48, 0, 0.1, "%.0f");
+    y += rh;
+    fnumber((SDL_Rect){x, y, w, 20}, "Rat", &tr->comp_ratio, 1, 20, 0.02, "%.1f");
+    y += rh + 4;
+    fnumber((SDL_Rect){x, y, w, 20}, "Wid", &tr->width, 0, 2, 0.004, "%.2f");
+    y += rh;
+    fnumber((SDL_Rect){x, y, w, 20}, "Dly", &tr->delay_send, 0, 1, 0.004, "%.2f");
+    y += rh;
+    fnumber((SDL_Rect){x, y, w, 20}, "Rev", &tr->reverb_send, 0, 1, 0.004, "%.2f");
+    y += rh;
+    pan_box((SDL_Rect){x, y, w, 20}, "", t);
+    y += rh + 6;
+    int bottom = r.y + r.h - 56, fh = bottom - y;
+    if (fh > 40) {
+        cs_fader[t] = (SDL_Rect){x, y, w - 16, fh};
+        float v = fader(cs_fader[t], t, 1);
+        meter_draw((SDL_Rect){x + w - 12, y, 12, fh}, &track_meter[t], 1);
+        db_text(v, buf, sizeof buf);
+        text_center((SDL_Rect){r.x, bottom + 4, r.w, font_h + 2}, buf, TEXT);
+    }
+    int bw = (w - 4) / 2;
+    cs_mute[t] = (SDL_Rect){x, r.y + r.h - 28, bw, 24};
+    mute_solo(cs_mute[t], (SDL_Rect){x + bw + 4, r.y + r.h - 28, bw, 24}, t);
+}
+
+static void master_strip(SDL_Rect r)
+{
+    char buf[48];
+    MasterFx *fx = &P.fx;
+    fill(r, tone(PANEL2, 1.08f));
+    outline(r, ACCENT);
+    text_center((SDL_Rect){r.x, r.y + 6, r.w, font_h + 4}, "Master", HEAD);
+    int x = r.x + 6, w = r.w - 12, y = r.y + font_h + 16;
+    static const char *const PRE[3] = {"Off", "Glue", "Loud"};
+    int cur = !fx->comp_on && !fx->limit_on ? 0 : fx->comp_on && fx->comp_ratio <= 2.6f && fx->comp_thresh >= -19 ? 1
+            : fx->comp_on ? 2 : -1;
+    for (int i = 0; i < 3; i++)
+        if (button((SDL_Rect){x, y + i * 24, w, 20}, PRE[i], cur == i)) {
+            LOCK();
+            if (i == 0) fx->comp_on = fx->limit_on = 0;
+            else if (i == 1) {
+                fx->comp_on = fx->limit_on = 1;
+                fx->comp_thresh = -18, fx->comp_ratio = 2.5f, fx->comp_attack = 15, fx->comp_release = 180;
+                fx->comp_makeup = 3, fx->limit_ceiling = -1;
+            } else {
+                fx->comp_on = fx->limit_on = 1;
+                fx->comp_thresh = -24, fx->comp_ratio = 4, fx->comp_attack = 8, fx->comp_release = 120;
+                fx->comp_makeup = 8, fx->limit_ceiling = -1;
+            }
+            UNLOCK();
+        }
+    y += 3 * 24 + 6;
+    float cgr, lgr;
+    mixer_dynamics_meter(MX, &cgr, &lgr);
+    snprintf(buf, sizeof buf, "comp -%.1f", cgr);
+    text(x, y, buf, cgr > 0.1f ? HEAD : DIM);
+    snprintf(buf, sizeof buf, "limit -%.1f", lgr);
+    text(x, y + font_h + 2, buf, lgr > 0.1f ? HEAD : DIM);
+    y += 2 * font_h + 10;
+    double lu[3] = {loud_momentary(&live_loud), loud_short(&live_loud), loud_integrated(&live_loud)};
+    static const char *const LN[3] = {"now", "3 s", "song"};
+    for (int i = 0; i < 3; i++) {
+        if (isfinite(lu[i])) snprintf(buf, sizeof buf, "%s %.1f", LN[i], lu[i]);
+        else snprintf(buf, sizeof buf, "%s --", LN[i]);
+        text(x, y + i * (font_h + 2), buf, i == 2 ? TEXT : DIM);
+    }
+    text(x, y + 3 * (font_h + 2), "LUFS", DIM);
+    y += 4 * (font_h + 2) + 8;
+    int bottom = r.y + r.h - 56, fh = bottom - y;
+    if (fh > 40) {
+        float v = fader((SDL_Rect){x, y, w - 24, fh}, -1, 1);
+        meter_draw((SDL_Rect){x + w - 20, y, 9, fh}, &master_meter[0], 1);
+        meter_draw((SDL_Rect){x + w - 9, y, 9, fh}, &master_meter[1], 1);
+        db_text(v, buf, sizeof buf);
+        text_center((SDL_Rect){r.x, bottom + 4, r.w, font_h + 2}, buf, TEXT);
+    }
+}
+
+static void console_draw(void)
+{
+    fill((SDL_Rect){0, 0, W, H}, PANEL);
+    text(14, 10, "MIXING CONSOLE", DIM);
+    text(170, 10, "drag faders (double-click: 0 dB), click a number to type it, click a name for its details", DIM);
+    int sw = 96, gap = 6, top = 34, h = H - top - 10, mw = 112;
+    int avail = W - mw - 3 * gap - 10, total = P.ntracks * (sw + gap);
+    int maxs = total - avail > 0 ? total - avail : 0;
+    if (wheel_y && my > top && my < top + 22 + font_h) {   /* the wheel over the names scrolls the strips */
+        console_scroll -= wheel_y * (sw + gap);
+        wheel_y = 0;
+    }
+    if (wheel_x) {
+        console_scroll -= wheel_x * (sw + gap);
+        wheel_x = 0;
+    }
+    console_scroll = console_scroll < 0 ? 0 : console_scroll > maxs ? maxs : console_scroll;
+    SDL_Rect area = {10, top, avail, h};
+    SDL_RenderSetClipRect(ren, &area);
+    for (int t = 0; t < P.ntracks; t++) {
+        SDL_Rect r = {10 + t * (sw + gap) - console_scroll, top, sw, h};
+        if (r.x + r.w < area.x || r.x > area.x + area.w) continue;
+        int savedp = lpress;                     /* strips scrolled out of view take no clicks */
+        if (mx < area.x || mx >= area.x + area.w) lpress = 0;
+        mix_strip(r, t);
+        if (mx < area.x || mx >= area.x + area.w) lpress = savedp;
+    }
+    SDL_RenderSetClipRect(ren, NULL);
+    if (maxs > 0) {                              /* a scrollbar under the strips */
+        int bw = area.w * area.w / total, bx = area.x + (int)((long)(area.w - bw) * console_scroll / maxs);
+        fill((SDL_Rect){area.x, H - 8, area.w, 4}, PANEL3);
+        fill((SDL_Rect){bx, H - 8, bw, 4}, DIM);
+    }
+    master_strip((SDL_Rect){W - mw - 10, top, mw, h});
+}
+
+static void mixwin_open(void)
+{
+    if (pop_open(POP_MIXER, "Mixing console - tinydaw", 1080, 680, 520, 560))
+        status("The mixing console is in its own window: drag it anywhere, Esc closes it");
+}
+
+static void mixwin_frame(void)
+{
+    if (pops[POP_MIXER].win) pop_pass(POP_MIXER, console_draw);
+}
+
+static void editor_post(void)              /* remember the clip, to find it again next frame */
+{
+    editor_draw();
+    if (ewin && ed_clip >= 0 && ed_clip < P.nclips) {
+        ed_last = P.clips[ed_clip];
+        ed_nclips = P.nclips;
+    }
+}
+
 static void editor_frame(void)
 {
     if (!ewin) return;
@@ -11677,49 +13310,7 @@ static void editor_frame(void)
         editor_close();
         return;
     }
-    SDL_Renderer *m_ren = ren;
-    int mW = W, mH = H, smx = mx, smy = my, sld = ldown, slp = lpress, slr = lrel, srp = rpress, swx = wheel_x,
-        swy = wheel_y, sdb = ldouble;
-    ren = eren;
-    SDL_GetWindowSize(ewin, &W, &H);
-    mx = ein.mx;
-    my = ein.my;
-    ldown = ein.ldown;
-    lpress = ein.lpress;
-    lrel = ein.lrel;
-    rpress = ein.rpress;
-    wheel_x = ein.wheel_x;
-    wheel_y = ein.wheel_y;
-    ldouble = ein.ldouble;
-    int had = drag.kind != D_NONE;
-    if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
-    SDL_SetRenderDrawColor(ren, BG.r, BG.g, BG.b, 255);
-    SDL_RenderClear(ren);
-    editor_draw();
-    if (ewin) {
-        if (drag_in_editor && drag.kind != D_NONE && ldown) update_drag();
-        if (drag_in_editor && lrel && drag.kind != D_NONE) end_drag();
-        if (!had && drag.kind != D_NONE) drag_in_editor = 1;
-        if (drag.kind == D_NONE) drag_in_editor = 0;
-        if (ed_clip >= 0 && ed_clip < P.nclips) {
-            ed_last = P.clips[ed_clip];
-            ed_nclips = P.nclips;
-        }
-        SDL_RenderPresent(ren);
-    }
-    ren = m_ren;
-    W = mW;
-    H = mH;
-    mx = smx;
-    my = smy;
-    ldown = sld;
-    lpress = slp;
-    lrel = slr;
-    rpress = srp;
-    wheel_x = swx;
-    wheel_y = swy;
-    ldouble = sdb;
-    ein.lpress = ein.lrel = ein.rpress = ein.wheel_x = ein.wheel_y = 0;
+    pop_pass(POP_EDITOR, editor_post);
 }
 
 static void frame(void)
@@ -12168,6 +13759,14 @@ int main(int argc, char **argv)
                 lib_badge_at = 0;
             }
         }
+        if (getenv("TINYDAW_SHOT_METER")) {      /* a song in 4/4, then 3/4 slower, then 6/8 faster */
+            P.changes[0] = (MeterChange){2, 96, 3, 4};
+            P.changes[1] = (MeterChange){4, 140, 6, 8};
+            P.nchanges = 2;
+            pps = 90;
+            view_start = 0;
+            P.playhead = meter_bar_frame(&P, 2.5);
+        }
         if (getenv("TINYDAW_SHOT_SING")) {       /* the Singer, with words typed */
             show_panel(RI_SOUNDS);
             sounds_sub = 2;
@@ -12251,6 +13850,31 @@ int main(int argc, char **argv)
             mx = cx + 40;                        /* hover inside the list */
             my = cy + 60;
         }
+        if (getenv("TINYDAW_SHOT_CONSOLE")) {    /* the mixing console window */
+            mixwin_open();
+            if (pops[POP_MIXER].win) {
+                for (int t = 0; t < P.ntracks; t++) track_meter[t].level = track_meter[t].peak = 0.3f + 0.05f * t;
+                P.tracks[1].comp_on = 1;
+                P.tracks[4].width = 1.6f;
+                for (int i = 0; i < 2; i++) mixwin_frame();
+                SDL_Renderer *m = ren;
+                int ew, eh, sw = W, sh = H;
+                SDL_GetWindowSize(pops[POP_MIXER].win, &ew, &eh);
+                ren = pops[POP_MIXER].ren;
+                W = ew;
+                H = eh;
+                console_draw();
+                SDL_Surface *es = SDL_CreateRGBSurfaceWithFormat(0, ew, eh, 32, SDL_PIXELFORMAT_ARGB8888);
+                SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, es->pixels, es->pitch);
+                int ok = SDL_SaveBMP(es, shot) == 0;
+                SDL_FreeSurface(es);
+                ren = m;
+                W = sw;
+                H = sh;
+                SDL_Quit();
+                return ok ? 0 : 1;
+            }
+        }
         if (getenv("TINYDAW_SHOT_EDITOR")) {     /* the clip editor window, for clip N */
             editor_open(atoi(getenv("TINYDAW_SHOT_EDITOR")));
             if (ewin) {
@@ -12292,23 +13916,27 @@ int main(int argc, char **argv)
             case SDL_QUIT:
                 if (SDL_AtomicGet(&fd_state) == 0) request(ACT_QUIT, NULL);
                 break;
-            case SDL_MOUSEMOTION:
-                if (ewin && e.motion.windowID == ewin_id) {
-                    ein.mx = e.motion.x;
-                    ein.my = e.motion.y;
+            case SDL_MOUSEMOTION: {
+                int k = pop_of(e.motion.windowID);  /* a pop-out window has its own mouse */
+                if (k >= 0) {
+                    pops[k].in.mx = e.motion.x;
+                    pops[k].in.my = e.motion.y;
                 } else {
                     mx = e.motion.x;
                     my = e.motion.y;
                 }
                 break;
-            case SDL_MOUSEBUTTONDOWN:
-                if (ewin && e.button.windowID == ewin_id) {   /* the editor window has its own mouse */
-                    ein.mx = e.button.x;
-                    ein.my = e.button.y;
+            }
+            case SDL_MOUSEBUTTONDOWN: {
+                int k = pop_of(e.button.windowID);
+                if (k >= 0) {
+                    PopIn *in = &pops[k].in;
+                    in->mx = e.button.x;
+                    in->my = e.button.y;
                     if (e.button.button == SDL_BUTTON_LEFT) {
-                        ein.lpress = ein.ldown = 1;
-                        ein.ldouble = e.button.clicks >= 2;
-                    } else if (e.button.button == SDL_BUTTON_RIGHT) ein.rpress = 1;
+                        in->lpress = in->ldown = 1;
+                        in->ldouble = e.button.clicks >= 2;
+                    } else if (e.button.button == SDL_BUTTON_RIGHT) in->rpress = 1;
                     break;
                 }
                 mx = e.button.x;
@@ -12319,30 +13947,35 @@ int main(int argc, char **argv)
                 }
                 else if (e.button.button == SDL_BUTTON_RIGHT) rpress = 1;
                 break;
+            }
             case SDL_MOUSEBUTTONUP:
                 if (e.button.button == SDL_BUTTON_LEFT) {   /* to the window that owns the drag, else the one under it */
-                    int to_editor = drag.kind != D_NONE ? drag_in_editor : ewin && e.button.windowID == ewin_id;
-                    if (to_editor) {
-                        ein.lrel = 1;
-                        ein.ldown = 0;
+                    int k = drag.kind != D_NONE ? drag_pop : pop_of(e.button.windowID);
+                    if (k >= 0) {
+                        pops[k].in.lrel = 1;
+                        pops[k].in.ldown = 0;
                     } else {
                         lrel = 1;
                         ldown = 0;
                     }
                 }
                 break;
-            case SDL_MOUSEWHEEL:
-                if (ewin && e.wheel.windowID == ewin_id) {
-                    ein.wheel_y += e.wheel.y;
-                    ein.wheel_x += e.wheel.x;
+            case SDL_MOUSEWHEEL: {
+                int k = pop_of(e.wheel.windowID);
+                if (k >= 0) {
+                    pops[k].in.wheel_y += e.wheel.y;
+                    pops[k].in.wheel_x += e.wheel.x;
                     break;
                 }
                 wheel_y += e.wheel.y;
                 wheel_x += e.wheel.x;
                 break;
+            }
             case SDL_DROPFILE: {
                 size_t n = strlen(e.drop.file);
                 if (n > 5 && !strcmp(e.drop.file + n - 5, ".tdaw")) request(ACT_OPEN_PATH, e.drop.file);
+                else if ((n > 4 && !strcasecmp(e.drop.file + n - 4, ".mid")) || (n > 5 && !strcasecmp(e.drop.file + n - 5, ".midi")))
+                    midi_import(e.drop.file);
                 else import_file(e.drop.file);
                 SDL_free(e.drop.file);
                 break;
@@ -12354,9 +13987,10 @@ int main(int argc, char **argv)
             case SDL_KEYDOWN:
                 if (numedit_key(e.key.keysym)) break;      /* typing a value */
                 if (tf_key(e.key.keysym)) break;           /* typing a name */
-                if (ewin && e.key.windowID == ewin_id) {    /* the editor: Esc closes it, the rest as usual */
+                if (pop_of(e.key.windowID) >= 0) {      /* a pop-out: Esc closes it, the rest as usual */
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
-                        editor_close();
+                        if (pop_of(e.key.windowID) == POP_EDITOR) editor_close();
+                        else pop_close(pop_of(e.key.windowID));
                         break;
                     }
                     key(e.key.keysym);
@@ -12377,12 +14011,14 @@ int main(int argc, char **argv)
                 break;
             case SDL_WINDOWEVENT:               /* the desktop theme may have changed meanwhile */
                 if (e.window.event == SDL_WINDOWEVENT_CLOSE) {   /* with two windows, there's no SDL_QUIT */
-                    if (ewin && e.window.windowID == ewin_id) editor_close();
+                    int k = pop_of(e.window.windowID);
+                    if (k == POP_EDITOR) editor_close();
+                    else if (k >= 0) pop_close(k);
                     else if (SDL_AtomicGet(&fd_state) == 0) request(ACT_QUIT, NULL);
                     break;
                 }
-                if (e.window.event == SDL_WINDOWEVENT_LEAVE && ewin && e.window.windowID == ewin_id)
-                    ein.mx = ein.my = -1000;
+                if (e.window.event == SDL_WINDOWEVENT_LEAVE && pop_of(e.window.windowID) >= 0)
+                    pops[pop_of(e.window.windowID)].in.mx = pops[pop_of(e.window.windowID)].in.my = -1000;
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) theme_follow();
                 break;
             case SDL_JOYDEVICEADDED: joy_added(e.jdevice.which); break;
@@ -12397,10 +14033,10 @@ int main(int argc, char **argv)
         }
         mods = SDL_GetModState();
         if (lrel && drag.kind != D_NONE && !drag_in_editor) update_drag();   /* final position */
-        if (ein.lrel && drag.kind != D_NONE && drag_in_editor) {             /* the editor's, likewise */
+        if (drag_pop >= 0 && pops[drag_pop].in.lrel && drag.kind != D_NONE) {   /* a pop-out's, likewise */
             int sx = mx, sy = my;
-            mx = ein.mx;
-            my = ein.my;
+            mx = pops[drag_pop].in.mx;
+            my = pops[drag_pop].in.my;
             update_drag();
             mx = sx;
             my = sy;
@@ -12408,6 +14044,7 @@ int main(int argc, char **argv)
         frame();
         SDL_RenderPresent(ren);
         editor_frame();
+        mixwin_frame();
         if (quit_now) running = 0;
         if (!(flags & SDL_RENDERER_PRESENTVSYNC)) SDL_Delay(8);
     }

@@ -35,12 +35,19 @@ static void track_defaults(Track *t)
     t->volume = 0.8f;
     t->cutoff = 1200;
     t->reso = 0.2f;
+    t->width = 1;
+    t->comp_thresh = -18;
+    t->comp_ratio = 3;
+    t->comp_attack = 10;
+    t->comp_release = 120;
 }
 
 void project_init(Project *p)
 {
     memset(p, 0, sizeof *p);
     p->bpm = 120;
+    p->ts_num = p->ts_den = 4;
+    p->nchanges = 0;
     p->a4 = 440;
     p->master = 0.8f;
     p->preview = -1;
@@ -54,7 +61,9 @@ void project_init(Project *p)
     }
     p->fx = (MasterFx){.delay_div = 4, .delay_feedback = 0.35f, .delay_tone = 0.5f, .delay_level = 0.8f,
                        .reverb_size = 0.6f, .reverb_damp = 0.4f, .reverb_level = 0.8f,
-                       .sc_source = -1, .sc_release = 180, .bend_range = 2};
+                       .sc_source = -1, .sc_release = 180, .bend_range = 2,
+                       .comp_thresh = -18, .comp_ratio = 2.5f, .comp_attack = 15, .comp_release = 180,
+                       .comp_makeup = 3, .limit_ceiling = -1};
 }
 
 int project_add_track(Project *p, const char *name)
@@ -985,9 +994,22 @@ static float *render_range(const Project *p, long a, long b, int only_track, lon
         int k = n - pos < 4096 ? (int)(n - pos) : 4096;
         mixer_run(m, (Project *)p, a + pos, 1, buf + 2 * pos, k, only_track, 0);
     }
+    for (long i = 0; i < 2 * n; i++) buf[i] *= p->master;
+    if (only_track < 0 && (p->fx.comp_on || p->fx.limit_on)) {   /* the mix, through the master's dynamics */
+        long look = p->fx.limit_on ? (long)(0.005 * SR) : 0;    /* the limiter's look-ahead, taken back out */
+        float *all = calloc((size_t)(n + look) * 2, sizeof(float));
+        if (all) {
+            memcpy(all, buf, (size_t)n * 2 * sizeof(float));
+            for (long pos = 0; pos < n + look; pos += 4096) {
+                int k = n + look - pos < 4096 ? (int)(n + look - pos) : 4096;
+                master_dynamics(m, p, all + 2 * pos, k);
+            }
+            memcpy(buf, all + 2 * look, (size_t)n * 2 * sizeof(float));
+            free(all);
+        }
+    }
     mixer_free(m);
-    for (long i = 0; i < 2 * n; i++)
-        buf[i] = soft_clip(buf[i] * p->master);
+    for (long i = 0; i < 2 * n; i++) buf[i] = soft_clip(buf[i]);
     long end = n;
     if (tail > 0) {                              /* trim the tail once it's inaudible */
         end = b - a;
@@ -1150,6 +1172,7 @@ int project_export(const Project *p, const ExportOptions *o, const char *base, c
     const ExportFormat *f = &EXPORT_FORMATS[o->format];
     char path[1200], first[1200] = "", err[256];
     int files = 0;
+    double measured = NAN;
 
     for (int t = o->stems ? 0 : -1; t < (o->stems ? p->ntracks : 0); t++) {
         if (t >= 0) {                            /* skip tracks with nothing in the range */
@@ -1169,7 +1192,11 @@ int project_export(const Project *p, const ExportOptions *o, const char *base, c
             snprintf(msg, msglen, "out of memory");
             return -1;
         }
-        int rc = write_audio(path, o, buf, len, t < 0, err, sizeof err);
+        if (t < 0 && o->loudness) {              /* to a loudness, peaks under -1 dB */
+            double before = loudness_match(buf, len, o->loudness == 1 ? -14 : -9, -1);
+            measured = before;
+        }
+        int rc = write_audio(path, o, buf, len, t < 0 && !o->loudness, err, sizeof err);
         free(buf);
         if (rc != 0) {
             snprintf(msg, msglen, "%s: %s", path, err);
@@ -1186,7 +1213,10 @@ int project_export(const Project *p, const ExportOptions *o, const char *base, c
     char depth[24];
     if (f->lossy) snprintf(depth, sizeof depth, "q%.0f%%", o->quality * 100);
     else snprintf(depth, sizeof depth, bits == 32 ? "32-bit float" : "%d-bit", bits);
-    if (files == 1)
+    if (files == 1 && o->loudness && isfinite(measured))
+        snprintf(msg, msglen, "Exported %s (%s, %g kHz, %s, %s), brought from %.1f to %d LUFS", first, f->name,
+                 rate / 1000.0, depth, o->mono ? "mono" : "stereo", measured, o->loudness == 1 ? -14 : -9);
+    else if (files == 1)
         snprintf(msg, msglen, "Exported %s (%s, %g kHz, %s, %s)", first, f->name, rate / 1000.0, depth,
                  o->mono ? "mono" : "stereo");
     else

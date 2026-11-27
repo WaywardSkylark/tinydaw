@@ -13,8 +13,8 @@ LDLIBS   = $(shell pkg-config --libs $(PKGS)) -lm -lpthread
 CFLAGS  += -DTINYDAW_VERSION='"$(VERSION)"'
 VERNUM   = $(subst ., ,$(VERSION))
 
-SRC = src/main.c src/audio.c src/fx.c src/analysis.c src/scenes.c src/theory.c src/project.c src/midi.c src/synth.c src/voice.c
-HDR = src/daw.h src/theory.h src/midi.h src/scenes.h
+SRC = src/main.c src/audio.c src/fx.c src/analysis.c src/scenes.c src/theory.c src/project.c src/midi.c src/synth.c src/voice.c src/midifile.c src/loudness.c
+HDR = src/daw.h src/theory.h src/midi.h src/scenes.h src/midifile.h
 
 tinydaw: $(SRC) $(HDR) src/compat.h VERSION
 	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)

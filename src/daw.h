@@ -203,6 +203,9 @@ typedef struct {
     float drive;            /* 0..1 */
     float delay_send, reverb_send;   /* 0..1 */
     float duck;             /* 0..1: how far the sidechain source pushes this track down */
+    float width;            /* stereo width: 0 mono, 1 as it is, 2 twice as wide */
+    int comp_on;            /* the track's own compressor */
+    float comp_thresh, comp_ratio, comp_attack, comp_release, comp_makeup;   /* dB, :1, ms, ms, dB */
 } Track;
 
 /* The shared effects every track can send to, plus the sidechain and live controls. */
@@ -217,6 +220,12 @@ typedef struct {
     int sc_source;          /* track whose sound ducks the others, -1 = none */
     float sc_release;       /* ms */
     float bend_range;       /* semitones the pitch wheel bends live sounds */
+    /* the master's dynamics, last before the output: a compressor that glues the mix together and
+     * a limiter that never lets it go over the ceiling */
+    int comp_on;
+    float comp_thresh, comp_ratio, comp_attack, comp_release, comp_makeup;   /* dB, :1, ms, ms, dB */
+    int limit_on;
+    float limit_ceiling;    /* dBFS */
 } MasterFx;
 
 /* ---- pads: library sounds played live from keys, controllers and MIDI ---- */
@@ -247,6 +256,12 @@ typedef struct {
     int fade;               /* frames left of the fade-out once stopped, 0 = not stopping */
 } Voice;
 
+/* A tempo and/or time signature change, from the start of bar `bar` (0-based, >= 1) on. The song's
+ * first tempo and time signature are the project's bpm, ts_num and ts_den. Tempo is in quarter
+ * notes a minute, whatever the time signature. */
+#define MAX_METER 64
+typedef struct { int bar; double bpm; int num, den; } MeterChange;
+
 /* The project. The audio thread reads it; the UI changes it only while holding the
  * audio device lock (see LOCK/UNLOCK in main.c). */
 typedef struct {
@@ -256,7 +271,10 @@ typedef struct {
     int nclips;
     Track tracks[MAX_TRACKS];
     int ntracks;            /* rows shown; grows up to MAX_TRACKS */
-    double bpm;
+    double bpm;             /* the tempo at the start (see changes for later ones) */
+    int ts_num, ts_den;     /* the time signature at the start: 4/4, 3/4, 6/8... */
+    MeterChange changes[MAX_METER];   /* in bar order */
+    int nchanges;
     double a4;              /* tuning reference for new sounds */
     float master;
     long playhead;
@@ -302,6 +320,7 @@ typedef struct {
     int normalize;          /* 0 off, 1 = -1 dBFS, 2 = -0.1 dBFS (mixes only) */
     int dither;             /* TPDF dither for 16-bit */
     int stems;              /* one file per track instead of the mix */
+    int loudness;           /* mixes only: 0 off, 1 = -14 LUFS (streaming), 2 = -9 LUFS (loud); peaks kept under -1 dB */
 } ExportOptions;
 
 extern const ExportFormat EXPORT_FORMATS[EXP_COUNT];
@@ -368,6 +387,31 @@ void voices_clear(Project *p);
 
 /* ---- the mixer (fx.c): clips and live voices through each track's effects ---- */
 typedef struct Mixer Mixer;
+/* The master's compressor and limiter over a stereo block (after the master volume). */
+void master_dynamics(Mixer *m, const Project *p, float *buf, int n);
+void mixer_dynamics_meter(const Mixer *m, float *comp_db, float *limit_db);   /* gain reduction now */
+float mixer_track_gr(const Mixer *m, int track);   /* how far a track's compressor is turning it down, dB */
+/* Brings a whole stereo buffer to `lufs`, then holds its peaks under `ceiling_db` (look-ahead
+ * limiter, timing kept). Returns the loudness it measured first. */
+double loudness_match(float *buf, long n, double lufs, double ceiling_db);
+
+/* Loudness (ITU-R BS.1770 / EBU R128), loudness.c */
+typedef struct {
+    int rate, piece, count;
+    double b1[3], a1[2], b2[3], a2[2], s1[2][2], s2[2][2], acc;
+    double recent[30];
+    int rpos, nrecent;
+    double *blocks;
+    int nblocks, cap;
+} Loud;
+void loud_init(Loud *l, int rate);
+void loud_reset(Loud *l);
+void loud_free(Loud *l);
+void loud_feed(Loud *l, const float *stereo, long n);
+double loud_momentary(const Loud *l);   /* LUFS over the last 400 ms */
+double loud_short(const Loud *l);       /* the last 3 s */
+double loud_integrated(const Loud *l);  /* the whole run, gated */
+double loudness_of(const float *stereo, long n);   /* integrated LUFS of a buffer */
 Mixer *mixer_new(void);             /* sized for the current project rate */
 void mixer_free(Mixer *m);
 int mixer_rate(const Mixer *m);
@@ -387,7 +431,16 @@ int auto_lane(const Project *p, int track, int param, int *first);   /* how many
 float auto_at(const Project *p, int track, int param, long at, int *has);   /* 0..1 at frame `at` */
 void auto_apply(const Project *p, int track, long at, Track *out);  /* the track with its automation */
 int sample_root(const Sample *s);              /* the note a sound plays at, for note clips */
-long pattern_end(const Project *p, int pattern);   /* the end of its last note, in frames */
+long pattern_end(const Project *p, int pattern);
+
+/* The tempo map: frames, beats (quarter notes from the start) and bars (from 0), any way round. */
+double meter_beats(const Project *p, long frame);          /* quarter notes from the start */
+long meter_beats_frame(const Project *p, double beats);
+double meter_bars(const Project *p, long frame);           /* bars from the start (0 = the first) */
+long meter_bar_frame(const Project *p, double bar);
+/* What's in force at a frame: tempo, time signature, and the bar it's in (its index, start, length). */
+void meter_at(const Project *p, long frame, double *bpm, int *num, int *den, int *bar, long *bar_start, long *bar_len);
+double meter_bpm_at(const Project *p, long frame);   /* the end of its last note, in frames */
 int pattern_new_id(const Project *p);
 
 /* ---- analysis (analysis.c) ---- */

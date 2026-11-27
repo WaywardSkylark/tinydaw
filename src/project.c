@@ -53,17 +53,24 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     fprintf(f, MAGIC "\n");
     fprintf(f, "saved-by tinydaw %s\n", TINYDAW_VERSION);   /* for people reading the file; ignored on load */
     fprintf(f, "rate %d\nbpm %.17g\na4 %.17g\nmaster %.9g\n", SR, p->bpm, p->a4, p->master);
+    if (p->ts_num != 4 || p->ts_den != 4) fprintf(f, "meter %d %d\n", p->ts_num, p->ts_den);
+    for (int i = 0; i < p->nchanges; i++)
+        fprintf(f, "change %d %.17g %d %d\n", p->changes[i].bar, p->changes[i].bpm, p->changes[i].num, p->changes[i].den);
     fprintf(f, "loop %d %ld %ld\nplayhead %ld\n", p->loop, p->loop_start, p->loop_end, p->playhead);
     fprintf(f, "instrument %d %d %d\n", p->inst_sample, p->inst_root, p->inst_track);
     const MasterFx *fx = &p->fx;
     fprintf(f, "fx %d %.9g %.9g %.9g %d %.9g %.9g %.9g %d %.9g %.9g\n", fx->delay_div, fx->delay_feedback,
             fx->delay_tone, fx->delay_level, fx->pingpong, fx->reverb_size, fx->reverb_damp, fx->reverb_level,
             fx->sc_source, fx->sc_release, fx->bend_range);
+    fprintf(f, "dynamics %d %.9g %.9g %.9g %.9g %.9g %d %.9g\n", fx->comp_on, fx->comp_thresh, fx->comp_ratio,
+            fx->comp_attack, fx->comp_release, fx->comp_makeup, fx->limit_on, fx->limit_ceiling);
     for (int t = 0; t < p->ntracks; t++) {
         const Track *tr = &p->tracks[t];
         fprintf(f, "track %.9g %d %d %s\n", tr->volume, tr->mute, tr->solo, tr->name);
         fprintf(f, "trackfx %.9g %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n", tr->pan, tr->filter, tr->cutoff,
                 tr->reso, tr->eq[0], tr->eq[1], tr->eq[2], tr->drive, tr->delay_send, tr->reverb_send, tr->duck);
+        fprintf(f, "trackdyn %.9g %d %.9g %.9g %.9g %.9g %.9g\n", tr->width, tr->comp_on, tr->comp_thresh,
+                tr->comp_ratio, tr->comp_attack, tr->comp_release, tr->comp_makeup);
     }
     int raw = 0;
     for (int i = 0; i < p->nsamples; i++) {
@@ -252,6 +259,16 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
             if (ok) g_rate = r;
         } else if (!strcmp(word, "bpm")) {
             ok = sscanf(line, "bpm %lf", &p->bpm) == 1 && p->bpm >= 20 && p->bpm <= 999;
+        } else if (!strcmp(word, "meter")) {
+            ok = sscanf(line, "meter %d %d", &p->ts_num, &p->ts_den) == 2 && p->ts_num >= 1 && p->ts_num <= 32 &&
+                 (p->ts_den == 2 || p->ts_den == 4 || p->ts_den == 8 || p->ts_den == 16);
+            if (!ok) p->ts_num = p->ts_den = 4;
+        } else if (!strcmp(word, "change")) {
+            MeterChange c;
+            ok = sscanf(line, "change %d %lf %d %d", &c.bar, &c.bpm, &c.num, &c.den) == 4 && c.bar >= 1 &&
+                 c.bpm >= 20 && c.bpm <= 999 && c.num >= 1 && c.num <= 32 && c.den >= 1 && p->nchanges < MAX_METER &&
+                 (p->nchanges == 0 || c.bar > p->changes[p->nchanges - 1].bar);
+            if (ok) p->changes[p->nchanges++] = c;
         } else if (!strcmp(word, "a4")) {
             ok = sscanf(line, "a4 %lf", &p->a4) == 1;
         } else if (!strcmp(word, "master")) {
@@ -269,6 +286,16 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                         &fx->reverb_level, &fx->sc_source, &fx->sc_release, &fx->bend_range) == 11;
             if (fx->delay_div < 0 || fx->delay_div >= DELAY_DIVS) fx->delay_div = 4;
             if (fx->sc_source >= MAX_TRACKS) fx->sc_source = -1;
+        } else if (!strcmp(word, "dynamics")) {
+            MasterFx *fx = &p->fx;
+            ok = sscanf(line, "dynamics %d %f %f %f %f %f %d %f", &fx->comp_on, &fx->comp_thresh, &fx->comp_ratio,
+                        &fx->comp_attack, &fx->comp_release, &fx->comp_makeup, &fx->limit_on, &fx->limit_ceiling) == 8;
+        } else if (!strcmp(word, "trackdyn")) {
+            if (ntracks > 0) {
+                Track *t = &p->tracks[ntracks - 1];
+                ok = sscanf(line, "trackdyn %f %d %f %f %f %f %f", &t->width, &t->comp_on, &t->comp_thresh, &t->comp_ratio,
+                            &t->comp_attack, &t->comp_release, &t->comp_makeup) == 7;
+            }
         } else if (!strcmp(word, "trackfx")) {
             if (ntracks > 0) {
                 Track *t = &p->tracks[ntracks - 1];

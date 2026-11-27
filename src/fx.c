@@ -44,6 +44,10 @@ struct Mixer {
     long tail_left;                                     /* frames the sends keep ringing */
     float peak[MAX_TRACKS][2];                          /* loudest sample per track since last read */
     float env;                                          /* sidechain envelope */
+    double comp_env, lim_gain, comp_gr, lim_gr;         /* master dynamics */
+    double tcomp_env[MAX_TRACKS], tcomp_gr[MAX_TRACKS];  /* each track's compressor */
+    float lim_buf[2 * 2048], lim_req[2048];             /* the limiter's look-ahead: sound, and gain it needs */
+    int lim_pos;
 };
 
 static const int COMB_TUNING[NCOMB] = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
@@ -410,14 +414,46 @@ static void process_track(Mixer *m, const Project *p, int t, const Track *tr, fl
             m->ic2[t][c] = ic2;
         }
     }
+    if (tr->comp_on) {                           /* the track's compressor: like the master's */
+        double th = tr->comp_thresh, ratio = tr->comp_ratio > 1 ? tr->comp_ratio : 1;
+        double att = exp(-1.0 / (fmax(0.1, tr->comp_attack) * 0.001 * m->rate));
+        double rel = exp(-1.0 / (fmax(1, tr->comp_release) * 0.001 * m->rate));
+        double makeup = pow(10, tr->comp_makeup / 20), gr = 0, env = m->tcomp_env[t];
+        for (int i = 0; i < n; i++) {
+            double x = fmax(fabs(b[2 * i]), fabs(b[2 * i + 1]));
+            double db = x > 1e-9 ? 20 * log10(x) : -180, over = db - th, want = over > 0 ? over * (1 - 1 / ratio) : 0;
+            env = want > env ? want + (env - want) * att : want + (env - want) * rel;
+            double g = pow(10, -env / 20) * makeup;
+            b[2 * i] *= (float)g;
+            b[2 * i + 1] *= (float)g;
+            gr = fmax(gr, env);
+        }
+        m->tcomp_env[t] = env;
+        m->tcomp_gr[t] = gr;
+    } else {
+        m->tcomp_env[t] = m->tcomp_gr[t] = 0;
+    }
+    if (fabsf(tr->width - 1) > 0.001f) {          /* stereo width: the sides up or down against the middle */
+        float w = tr->width < 0 ? 0 : tr->width > 2 ? 2 : tr->width;
+        for (int i = 0; i < n; i++) {
+            float mid = 0.5f * (b[2 * i] + b[2 * i + 1]), side = 0.5f * (b[2 * i] - b[2 * i + 1]) * w;
+            b[2 * i] = mid + side;
+            b[2 * i + 1] = mid - side;
+        }
+    }
+}
+
+float mixer_track_gr(const Mixer *m, int track)
+{
+    return m && track >= 0 && track < MAX_TRACKS ? (float)m->tcomp_gr[track] : 0;
 }
 
 /* ---------------------------------------------------------------- shared effects */
 
-static void run_delay(Mixer *m, const Project *p, const float *in, float *out, int n)
+static void run_delay(Mixer *m, const Project *p, long at, const float *in, float *out, int n)
 {
     const MasterFx *fx = &p->fx;
-    long d = (long)(DELAY_BEATS[fx->delay_div % DELAY_DIVS] * 60.0 / p->bpm * m->rate);
+    long d = (long)(DELAY_BEATS[fx->delay_div % DELAY_DIVS] * 60.0 / meter_bpm_at(p, at) * m->rate);   /* in time where it is */
     if (d < 1) d = 1;
     if (d > m->dlen - 1) d = m->dlen - 1;
     float fb = fx->delay_feedback > 0.95f ? 0.95f : fx->delay_feedback;
@@ -535,9 +571,204 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
         }
         if (sending) m->tail_left = 8L * m->rate;   /* keep running until the echoes die away */
         if (m->tail_left > 0) {
-            run_delay(m, p, sends_d, o, n);
+            run_delay(m, p, start + done, sends_d, o, n);
             run_reverb(m, p, sends_r, o, n);
             m->tail_left -= n;
         }
     }
+}
+
+/* ---------------------------------------------------------------- the tempo map
+ *
+ * The song is cut into sections where tempo and time signature hold still: the start (bpm,
+ * ts_num/ts_den) and then each change, from its bar. Within a section frames, beats and bars are
+ * in proportion, so every conversion finds its section and scales. */
+
+typedef struct { double frame, beat, bar, qf, barq; double bpm; int num, den; } Sect;
+
+static int sections(const Project *p, Sect *out)
+{
+    int n = 0;
+    double frame = 0, beat = 0, bar = 0, bpm = p->bpm > 0 ? p->bpm : 120;
+    int num = p->ts_num > 0 ? p->ts_num : 4, den = p->ts_den > 0 ? p->ts_den : 4;
+    for (int i = -1; i < p->nchanges && n < MAX_METER + 1; i++) {
+        if (i >= 0) {
+            const MeterChange *c = &p->changes[i];
+            if (c->bar <= bar) {                 /* out of order or at the same bar: it takes over */
+                if (n) n--;
+                bar = n ? out[n].bar : 0;
+            }
+            Sect *pv = n ? &out[n - 1] : NULL;
+            if (pv && c->bar > pv->bar) {
+                frame = pv->frame + (c->bar - pv->bar) * pv->barq * pv->qf;
+                beat = pv->beat + (c->bar - pv->bar) * pv->barq;
+            }
+            bar = c->bar;
+            if (c->bpm > 0) bpm = c->bpm;
+            if (c->num > 0) num = c->num;
+            if (c->den > 0) den = c->den;
+        }
+        out[n++] = (Sect){frame, beat, bar, 60.0 / bpm * g_rate, num * 4.0 / den, bpm, num, den};
+    }
+    return n;
+}
+
+double meter_beats(const Project *p, long frame)
+{
+    Sect s[MAX_METER + 1];
+    int n = sections(p, s), k = 0;
+    while (k + 1 < n && frame >= s[k + 1].frame) k++;
+    return s[k].beat + (frame - s[k].frame) / s[k].qf;
+}
+
+long meter_beats_frame(const Project *p, double beats)
+{
+    Sect s[MAX_METER + 1];
+    int n = sections(p, s), k = 0;
+    while (k + 1 < n && beats >= s[k + 1].beat) k++;
+    return (long)llround(s[k].frame + (beats - s[k].beat) * s[k].qf);
+}
+
+double meter_bars(const Project *p, long frame)
+{
+    Sect s[MAX_METER + 1];
+    int n = sections(p, s), k = 0;
+    while (k + 1 < n && frame >= s[k + 1].frame) k++;
+    return s[k].bar + (frame - s[k].frame) / (s[k].qf * s[k].barq);
+}
+
+long meter_bar_frame(const Project *p, double bar)
+{
+    Sect s[MAX_METER + 1];
+    int n = sections(p, s), k = 0;
+    while (k + 1 < n && bar >= s[k + 1].bar) k++;
+    return (long)llround(s[k].frame + (bar - s[k].bar) * s[k].barq * s[k].qf);
+}
+
+void meter_at(const Project *p, long frame, double *bpm, int *num, int *den, int *bar, long *bar_start, long *bar_len)
+{
+    Sect s[MAX_METER + 1];
+    int n = sections(p, s), k = 0;
+    while (k + 1 < n && frame >= s[k + 1].frame) k++;
+    double bl = s[k].qf * s[k].barq;
+    double b = frame < s[k].frame ? 0 : floor((frame - s[k].frame) / bl + 1e-9);
+    if (bpm) *bpm = s[k].bpm;
+    if (num) *num = s[k].num;
+    if (den) *den = s[k].den;
+    if (bar) *bar = (int)(s[k].bar + b);
+    if (bar_start) *bar_start = (long)llround(s[k].frame + b * bl);
+    if (bar_len) *bar_len = (long)llround(bl);
+}
+
+double meter_bpm_at(const Project *p, long frame)
+{
+    double bpm;
+    meter_at(p, frame, &bpm, NULL, NULL, NULL, NULL, NULL);
+    return bpm;
+}
+
+/* ---------------------------------------------------------------- the master's dynamics
+ *
+ * The compressor follows the louder channel's level in dB (quick to catch, slow to let go) and
+ * turns everything above the threshold down by the ratio, then makes the loss up. The limiter
+ * looks 5 ms ahead: it hears a peak coming and has the gain down by the time it arrives, so
+ * nothing passes the ceiling, and lets go over 80 ms. */
+void master_dynamics(Mixer *m, const Project *p, float *buf, int n)
+{
+    const MasterFx *fx = &p->fx;
+    if (!m) return;
+    if (fx->comp_on) {
+        double th = fx->comp_thresh, ratio = fx->comp_ratio > 1 ? fx->comp_ratio : 1;
+        double att = exp(-1.0 / (fmax(0.1, fx->comp_attack) * 0.001 * m->rate));
+        double rel = exp(-1.0 / (fmax(1, fx->comp_release) * 0.001 * m->rate));
+        double makeup = pow(10, fx->comp_makeup / 20), gr = 0;
+        for (int i = 0; i < n; i++) {
+            double x = fmax(fabs(buf[2 * i]), fabs(buf[2 * i + 1]));
+            double db = x > 1e-9 ? 20 * log10(x) : -180;
+            double over = db - th, want = over > 0 ? over * (1 - 1 / ratio) : 0;   /* dB to take off */
+            m->comp_env = want > m->comp_env ? want + (m->comp_env - want) * att : want + (m->comp_env - want) * rel;
+            double g = pow(10, -m->comp_env / 20) * makeup;
+            buf[2 * i] *= (float)g;
+            buf[2 * i + 1] *= (float)g;
+            gr = fmax(gr, m->comp_env);
+        }
+        m->comp_gr = gr;
+    } else {
+        m->comp_env = 0;
+        m->comp_gr = 0;
+    }
+    if (fx->limit_on) {
+        int look = (int)(0.005 * m->rate);
+        if (look > 2047) look = 2047;
+        if (look < 1) look = 1;
+        double ceil_ = pow(10, fx->limit_ceiling / 20), rel = exp(-1.0 / (0.08 * m->rate)), gr = 0;
+        if (m->lim_gain <= 0) m->lim_gain = 1;
+        double att = 1 - exp(-5.0 / look);     /* down within the look-ahead */
+        for (int i = 0; i < n; i++) {
+            double x = fmax(fabs(buf[2 * i]), fabs(buf[2 * i + 1]));
+            int k = m->lim_pos;                 /* out comes what went in `look` samples ago */
+            float dl = m->lim_buf[2 * k], dr = m->lim_buf[2 * k + 1];
+            m->lim_buf[2 * k] = buf[2 * i];
+            m->lim_buf[2 * k + 1] = buf[2 * i + 1];
+            m->lim_req[k] = x > ceil_ ? (float)(ceil_ / x) : 1.0f;
+            m->lim_pos = (k + 1) % look;
+            double target = 1;                  /* the lowest gain anything in the window needs */
+            for (int j = 0; j < look; j++)
+                if (m->lim_req[j] > 0 && m->lim_req[j] < target) target = m->lim_req[j];
+            if (target < m->lim_gain) m->lim_gain += (target - m->lim_gain) * att;
+            else m->lim_gain = target + (m->lim_gain - target) * rel;
+            double g = m->lim_gain;
+            float ol = (float)(dl * g), orr = (float)(dr * g);
+            if (fabsf(ol) > ceil_) ol = ol > 0 ? (float)ceil_ : (float)-ceil_;   /* never over */
+            if (fabsf(orr) > ceil_) orr = orr > 0 ? (float)ceil_ : (float)-ceil_;
+            buf[2 * i] = ol;
+            buf[2 * i + 1] = orr;
+            gr = fmax(gr, -20 * log10(g));
+        }
+        m->lim_gr = gr;
+    } else {
+        m->lim_gain = 1;
+        m->lim_gr = 0;
+        if (m->lim_pos) {                       /* forget the look-ahead, so turning it on is clean */
+            memset(m->lim_buf, 0, sizeof m->lim_buf);
+            memset(m->lim_req, 0, sizeof m->lim_req);
+            m->lim_pos = 0;
+        }
+    }
+}
+
+void mixer_dynamics_meter(const Mixer *m, float *comp_db, float *limit_db)
+{
+    *comp_db = m ? (float)m->comp_gr : 0;
+    *limit_db = m ? (float)m->lim_gr : 0;
+}
+
+double loudness_match(float *buf, long n, double lufs, double ceiling_db)
+{
+    double now = loudness_of(buf, n);
+    if (!isfinite(now)) return now;              /* silence: nothing to match */
+    float g = (float)pow(10, (lufs - now) / 20);
+    for (long i = 0; i < 2 * n; i++) buf[i] *= g;
+    Mixer *m = calloc(1, sizeof *m);             /* just the limiter's state */
+    if (!m) return now;
+    m->rate = SR;
+    Project *p = calloc(1, sizeof *p);
+    if (!p) {
+        free(m);
+        return now;
+    }
+    p->fx.limit_on = 1;
+    p->fx.limit_ceiling = (float)ceiling_db;
+    long look = (long)(0.005 * SR);
+    float *all = calloc((size_t)(n + look) * 2, sizeof(float));
+    if (all) {
+        memcpy(all, buf, (size_t)n * 2 * sizeof(float));
+        for (long pos = 0; pos < n + look; pos += 4096)
+            master_dynamics(m, p, all + 2 * pos, n + look - pos < 4096 ? (int)(n + look - pos) : 4096);
+        memcpy(buf, all + 2 * look, (size_t)n * 2 * sizeof(float));
+        free(all);
+    }
+    free(p);
+    free(m);
+    return now;
 }

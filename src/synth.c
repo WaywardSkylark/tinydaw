@@ -21,7 +21,7 @@
 const char *const SYNTH_GENRES[] = {"House", "Techno", "Hip-hop", "Trap", "Lo-fi", "Drum & bass", "Dubstep",
                                     "Synthwave", "Pop", "R&B", "Ambient", "Chiptune"};
 const int NSYNTH_GENRES = (int)(sizeof SYNTH_GENRES / sizeof SYNTH_GENRES[0]);
-const char *const SYNTH_KINDS[] = {"Bass", "Lead", "Pad", "Keys", "Pluck", "Drums", "FX"};
+const char *const SYNTH_KINDS[] = {"Bass", "Lead", "Pad", "Keys", "Pluck", "Vocals", "Drums", "FX"};
 const int NSYNTH_KINDS = (int)(sizeof SYNTH_KINDS / sizeof SYNTH_KINDS[0]);
 const char *const MACRO_NAMES[MACROS][3] = {
     {"Brightness", "dark", "bright"}, {"Softness", "snappy", "smooth"}, {"Thickness", "thin", "fat"},
@@ -217,6 +217,32 @@ const SynthPreset SYNTH_PRESETS[] = {
            .wave = SW_SQUARE, .pitch_drop = 36, .pitch_time = 0.08, .attack = 0, .decay = 0.3, .sustain = 0,
            .release = 0.05, .crush = 0.3),
 
+    /* ---- Vocals: a buzzy source through the formants of a vowel */
+    PRESET("Choir aah", "Ambient", "Vocals", "A soft choir singing aah", 60, 3.0,
+           .wave = SW_SAW, .voices = 5, .detune = 12, .width = 1, .noise = 0.04, .vowel = 1, .vibrato = 12,
+           .lfo_hz = 5, .attack = 0.4, .decay = 0, .sustain = 1, .release = 1),
+    PRESET("Deep choir", "Ambient", "Vocals", "Low voices singing ooh, like a cathedral", 48, 4.0,
+           .wave = SW_SAW, .voices = 4, .detune = 10, .width = 0.9, .noise = 0.03, .vowel = 4, .fshift = -3,
+           .vibrato = 8, .lfo_hz = 4.5, .attack = 0.6, .decay = 0, .sustain = 1, .release = 1.4),
+    PRESET("Ooh pad", "R&B", "Vocals", "Warm ooh to sit behind chords", 60, 4.0,
+           .wave = SW_SAW, .voices = 3, .detune = 8, .width = 0.8, .vowel = 5, .vibrato = 6, .lfo_hz = 4,
+           .attack = 0.6, .decay = 0, .sustain = 1, .release = 1.2),
+    PRESET("Vocal chop", "House", "Vocals", "A short sung blip that slides from oh to ee", 72, 0.4,
+           .wave = SW_SAW, .voices = 2, .detune = 6, .width = 0.5, .vowel = 4, .vowel2 = 3, .attack = 0.005,
+           .decay = 0.25, .sustain = 0.2, .release = 0.1),
+    PRESET("Talkbox lead", "Synthwave", "Vocals", "A synth that talks: wah-wah vowels in time", 67, 1.5,
+           .wave = SW_SAW, .sub = 0.2, .vowel = 4, .vowel2 = 1, .vmorph = 1.5, .attack = 0.01, .decay = 0,
+           .sustain = 1, .release = 0.2, .drive = 0.3),
+    PRESET("Robot vowels", "Techno", "Vocals", "A machine cycling through aah and ee", 60, 1.5,
+           .wave = SW_SQUARE, .vowel = 1, .vowel2 = 3, .vmorph = 4, .attack = 0.005, .decay = 0, .sustain = 1,
+           .release = 0.1, .crush = 0.2),
+    PRESET("Breathy ah", "Lo-fi", "Vocals", "Airy, whispered aah", 64, 2.0,
+           .wave = SW_TRI, .noise = 0.3, .vowel = 1, .filter = SF_LOW, .cutoff = 3000, .attack = 0.1, .decay = 0.4,
+           .sustain = 0.8, .release = 0.5, .crush = 0.2),
+    PRESET("Ee lead", "Pop", "Vocals", "Bright sung ee for top-line hooks", 72, 1.2,
+           .wave = SW_SAW, .voices = 2, .detune = 6, .width = 0.4, .vowel = 3, .vibrato = 15, .lfo_hz = 5.5,
+           .attack = 0.03, .decay = 0.2, .sustain = 0.8, .release = 0.3),
+
     /* ---- for everything */
     PRESET("Riser", "Pop", "FX", "Rising whoosh that builds into a drop", 48, 4.0,
            .wave = SW_SAW, .voices = 5, .detune = 20, .width = 1, .noise = 0.5, .psweep = 24, .filter = SF_LOW,
@@ -298,6 +324,52 @@ static void shape(const SynthSound *s, SynthPatch *q)
     }
 }
 
+/* Vowel formants (alto): frequency Hz, level dB, bandwidth Hz, for a e i o u. */
+static const double VOWELS[5][3][4] = {
+    {{800, 1150, 2800, 3500}, {0, -4, -20, -36}, {80, 90, 120, 130}},
+    {{400, 1600, 2700, 3300}, {0, -24, -30, -35}, {60, 80, 120, 150}},
+    {{350, 1700, 2700, 3700}, {0, -20, -30, -36}, {50, 100, 120, 150}},
+    {{450, 800, 2830, 3500}, {0, -9, -16, -28}, {70, 80, 100, 130}},
+    {{325, 700, 2530, 3500}, {0, -12, -30, -40}, {50, 60, 170, 180}},
+};
+
+typedef struct {
+    double a1[4], a2[4], a3[4], k[4], g[4];
+    double s1[2][4], s2[2][4];
+} Formants;
+
+/* Sets the bank to between vowels v and w (1..5) by mix 0..1, scaled by `scale`. */
+static void formants_set(Formants *f, int v, int w, double mix, double scale)
+{
+    if (w < 1 || w > 5) w = v;
+    for (int b = 0; b < 4; b++) {
+        double fr = VOWELS[v - 1][0][b] * (1 - mix) + VOWELS[w - 1][0][b] * mix;
+        double db = VOWELS[v - 1][1][b] * (1 - mix) + VOWELS[w - 1][1][b] * mix;
+        double bw = VOWELS[v - 1][2][b] * (1 - mix) + VOWELS[w - 1][2][b] * mix;
+        fr *= scale;
+        if (fr > SR * 0.45) fr = SR * 0.45;
+        double g = tan(PI * fr / SR);
+        f->k[b] = bw * scale / fr;               /* 1/Q: unity gain at the peak */
+        f->a1[b] = 1 / (1 + g * (g + f->k[b]));
+        f->a2[b] = g * f->a1[b];
+        f->a3[b] = g * f->a2[b];
+        f->g[b] = pow(10, (db + 6 * (b > 1)) / 20);   /* a little more of the upper formants: clearer */
+    }
+}
+
+static double formants_run(Formants *f, int c, double x)
+{
+    double y = 0;
+    for (int b = 0; b < 4; b++) {
+        double v3 = x - f->s2[c][b], v1 = f->a1[b] * f->s1[c][b] + f->a2[b] * v3;
+        double v2 = f->s2[c][b] + f->a2[b] * f->s1[c][b] + f->a3[b] * v3;
+        f->s1[c][b] = 2 * v1 - f->s1[c][b];
+        f->s2[c][b] = 2 * v2 - f->s2[c][b];
+        y += f->g[b] * f->k[b] * v1;
+    }
+    return y;
+}
+
 static double blep(double t, double dt)
 {
     if (t < dt) {
@@ -374,6 +446,11 @@ float *render_synth(const SynthSound *s, long *frames)
     double noise_lvl = q.noise, peak = 0;
     double dc_k = exp(-2 * PI * 8.0 / SR), dc_in[2] = {0, 0}, dc_out[2] = {0, 0};   /* DC blocker at 8 Hz */
     int bursts = q.bursts < 1 ? 1 : q.bursts > 8 ? 8 : q.bursts;
+    int vowel = q.vowel >= 1 && q.vowel <= 5 ? q.vowel : 0;
+    Formants fm_bank;
+    memset(&fm_bank, 0, sizeof fm_bank);
+    double fscale = pow(2.0, q.fshift / 12.0);
+    if (vowel) formants_set(&fm_bank, vowel, q.vowel2, 0, fscale);
 
     for (long i = 0; i < n; i++) {
         double t = (double)i / SR;
@@ -429,6 +506,15 @@ float *render_synth(const SynthSound *s, long *frames)
         }
         L += mono;
         R += mono;
+
+        if (vowel) {                             /* the voice: the vowel's formants */
+            if ((i & 15) == 0 && q.vowel2 >= 1 && q.vowel2 <= 5) {
+                double mix = q.vmorph > 0 ? 0.5 - 0.5 * cos(2 * PI * q.vmorph * t) : fmin(1, t / secs * 1.6);
+                formants_set(&fm_bank, vowel, q.vowel2, mix, fscale);
+            }
+            L = formants_run(&fm_bank, 0, L);
+            R = formants_run(&fm_bank, 1, R);
+        }
 
         if (filt) {
             if ((i & 7) == 0) {
@@ -511,11 +597,11 @@ int sample_generate_synth(Project *p, const SynthSound *s, const char *name)
 /* ---- the patch as text, for project files: name=value pairs, zeros left out, so files stay
  * readable and later versions can add fields */
 
-#define PATCH_INTS(X) X(wave) X(noosc) X(wave2) X(voices) X(bursts) X(filter)
+#define PATCH_INTS(X) X(wave) X(noosc) X(wave2) X(voices) X(bursts) X(filter) X(vowel) X(vowel2)
 #define PATCH_DOUBLES(X)                                                                                 \
     X(semi2) X(mix2) X(detune) X(width) X(pw) X(sub) X(noise) X(noise_decay) X(fm) X(fm_ratio) X(fm_decay) \
     X(pitch_drop) X(pitch_time) X(psweep) X(vibrato) X(lfo_hz) X(cutoff) X(reso) X(fenv) X(fdecay)       \
-    X(fsweep) X(wobble) X(attack) X(decay) X(sustain) X(release) X(drive) X(crush)
+    X(fsweep) X(wobble) X(attack) X(decay) X(sustain) X(release) X(drive) X(crush) X(vmorph) X(fshift)
 
 void synth_patch_text(const SynthPatch *p, char *buf, size_t n)
 {
@@ -553,4 +639,6 @@ void synth_patch_parse(const char *s, SynthPatch *p)
     if (p->wave < 0 || p->wave >= SW_COUNT) p->wave = SW_SAW;
     if (p->wave2 < 0 || p->wave2 >= SW_COUNT) p->wave2 = SW_SAW;
     if (p->filter < SF_NONE || p->filter > SF_BAND) p->filter = SF_NONE;
+    if (p->vowel < 0 || p->vowel > 5) p->vowel = 0;
+    if (p->vowel2 < 0 || p->vowel2 > 5) p->vowel2 = 0;
 }

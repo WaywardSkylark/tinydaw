@@ -8,10 +8,12 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
 
 - **Starts you off quickly:** three example songs, 30 ready-made drum beats, and a Theory panel
   with scales, chords and progressions you can add to your song with one click.
-- **Makes its own sounds:** a Generator with 54 ready-made sounds across 12 styles (808s, wobble
+- **Makes its own sounds:** a Generator with 62 ready-made sounds across 12 styles (808s, wobble
   bass, supersaws, pads, keys, drum hits, risers), shaped with five plain controls like
   *brightness* and *grit*. Also plain tones, and WAV, FLAC, OGG and MP3 files.
 - **A real mixer:** per-track filter, EQ, drive, pan and sidechain ducking, plus delay and reverb.
+- **Sings your words:** type a line, pick a tune and a voice (four clear singers, or robot,
+  talkbox, choir and whisper), and it sings it, in 12 languages. Uses the free eSpeak NG speech program.
 - **Piano roll and automation:** write melodies note by note, and draw volume, pan, filter and
   send changes over time.
 - **Live play:** 16 pads and a MIDI instrument, with recording onto the timeline.
@@ -28,15 +30,16 @@ run `tinydaw.exe`. Nothing is installed.
 
 ```sh
 # Arch / CachyOS
-sudo pacman -S sdl2-compat sdl2_ttf libsndfile libsamplerate alsa-lib ttf-dejavu zenity
+sudo pacman -S sdl2-compat sdl2_ttf libsndfile libsamplerate alsa-lib ttf-dejavu zenity espeak-ng
 # Debian / Ubuntu
-sudo apt install libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libsamplerate0-dev libasound2-dev fonts-dejavu-core zenity
+sudo apt install libsdl2-dev libsdl2-ttf-dev libsndfile1-dev libsamplerate0-dev libasound2-dev fonts-dejavu-core zenity espeak-ng
 
 make
 ./tinydaw
 ```
 
-`zenity` (or `kdialog`) gives the Open, Save and Export dialogs. Without alsa-lib tinydaw still builds, just without MIDI.
+`zenity` (or `kdialog`) gives the Open, Save and Export dialogs, and `espeak-ng` lets the Singer
+sing. Without alsa-lib tinydaw still builds, just without MIDI.
 
 ## Your first minute
 
@@ -131,8 +134,9 @@ has points. Automating the cutoff turns the track's filter on as a low-pass if i
 
 1. **What kind of music?** House, Techno, Hip-hop, Trap, Lo-fi, Drum & bass, Dubstep, Synthwave,
    Pop, R&B, Ambient or Chiptune (or Any).
-2. **What is the sound for?** Bass, Lead, Pad, Keys, Pluck, Drums or FX (or Anything). Each says
-   what it's for in plain words.
+2. **What is the sound for?** Bass, Lead, Pad, Keys, Pluck, Vocals, Drums or FX (or Anything).
+   Each says what it's for in plain words. Vocals are wordless voices: choirs, oohs and aahs, and
+   synths that talk.
 3. **Click a sound** to hear it. Its controls open underneath:
 
 | Control | What it does |
@@ -154,6 +158,30 @@ me** picks a random sound that fits your choices, with a little variation. Then:
   in the piano roll, and a MIDI keyboard plays it.
 
 Generator sounds are saved as recipes, like everything else that tinydaw makes.
+
+**Sounds > Singer** sings words you type:
+
+1. **Type the words.** Each word gets a note; split longer words with `-` to give each part its
+   own (`hap-py birth-day`). A comma leaves a short gap and a full stop a longer one. The line
+   underneath shows exactly how it will be split.
+2. **Pick a tune:** One note, Up and down, Rising, Falling, Bouncy or Call and answer, in the key
+   set in Theory > Keys, starting on the note you choose, at a slow, medium or fast pace. Or
+   **From a note clip**: write a melody in the piano roll, select its clip, and the words are sung
+   on its notes, one word per note.
+3. **Pick a voice.** **Clear** is a singer: pick Aria (high, bright), Lumi (high, soft), Kai
+   (low, warm) or Ren (low, plain). **Robot**, **Talkbox**, **Choir** and **Whisper** are
+   vocoder voices, low or high. Then one of 12 languages and how much vibrato.
+4. **Sing it** to hear it, then **+ Library** or **Put it at the playhead** (**Put it with the
+   clip** when singing a note clip's melody, so it lines up underneath).
+
+The words are spoken by [eSpeak NG](https://github.com/espeak-ng/espeak-ng), a free speech
+program that tinydaw runs when it needs it. The Clear singers keep eSpeak's own voice: it speaks
+each syllable on one steady pitch, and tinydaw moves that to the note and holds the vowel
+(pitch-synchronous overlap-add, so the vowel keeps its sound), gliding between joined notes. The
+other voices play the words through a vocoder, for a robotic character. Install it with your package manager on Linux, or the `.msi`
+from its Releases page on Windows; the Singer says so if it can't find it. Sung lines are saved as
+their words and notes, so a project opened where eSpeak NG isn't installed keeps them, silent,
+until it is.
 
 **Sounds > New sound** builds a plain tone instead: choose sine, square, saw, triangle, noise, kick,
 snare or hat. Then set the note, length, volume and envelope (attack, release), and the tuning (A4,
@@ -314,6 +342,8 @@ style, meant as a starting point.
 - `src/project.c`: the `.tdaw` format
 - `src/midi.c`: MIDI input (ALSA on Linux, winmm on Windows)
 - `src/theory.c`: scales, chords, progressions and the beat styles
+- `src/voice.c`: the Singer: runs eSpeak NG for each syllable, then either re-pitches it with
+  PSOLA (Clear) or sings it through a 28-band vocoder, stretching the vowel to the note's length
 - `src/synth.c`: the Generator's synth (unison oscillators, FM, a resonant filter with its own
   envelope and LFO, drive and crushing) and its genre presets
 - `src/compat.h`: the few things that differ on Windows

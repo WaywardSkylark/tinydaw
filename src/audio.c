@@ -680,6 +680,7 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         long nf = 0;
         char err[128];
         if (s->synth) nd = render_synth(&s->syn, &nf);
+        else if (s->vocal) nd = render_vocal(&s->voc, &nf, err, sizeof err);
         else if (s->is_beat == 2) nd = render_hit(&s->beat, s->beat_mask, &nf);
         else if (s->is_beat) nd = render_beat(&s->beat, s->beat_mask, s->gen_bpm, &nf);
         else if (s->generated && s->nchord) nd = render_notes(&s->gen, s->gen_bpm, s->chord, s->nchord, &nf);

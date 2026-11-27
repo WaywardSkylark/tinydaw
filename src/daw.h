@@ -70,6 +70,9 @@ typedef struct {
     double wobble;          /* LFO depth on the cutoff, octaves */
     double attack, decay, sustain, release;   /* s, s, 0..1, s */
     double drive, crush;    /* saturation and bit/rate reduction, 0..1 */
+    int vowel, vowel2;      /* a voice: formants of vowel 1..5 (a e i o u), 0 = none; vowel2 to move to */
+    double vmorph;          /* vowel movement: Hz back and forth, or 0 = one glide over the sound */
+    double fshift;          /* formants moved this many semitones (- = deeper voice, + = higher) */
 } SynthPatch;
 
 /* A Generator sound: the preset's patch plus the friendly controls (0..1, 0.5 = as designed). */
@@ -100,6 +103,28 @@ void synth_from_preset(SynthSound *s, int preset);
 void synth_patch_text(const SynthPatch *p, char *buf, size_t n);   /* for project files */
 void synth_patch_parse(const char *s, SynthPatch *p);
 
+/* A sung line (the Singer): words sung on notes. Each syllable is spoken by eSpeak NG (a separate
+ * free program) and played back through a vocoder at its note's pitch and length. */
+#define VOCAL_NOTES 96
+typedef struct { int note; double start, len; } VocalNote;   /* MIDI note; start and length in beats */
+enum { VS_ROBOT, VS_TALKBOX, VS_CHOIR, VS_WHISPER, VS_CLEAR, VS_STYLES };
+typedef struct {
+    char words[256];        /* as typed: a space or - starts the next note, , and . are rests */
+    int nnotes;
+    VocalNote notes[VOCAL_NOTES];
+    int style, high, lang;  /* VS_*; a higher voice; index into VOCAL_LANGS */
+    double vibrato, volume, a4, bpm;
+    int tune, first;        /* how the notes were made, so the Singer can show it again */
+    double step;
+    int singer;             /* VS_CLEAR: which of CLEAR_SINGERS */
+} VocalSpec;
+typedef struct { const char *name, *about, *variant; int high; } ClearSinger;
+extern const ClearSinger CLEAR_SINGERS[];
+extern const int NCLEAR_SINGERS;
+extern const char *const VOCAL_STYLES[VS_STYLES];
+extern const char *const VOCAL_LANGS[][2];   /* name, eSpeak voice */
+extern const int NVOCAL_LANGS;
+
 /* A sound in the library: interleaved stereo float at the project rate, plus a min/max
  * overview for drawing. Generated sounds remember their recipe and imported ones their
  * file, so a rate change can rebuild them at full quality instead of resampling. */
@@ -125,6 +150,8 @@ typedef struct {
     int src, semis, reversed;
     int synth;              /* made in the Generator: rebuilt from syn */
     SynthSound syn;
+    int vocal;              /* made in the Singer: rebuilt from voc (needs eSpeak NG) */
+    VocalSpec voc;
 } Sample;
 
 /* A placed region on the timeline that plays part of a sample. All positions in frames.
@@ -303,6 +330,13 @@ int sample_generate_beat(Project *p, const BeatSpec *b, int mask, const char *na
 float *render_hit(const BeatSpec *b, int lane, long *frames);
 int sample_generate_hit(Project *p, const BeatSpec *b, int lane, const char *name);
 int sample_generate_synth(Project *p, const SynthSound *s, const char *name);
+
+/* the Singer (voice.c) */
+int speech_available(char *where, size_t n);            /* 1 when eSpeak NG can be found */
+int vocal_syllables(const char *words, char syl[][40], int *rest_before, int max);
+float *render_vocal(const VocalSpec *v, long *frames, char *err, size_t errlen);
+/* Adds a sung line; if it can't be sung (no eSpeak NG), adds silence that keeps the recipe. */
+int sample_generate_vocal(Project *p, const VocalSpec *v, const char *name, char *err, size_t errlen);
 int project_add_track(Project *p, const char *name);   /* new row, or -1 when full */
 int sample_import(Project *p, const char *path, char *err, size_t errlen);
 void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);

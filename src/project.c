@@ -31,6 +31,7 @@ void project_free(Project *p)
 static const char *kind_of(const Sample *s)
 {
     if (s->synth) return "synth";
+    if (s->vocal) return "vocal";
     if (s->is_beat == 2) return "hit";
     if (s->is_beat) return "beat";
     if (s->generated && s->nchord) return "chord";
@@ -94,6 +95,13 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
             for (int m = 0; m < MACROS; m++) fprintf(f, " %.6g", y->macro[m]);
             fprintf(f, "\npatch%s\n", pt);
         }
+        if (s->vocal) {
+            const VocalSpec *v = &s->voc;
+            fprintf(f, "vocal %d %d %d %.6g %.6g %.9g %.17g %d %d %.6g %d\nwords %s\n", v->style, v->high, v->lang,
+                    v->vibrato, v->volume, v->a4, v->bpm, v->tune, v->first, v->step, v->singer, v->words);
+            for (int k = 0; k < v->nnotes; k++)
+                fprintf(f, "vnote %d %.9g %.9g\n", v->notes[k].note, v->notes[k].start, v->notes[k].len);
+        }
         if (s->pitched) fprintf(f, "variant %d %d %d\n", s->src, s->semis, s->reversed);
         if (s->path[0]) fprintf(f, "path %s\n", s->path);
         if (s->removed) fprintf(f, "removed\n");
@@ -135,8 +143,9 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
 typedef struct {
     char kind[16], name[96], path[1024];
     long frames;
-    int has_gen, has_beat, has_synth;
+    int has_gen, has_beat, has_synth, has_vocal;
     SynthSound syn;
+    VocalSpec voc;
     GenParams gen;
     double gen_bpm;
     int chord[6], nchord;
@@ -162,6 +171,8 @@ static int silence(Project *p, const char *name, long frames)
     return d ? sample_add(p, name, d, frames) : -1;
 }
 
+static int unsung;                       /* sung lines that couldn't be sung (no eSpeak NG) */
+
 /* Makes the pending sound; returns its index or -1. *missing counts files not found. */
 static int build(Project *p, Pending *s, int *missing)
 {
@@ -176,6 +187,11 @@ static int build(Project *p, Pending *s, int *missing)
     } else if (!strcmp(s->kind, "beat") && s->has_beat) {
         p->bpm = s->gen_bpm;
         idx = sample_generate_beat(p, &s->beat, s->mask, s->name);
+    } else if (!strcmp(s->kind, "vocal") && s->has_vocal) {
+        char err[200];
+        err[0] = 0;
+        idx = sample_generate_vocal(p, &s->voc, s->name, err, sizeof err);
+        if (idx >= 0 && err[0]) unsung++;      /* kept as silence */
     } else if (!strcmp(s->kind, "synth") && s->has_synth) {
         idx = sample_generate_synth(p, &s->syn, s->name);
     } else if (!strcmp(s->kind, "hit") && s->has_beat) {
@@ -213,6 +229,7 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         return -1;
     }
     int old_rate = g_rate, ntracks = 0, missing = 0, in_sample = 0, lineno = 1;
+    unsung = 0;
     Pending s;
     project_init(p);
     p->ntracks = 0;
@@ -290,6 +307,21 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                         &m[0], &m[1], &m[2], &m[3], &m[4]) == 4 + MACROS &&
                  y->note >= 0 && y->note <= 127 && y->seconds > 0;
             s.has_synth = ok;
+        } else if (in_sample && !strcmp(word, "vocal")) {
+            VocalSpec *v = &s.voc;
+            ok = sscanf(line, "vocal %d %d %d %lf %lf %lf %lf %d %d %lf %d", &v->style, &v->high, &v->lang, &v->vibrato,
+                        &v->volume, &v->a4, &v->bpm, &v->tune, &v->first, &v->step, &v->singer) >= 10 &&
+                 v->style >= 0 && v->style < VS_STYLES && v->bpm > 0;
+            s.has_vocal = ok;
+        } else if (in_sample && !strcmp(word, "words")) {
+            snprintf(s.voc.words, sizeof s.voc.words, "%.255s", rest_after(line, 1));
+        } else if (in_sample && !strcmp(word, "vnote")) {
+            VocalSpec *v = &s.voc;
+            if (v->nnotes < VOCAL_NOTES) {
+                VocalNote *nt = &v->notes[v->nnotes];
+                ok = sscanf(line, "vnote %d %lf %lf", &nt->note, &nt->start, &nt->len) == 3 && nt->len > 0;
+                if (ok) v->nnotes++;
+            }
         } else if (in_sample && !strcmp(word, "patch")) {
             synth_patch_parse(rest_after(line, 1), &s.syn.patch);
         } else if (in_sample && !strcmp(word, "lane")) {
@@ -390,7 +422,10 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
     const char *base = path_base(path);
     int n = snprintf(msg, msglen, "Opened %s (%d clips, %d sounds)", base, p->nclips, p->nsamples);
     if (missing && n > 0 && (size_t)n < msglen)
-        snprintf(msg + n, msglen - n, " - %d audio file%s missing, playing as silence", missing, missing == 1 ? "" : "s");
+        n += snprintf(msg + n, msglen - n, " - %d audio file%s missing, playing as silence", missing, missing == 1 ? "" : "s");
+    if (unsung && n > 0 && (size_t)n < msglen)
+        snprintf(msg + n, msglen - n, " - %d sung part%s silent: install eSpeak NG to hear %s", unsung,
+                 unsung == 1 ? "" : "s", unsung == 1 ? "it" : "them");
     return 0;
 
 fail:

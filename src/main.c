@@ -422,7 +422,7 @@ static void layout(void)
     L.ruler = 44;                       /* bar numbers above, minutes:seconds below */
     L.status = 26;
     L.pane_x = 70;                      /* RAIL_W: the category rail is on the far left */
-    L.pane_w = theory_open || pads_open || mixer_open || vis_open || (sounds_open && sounds_sub == 1) ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0;
+    L.pane_w = theory_open || pads_open || mixer_open || vis_open || sounds_open ? PANE_W : settings_open ? 440 : 0;
     L.left = L.pane_x + L.pane_w;
     L.tl_x = L.left + L.head;
     L.tl_w = W - L.tl_x;
@@ -975,6 +975,8 @@ static struct {
     SDL_Rect r;
 } tf;
 
+static int tf_drawn;                    /* the field being typed in was drawn last frame */
+
 static void tf_end(int keep)
 {
     if (!tf.buf) return;
@@ -1016,6 +1018,10 @@ static int tf_key(SDL_Keysym k)         /* 1 when the field took the key */
 static void textfield(SDL_Rect r, char *buf, size_t cap, int path, const char *placeholder)
 {
     int active = tf.buf == buf, hov = hit(r);
+    if (active) {
+        tf_drawn = 1;
+        tf.r = r;
+    }
     field_box(r, hov, active);
     if (active) {
         outline(r, ACCENT);
@@ -1037,6 +1043,7 @@ static void textfield(SDL_Rect r, char *buf, size_t cap, int path, const char *p
         tf.cap = cap;
         tf.path = path;
         tf.r = r;
+        tf_drawn = 1;
         snprintf(tf.orig, sizeof tf.orig, "%s", buf);
         SDL_StartTextInput();
     }
@@ -4195,7 +4202,8 @@ static double *slide_done;              /* the slider whose drag just ended */
 
 static const char *const KIND_ABOUT[] = {
     "the low notes under everything", "the main tune people hum", "long, soft background chords",
-    "piano-like, for chords and melodies", "short notes for riffs and arpeggios", "single drum hits to build beats",
+    "piano-like, for chords and melodies", "short notes for riffs and arpeggios", "voices: choirs, oohs and aahs, talking synths",
+    "single drum hits to build beats",
     "whooshes, booms and effects for transitions"};
 
 /* A 0..1 slider with a mark at the middle ("as designed"). Returns 1 when a drag on it ends,
@@ -4249,7 +4257,7 @@ static void gx_play(void)
 }
 
 static int gx_reveal;                   /* scroll the picked sound's controls into view */
-static SDL_Rect gx_row_r[128], gx_genre_r[16], gx_kind_r[8], gx_slide_r[MACROS], gx_lib_r, gx_place_r, gx_inst_r;
+static SDL_Rect gx_row_r[128], gx_genre_r[16], gx_kind_r[12], gx_slide_r[MACROS], gx_lib_r, gx_place_r, gx_inst_r;
 
 static void gx_pick(int preset)
 {
@@ -4448,11 +4456,11 @@ static int generator(int x, int y, int w)
     }
     y = section(x, y, w, "2  WHAT IS THE SOUND FOR?");
     {
-        int cols = 4, gap = 4, bw = (w - gap * (cols - 1)) / cols;
+        int cols = 5, gap = 4, bw = (w - gap * (cols - 1)) / cols;
         for (int i = -1; i < NSYNTH_KINDS; i++) {
             int k = i + 1;
             SDL_Rect r = {x + (k % cols) * (bw + gap), y + (k / cols) * 32, bw, 28};
-            if (k < 8) gx_kind_r[k] = r;
+            if (k < 12) gx_kind_r[k] = r;
             if (button(r, i < 0 ? "Anything" : SYNTH_KINDS[i], gx_kind == i)) gx_kind = i;
         }
         y += ((NSYNTH_KINDS + 1 + cols - 1) / cols) * 32 + 2;
@@ -4474,6 +4482,10 @@ static int generator(int x, int y, int w)
         y += 4;
         shown++;
     }
+    if (gx_kind >= 0 && !strcmp(SYNTH_KINDS[gx_kind], "Vocals")) {
+        text(x, y + 4, "To sing real words, try the Singer tab.", HEAD);
+        y += font_h + 12;
+    }
     if (!shown) {
         text(x, y + 4, "Nothing like that yet: pick Any or Anything.", DIM);
         y += font_h + 12;
@@ -4484,18 +4496,353 @@ static int generator(int x, int y, int w)
     return y + 2 * font_h + 10;
 }
 
+/* ---- Sounds > Singer: type words, pick a tune and a voice, and it sings them. The words are
+ * spoken by eSpeak NG and sung through a vocoder (voice.c). */
+
+enum { TUNE_ONE, TUNE_UPDOWN, TUNE_RISE, TUNE_FALL, TUNE_BOUNCE, TUNE_ANSWER, TUNE_CLIP, TUNES };
+static const char *const TUNE_NAMES[TUNES] = {"One note", "Up and down", "Rising", "Falling", "Bouncy",
+                                              "Call and answer", "From a note clip"};
+static const int TUNE_DEGREES[TUNE_CLIP][8] = {
+    {0, 0, 0, 0, 0, 0, 0, 0}, {0, 1, 2, 3, 4, 3, 2, 1}, {0, 1, 2, 3, 4, 5, 6, 7},
+    {4, 3, 2, 1, 0, 1, 2, 3}, {0, 2, 4, 2, 0, 2, 4, 7}, {0, 0, 2, 4, 4, 2, 1, 0}};
+static VocalSpec SV;
+static int sv_init, sv_espeak = -1;
+static float *sv_heard;
+static char sv_err[200];
+static SDL_Rect sv_words_r, sv_tune_r[TUNES], sv_sing_r, sv_lib_r, sv_place_r, sv_voice_r[2], sv_style_r[VS_STYLES],
+    sv_singer_r[8];
+
+static void sv_defaults(void)
+{
+    memset(&SV, 0, sizeof SV);
+    SV.style = VS_CLEAR;
+    SV.singer = 0;
+    SV.high = 1;
+    SV.vibrato = 0.5;
+    SV.volume = 0.8;
+    SV.tune = TUNE_UPDOWN;
+    SV.step = 0.5;
+    SV.first = 60 + th_root;                 /* a high voice, on the key's root */
+    sv_init = 1;
+}
+
+/* the note `deg` scale steps above (or below) `first` in the Theory key */
+static int key_note(int first, int deg)
+{
+    const Scale *sc = &SCALES[th_scale];
+    int rel = ((first - th_root) % 12 + 12) % 12, idx = 0, best = 99;
+    for (int k = 0; k < sc->n; k++) {            /* the scale note nearest the start */
+        int d = abs(sc->steps[k] - rel);
+        if (d < best) {
+            best = d;
+            idx = k;
+        }
+    }
+    int base = first - rel + sc->steps[idx], k = idx + deg, oct = 0;
+    while (k < 0) {
+        k += sc->n;
+        oct--;
+    }
+    oct += k / sc->n;
+    k %= sc->n;
+    return base - sc->steps[idx] + sc->steps[k] + 12 * oct;
+}
+
+/* the note clip the "From a note clip" tune uses: the selected one, or else the first */
+static int sv_clip(void)
+{
+    if (selected >= 0 && selected < P.nclips && P.clips[selected].pattern > 0) return selected;
+    for (int c = 0; c < P.nclips; c++)
+        if (P.clips[c].pattern > 0) return c;
+    return -1;
+}
+
+/* Fills SV.notes from the words and the tune. Returns how many syllables there are. */
+static int sv_make_notes(void)
+{
+    char syl[VOCAL_NOTES][40];
+    int rest[VOCAL_NOTES];
+    int n = vocal_syllables(SV.words, syl, rest, VOCAL_NOTES);
+    SV.bpm = P.bpm;
+    SV.a4 = P.a4;
+    SV.nnotes = 0;
+    if (SV.tune == TUNE_CLIP) {
+        int c = sv_clip();
+        if (c < 0) return n;
+        const Clip *cl = &P.clips[c];
+        int idx[MAX_NOTES], m = 0;
+        for (int i = 0; i < P.nnotes && m < MAX_NOTES; i++) {
+            const Note *nt = &P.notes[i];
+            if (nt->pattern == cl->pattern && nt->start >= cl->offset && nt->start < cl->offset + cl->length) idx[m++] = i;
+        }
+        for (int i = 1; i < m; i++)              /* in time order */
+            for (int j = i; j > 0 && P.notes[idx[j]].start < P.notes[idx[j - 1]].start; j--) {
+                int t = idx[j];
+                idx[j] = idx[j - 1];
+                idx[j - 1] = t;
+            }
+        double fpb = SR * 60.0 / P.bpm;
+        for (int i = 0; i < m && SV.nnotes < VOCAL_NOTES; i++) {
+            const Note *nt = &P.notes[idx[i]];
+            if (SV.nnotes > 0 && nt->start == P.notes[idx[i - 1]].start) continue;   /* chords: the first note */
+            SV.notes[SV.nnotes++] = (VocalNote){nt->note, (nt->start - cl->offset) / fpb, nt->length / fpb};
+        }
+        return n;
+    }
+    double t = 0, step = SV.step > 0 ? SV.step : 0.5;
+    for (int i = 0; i < n; i++) {
+        t += rest[i] * step;
+        double len = step;
+        if (i == n - 1) len = 2 * step;          /* the last word is held */
+        else if (rest[i + 1] == 2) len += step;  /* and the end of each line */
+        int deg = TUNE_DEGREES[SV.tune][i % 8];
+        SV.notes[SV.nnotes++] = (VocalNote){key_note(SV.first, deg), t, len * 0.95};
+        t += len;
+    }
+    return n;
+}
+
+static void sv_name(char *buf, size_t n)
+{
+    char w[40] = "";
+    int k = 0;
+    for (const char *p = SV.words; *p && k < 30; p++)    /* the first words */
+        if (*p != '-') w[k++] = *p;
+    w[k] = 0;
+    snprintf(buf, n, "Sung: %s%s", w, strlen(SV.words) > 30 ? "..." : "");
+}
+
+static int sv_keep(void)
+{
+    sv_make_notes();
+    char name[96];
+    sv_name(name, sizeof name);
+    long len;
+    sv_err[0] = 0;
+    float *d = render_vocal(&SV, &len, sv_err, sizeof sv_err);
+    if (!d) {
+        status("Couldn't sing that: %s", sv_err);
+        return -1;
+    }
+    int idx = sample_add(&P, name, d, len);
+    if (idx < 0) {
+        status("Library is full");
+        return -1;
+    }
+    P.samples[idx].vocal = 1;
+    P.samples[idx].voc = SV;
+    return idx;
+}
+
+static void sv_sing(void)
+{
+    sv_make_notes();
+    long len;
+    sv_err[0] = 0;
+    float *b = render_vocal(&SV, &len, sv_err, sizeof sv_err);
+    if (b) {
+        play_scratch(b, len);
+        sv_heard = b;
+        status("Singing %.1f seconds at %.0f BPM", (double)len / SR, P.bpm);
+    } else {
+        status("Couldn't sing that: %s", sv_err);
+    }
+}
+
+static int singer(int x, int y, int w)
+{
+    char buf[400];
+    if (!sv_init) sv_defaults();
+    if (sv_espeak < 0) sv_espeak = speech_available(NULL, 0);
+    if (!sv_espeak) {                            /* what's needed, said plainly */
+        int h = 5 * (font_h + 4) + 48;
+        SDL_Rect box = {x, y, w, h};
+        fill(box, alpha(ACCENT, 40));
+        outline(box, ACCENT);
+        int ty = y + 10;
+        text(x + 12, ty, "Singing needs eSpeak NG, a free speech program.", HEAD);
+        ty += font_h + 8;
+#ifdef _WIN32
+        text(x + 12, ty, "Get it from github.com/espeak-ng/espeak-ng: under", TEXT);
+        text(x + 12, ty + font_h + 4, "Releases, download the .msi and install it.", TEXT);
+#else
+        text(x + 12, ty, "Install the espeak-ng package, for example:", TEXT);
+        text(x + 12, ty + font_h + 4, "sudo pacman -S espeak-ng   or   sudo apt install espeak-ng", TEXT);
+#endif
+        ty += 2 * (font_h + 4) + 4;
+        if (button((SDL_Rect){x + 12, ty, 140, 28}, "Look again", 0)) {
+            sv_espeak = speech_available(NULL, 0);
+            status(sv_espeak ? "Found eSpeak NG: ready to sing" : "eSpeak NG still isn't there");
+        }
+        y += h + 14;
+    }
+
+    y = section(x, y, w, "1  TYPE THE WORDS");
+    sv_words_r = (SDL_Rect){x, y, w, 32};
+    textfield(sv_words_r, SV.words, sizeof SV.words, 1, "click here and type, like: hel-lo world");
+    y += 40;
+    char syl[VOCAL_NOTES][40];
+    int rest[VOCAL_NOTES];
+    int n = vocal_syllables(SV.words, syl, rest, VOCAL_NOTES), k = 0;
+    if (n) {                                     /* how it will be sung: one piece per note */
+        k = snprintf(buf, sizeof buf, "%d note%s:  ", n, n == 1 ? "" : "s");
+        for (int i = 0; i < n && k < (int)sizeof buf - 50; i++)
+            k += snprintf(buf + k, sizeof buf - k, "%s%s", i ? (rest[i] ? "  /  " : " · ") : "", syl[i]);
+        text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, TEXT);
+        y += font_h + 6;
+    }
+    text(x, y, "Each word gets a note. Split longer words with -", DIM);
+    text(x, y + font_h + 2, "to give each part its own: hap-py birth-day.", DIM);
+    text(x, y + 2 * (font_h + 2), "Commas and full stops leave a short gap.", DIM);
+    y += 3 * (font_h + 2) + 12;
+
+    y = section(x, y, w, "2  PICK A TUNE");
+    {
+        int cols = 3, gap = 4, bw = (w - gap * (cols - 1)) / cols;
+        for (int i = 0; i < TUNES; i++) {
+            SDL_Rect r = {x + (i % cols) * (bw + gap), y + (i / cols) * 32, i == TUNE_CLIP ? 2 * bw + gap : bw, 28};
+            sv_tune_r[i] = r;
+            if (button(r, TUNE_NAMES[i], SV.tune == i)) SV.tune = i;
+        }
+        y += ((TUNES + cols - 1) / cols) * 32 + 6;
+    }
+    if (SV.tune == TUNE_CLIP) {
+        int c = sv_clip();
+        if (c < 0) {
+            text(x, y, "No note clips yet: double-click a track to write a", DIM);
+            text(x, y + font_h + 2, "melody, then come back.", DIM);
+        } else {
+            sv_make_notes();
+            int m = SV.nnotes;
+            snprintf(buf, sizeof buf, "Sings on the %d notes of the %s note clip on track %d", m,
+                     c == selected ? "selected" : "first", P.clips[c].track + 1);
+            text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, TEXT);
+            text(x, y + font_h + 2, n > m ? "More words than notes: the extra words are left out."
+                                          : "Select a different note clip to use that one.", DIM);
+        }
+        y += 2 * (font_h + 2) + 10;
+    } else {
+        int hw = (w - 8) / 2;
+        note_number((SDL_Rect){x, y, hw, 26}, "Starts on", &SV.first);
+        static const double STEPS[3] = {1, 0.5, 0.25};
+        static const char *const SPEED[3] = {"Slow", "Medium", "Fast"};
+        int sw = (hw - 8) / 3;
+        for (int i = 0; i < 3; i++)
+            if (button((SDL_Rect){x + hw + 8 + i * (sw + 4), y, sw, 26}, SPEED[i], SV.step == STEPS[i])) SV.step = STEPS[i];
+        y += 32;
+        snprintf(buf, sizeof buf, "In %s %s: change the key in Theory > Keys", pitch_name(th_root, key_uses_flats(th_root, th_scale)),
+                 SCALES[th_scale].name);
+        text(x, y, buf, DIM);
+        y += font_h + 12;
+    }
+
+    y = section(x, y, w, "3  PICK A VOICE");
+    {
+        int hw = (w - 8) / 2;
+        static const int ORDER[VS_STYLES] = {VS_CLEAR, VS_ROBOT, VS_TALKBOX, VS_CHOIR, VS_WHISPER};
+        int bw = (w - 16) / VS_STYLES;
+        for (int k = 0; k < VS_STYLES; k++) {
+            int i = ORDER[k];
+            sv_style_r[i] = (SDL_Rect){x + k * (bw + 4), y, k == VS_STYLES - 1 ? w - k * (bw + 4) : bw, 28};
+            if (button(sv_style_r[i], VOCAL_STYLES[i], SV.style == i)) SV.style = i;
+        }
+        y += 32;
+        static const char *const ABOUT[VS_STYLES] = {"Robot: a clean electronic voice, like a vocoder",
+                                                     "Talkbox: buzzy and funky", "Choir: a robot group, spread wide",
+                                                     "Whisper: breath, no pitch",
+                                                     "Clear: a singer, smooth and in tune"};
+        text(x, y, ABOUT[SV.style], DIM);
+        y += font_h + 10;
+        if (SV.style == VS_CLEAR) {              /* the singers, by name */
+            int cw = (w - 4) / 2;
+            for (int i = 0; i < NCLEAR_SINGERS && i < 8; i++) {
+                SDL_Rect r = {x + (i % 2) * (cw + 4), y + (i / 2) * (2 * font_h + 18), cw, 2 * font_h + 14};
+                sv_singer_r[i] = r;
+                int on = SV.singer == i, hov = hit(r) && drag.kind == D_NONE;
+                fill(r, on ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
+                if (on) fill((SDL_Rect){r.x, r.y, 4, r.h}, ACCENT);
+                text(r.x + 12, r.y + 5, CLEAR_SINGERS[i].name, on ? HEAD : TEXT);
+                text_clip((SDL_Rect){r.x + 8, r.y, r.w - 12, r.h}, r.x + 12, r.y + 9 + font_h, CLEAR_SINGERS[i].about, DIM);
+                if (hov && lpress) {
+                    lpress = 0;
+                    if (CLEAR_SINGERS[i].high != SV.high) SV.first += CLEAR_SINGERS[i].high ? 12 : -12;   /* their range */
+                    SV.high = CLEAR_SINGERS[i].high;
+                    SV.singer = i;
+                }
+            }
+            y += ((NCLEAR_SINGERS + 1) / 2) * (2 * font_h + 18) + 6;
+        } else {
+            static const char *const VOICES[2] = {"Low voice", "High voice"};
+            for (int i = 0; i < 2; i++) {
+                sv_voice_r[i] = (SDL_Rect){x + i * (hw + 8), y, hw, 28};
+                if (button(sv_voice_r[i], VOICES[i], SV.high == i) && SV.high != i) {
+                    SV.high = i;
+                    SV.first += i ? 12 : -12;    /* and sing an octave up or down */
+                }
+            }
+            y += 38;
+        }
+        static const char *langs[32];
+        for (int i = 0; i < NVOCAL_LANGS && i < 32; i++) langs[i] = VOCAL_LANGS[i][0];
+        dropdown((SDL_Rect){x, y, hw, 28}, "Language: ", langs, NVOCAL_LANGS, &SV.lang, 0);
+        text(x + hw + 12, y + 6, "Vibrato", TEXT);
+        slider((SDL_Rect){x + hw + 12 + text_w("Vibrato") + 14, y, w - hw - 26 - text_w("Vibrato") - 14, 28}, &SV.vibrato);
+        y += 40;
+    }
+
+    y = section(x, y, w, "4  HEAR IT AND KEEP IT");
+    int ready = sv_espeak && n > 0 && (SV.tune != TUNE_CLIP || sv_clip() >= 0);
+    int hearing = scratch && scratch == sv_heard && scratch_pos < scratch_len;
+    int hw2 = (w - 8) / 2;
+    sv_sing_r = (SDL_Rect){x, y, w, 34};
+    sv_lib_r = (SDL_Rect){x, y + 40, hw2, 32};
+    sv_place_r = (SDL_Rect){x + hw2 + 8, y + 40, w - hw2 - 8, 32};
+    if (button2(sv_sing_r, hearing ? "Stop" : "Sing it", 1, ready || hearing)) {
+        if (hearing) play_scratch(NULL, 0);
+        else sv_sing();
+    }
+    if (button2(sv_lib_r, "+ Library", 0, ready)) {
+        int idx = sv_keep();
+        if (idx >= 0) {
+            status("Made \"%s\": it's in the library, drag it onto a track", P.samples[idx].name);
+            lib_scroll = P.nsamples;
+        }
+    }
+    if (button2(sv_place_r, SV.tune == TUNE_CLIP ? "Put it with the clip" : "Put it at the playhead", 0, ready)) {
+        int c = SV.tune == TUNE_CLIP ? sv_clip() : -1;
+        int idx = sv_keep();
+        if (idx >= 0) {
+            long at = c >= 0 ? P.clips[c].start : snap(P.playhead);
+            int t = free_track_at(at, P.samples[idx].frames);
+            int cl = clip_add(idx, t, at, 0, P.samples[idx].frames);
+            if (cl >= 0) {
+                selected = cl;
+                status("Placed \"%s\" on track %d", P.samples[idx].name, t + 1);
+            }
+        }
+    }
+    y += 80;
+    if (!n) text(x, y, "Type some words above to start.", DIM);
+    else if (!sv_espeak) text(x, y, "Install eSpeak NG (above) to hear it.", DIM);
+    else text(x, y, "Change anything and press Sing it again to hear it.", DIM);
+    return y + font_h + 12;
+}
+
 static void sounds_pane(void)
 {
     SDL_Rect pane = panel_rect();
     int saved, inside = panel_begin(pane, &sounds_scroll, sounds_content_h, &saved);
     int x = pane.x + 12, w = pane.w - 24, y0 = pane.y + 10 - (sounds_sub ? sounds_scroll : 0), y = y0;
-    static const char *const SUBS[] = {"Library", "Generator", "New sound"};
-    y = subtabs(x, y, w, SUBS, 3, &sounds_sub);
+    static const char *const SUBS[] = {"Library", "Generator", "Singer", "New sound"};
+    y = subtabs(x, y, w, SUBS, 4, &sounds_sub);
     if (sounds_sub == 0) {
         library_list(x, y, w, pane.y + pane.h);
         sounds_content_h = 0;                   /* the list scrolls itself */
     } else if (sounds_sub == 1) {
         y = generator(x, y, w - 14);           /* clear of the scrollbar */
+        sounds_content_h = y - y0 + 10;
+    } else if (sounds_sub == 2) {
+        y = singer(x, y, w - 14);
         sounds_content_h = y - y0 + 10;
     } else {
         y = new_sound(x, y, w);
@@ -7681,7 +8028,7 @@ static int selftest(void)
     /* New sound: Play hears it without adding it to the library */
     {
         show_panel(RI_SOUNDS);
-        sounds_sub = 2;
+        sounds_sub = 3;
         frame();
         int ns = P.nsamples;
         SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
@@ -8144,6 +8491,224 @@ static int selftest(void)
         gx_genre = gx_kind = gx_preset = -1;
         sounds_sub = 0;
         history_check();
+    }
+
+
+    /* ---- vowels and the Singer */
+    {
+        double share[2];
+        for (int k = 0; k < 2; k++) {           /* "aah" has more up around 1 kHz than "ooh" */
+            SynthSound y;
+            synth_from_preset(&y, 0);
+            memset(&y.patch, 0, sizeof y.patch);
+            y.patch.wave = SW_SAW;
+            y.patch.sustain = 1;
+            y.patch.vowel = k ? 5 : 1;
+            y.note = 48;
+            y.seconds = 0.5;
+            long n;
+            float *d = render_synth(&y, &n);
+            double kk = exp(-2 * 3.14159265358979 * 900.0 / SR), lp = 0, e = 0, a = 0;
+            for (long i = 0; i < n; i++) {
+                double x = d[2 * i];
+                lp = x + (lp - x) * kk;
+                e += (x - lp) * (x - lp);
+                a += x * x;
+            }
+            share[k] = e / a;
+            free(d);
+        }
+        check(share[0] > share[1] * 2, "the vowel controls change the voice (aah is brighter than ooh)");
+
+        char syl[16][40];
+        int rest[16];
+        int n = vocal_syllables("Hap-py birth-day, to you. Ça va", syl, rest, 16);
+        check(n == 8 && !strcmp(syl[0], "Hap") && !strcmp(syl[3], "day") && rest[4] == 1 && rest[6] == 2 &&
+                  !strcmp(syl[6], "Ça") && rest[1] == 0,
+              "words split into syllables at spaces and hyphens, with rests at commas and full stops");
+
+        sv_defaults();
+        int keep_root = th_root, keep_scale = th_scale;
+        th_root = 0;
+        th_scale = 0;
+        SV.first = 48;
+        SV.tune = TUNE_UPDOWN;
+        snprintf(SV.words, sizeof SV.words, "one two three four five six");
+        sv_make_notes();
+        check(SV.nnotes == 6 && SV.notes[0].note == 48 && SV.notes[1].note == 50 && SV.notes[2].note == 52 &&
+                  SV.notes[3].note == 53 && SV.notes[4].note == 55 && SV.notes[5].note == 53 &&
+                  SV.notes[5].len > SV.notes[4].len,
+              "a tune walks the key's scale, and the last word is held");
+        th_root = keep_root;
+        th_scale = keep_scale;
+    }
+    if (speech_available(NULL, 0)) {
+        VocalSpec v;
+        memset(&v, 0, sizeof v);
+        snprintf(v.words, sizeof v.words, "la");
+        v.nnotes = 1;
+        v.notes[0] = (VocalNote){57, 0, 2};      /* A3, 220 Hz, held a second at 120 BPM */
+        v.bpm = 120;
+        v.volume = 0.8;
+        char err[200] = "";
+        long n;
+        float *d = render_vocal(&v, &n, err, sizeof err);
+        double best = 0;
+        int lag = 0;
+        if (d) {                                 /* the pitch in the middle, by autocorrelation */
+            long mid = n / 2;
+            for (int L = SR / 400; L < SR / 100; L++) {
+                double c = 0, e1 = 0, e2 = 0;
+                for (long i = mid; i < mid + 4096; i++) {
+                    c += d[2 * i] * d[2 * (i + L)];
+                    e1 += d[2 * i] * d[2 * i];
+                    e2 += d[2 * (i + L)] * d[2 * (i + L)];
+                }
+                double r = c / sqrt(e1 * e2 + 1e-12);
+                if (r > best) {
+                    best = r;
+                    lag = L;
+                }
+            }
+        }
+        double hz = lag ? (double)SR / lag : 0;
+        check(d && fabs(hz - 220) < 220 * 0.03 && n >= SR, "a sung note is in tune and as long as the note");
+        free(d);
+
+        int bad = 0;
+        snprintf(v.words, sizeof v.words, "hel-lo world");
+        v.nnotes = 3;
+        v.notes[0] = (VocalNote){60, 0, 0.5};
+        v.notes[1] = (VocalNote){62, 0.5, 0.5};
+        v.notes[2] = (VocalNote){64, 1, 1};
+        for (int st = 0; st < VS_STYLES; st++)
+            for (int hi = 0; hi < 2; hi++) {
+                v.style = st;
+                v.high = hi;
+                d = render_vocal(&v, &n, err, sizeof err);
+                double e = 0;
+                for (long i = 0; d && i < 2 * n; i++) {
+                    if (!isfinite(d[i])) bad++;
+                    e += d[i] * d[i];
+                }
+                if (!d || sqrt(e / (2 * n)) < 0.02) bad++;
+                free(d);
+            }
+        check(!bad, "every voice sings, low and high, with clean audio");
+
+        int off = 0;                             /* the clear singers: in tune on every note */
+        for (int sg = 0; sg < NCLEAR_SINGERS; sg++) {
+            VocalSpec c;
+            memset(&c, 0, sizeof c);
+            c.style = VS_CLEAR;
+            c.singer = sg;
+            c.bpm = 120;
+            c.volume = 0.8;
+            snprintf(c.words, sizeof c.words, "sing to me");
+            int base = CLEAR_SINGERS[sg].high ? 64 : 50;
+            for (int k = 0; k < 3; k++) c.notes[k] = (VocalNote){base + 2 * k, k * 1.0, 0.95};
+            c.nnotes = 3;
+            float *cd = render_vocal(&c, &n, err, sizeof err);
+            for (int k = 0; cd && k < 3; k++) {
+                double want = 440 * pow(2, (c.notes[k].note - 69) / 12.0);
+                int T = (int)lround(SR / want);
+                long m = (long)((k + 0.5) * 0.5 * SR);
+                double cc = 0, e1 = 0, e2 = 0, ch = 0, e3 = 0;   /* alike a period later, not half a period */
+                for (long q = m; q < m + 2048; q++) {
+                    cc += cd[2 * q] * cd[2 * (q + T)];
+                    ch += cd[2 * q] * cd[2 * (q + T / 2)];
+                    e1 += cd[2 * q] * cd[2 * q];
+                    e2 += cd[2 * (q + T)] * cd[2 * (q + T)];
+                    e3 += cd[2 * (q + T / 2)] * cd[2 * (q + T / 2)];
+                }
+                double rt = cc / sqrt(e1 * e2 + 1e-12), rh = ch / sqrt(e1 * e3 + 1e-12);
+                if (!(rt > 0.85 && rh < rt - 0.2)) off++;
+            }
+            if (!cd) off += 3;
+            free(cd);
+        }
+        check(!off, "every Clear singer sings each note in tune");
+
+        Project *T = malloc(sizeof *T);
+        project_init(T);
+        v.style = VS_CHOIR;
+        int si = sample_generate_vocal(T, &v, "Sung: hello world", err, sizeof err);
+        char msg[1200];
+        int loaded = 0;
+        Project *U = malloc(sizeof *U);
+        if (si >= 0 && project_save(T, tpath, msg, sizeof msg) == 0) loaded = project_load(U, tpath, msg, sizeof msg) == 0;
+        check(loaded && U->samples[si].vocal && !strcmp(U->samples[si].voc.words, "hel-lo world") &&
+                  U->samples[si].voc.nnotes == 3 && U->samples[si].voc.notes[2].note == 64 &&
+                  U->samples[si].voc.style == VS_CHOIR && U->samples[si].frames == T->samples[si].frames &&
+                  !memcmp(U->samples[si].data, T->samples[si].data, (size_t)T->samples[si].frames * 2 * sizeof(float)),
+              "a sung line saves as words and notes and sings the same when opened");
+        long before = T->samples[si].frames;
+        int rate_ok = project_set_rate(T, 96000, msg, sizeof msg) == 0 && labs(T->samples[si].frames - 2 * before) <= 2;
+        project_set_rate(T, 48000, msg, sizeof msg);
+        check(rate_ok, "a sung line is sung again at a new project rate");
+        if (loaded) project_free(U);
+        free(U);
+        project_free(T);
+        free(T);
+        remove(tpath);
+
+        /* the Singer tab, by mouse and keyboard */
+        show_panel(RI_SOUNDS);
+        sounds_sub = 2;
+        sounds_scroll = 0;
+        sv_defaults();
+        sv_espeak = -1;
+        frame();
+        SDL_Rect r = sv_words_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        tf_insert("sing a song");
+        tf_key((SDL_Keysym){.sym = SDLK_RETURN});
+        frame();
+        check(!strcmp(SV.words, "sing a song"), "typing words into the Singer");
+        r = sv_sing_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(scratch && scratch == sv_heard, "Sing it sings them");
+        {                                       /* scroll down to the buttons, as you would */
+            SDL_Rect pr = panel_rect();
+            int over = sv_place_r.y + sv_place_r.h + 10 - (pr.y + pr.h);
+            if (over > 0) sounds_scroll += over;
+            frame();
+        }
+        int ns = P.nsamples;
+        r = sv_lib_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(P.nsamples == ns + 1 && P.samples[ns].vocal && !strcmp(P.samples[ns].name, "Sung: sing a song"),
+              "+ Library keeps the sung line");
+        int nc = P.nclips;
+        P.playhead = 4 * (long)SR;
+        r = sv_place_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(P.nclips == nc + 1 && P.samples[P.clips[nc].sample].vocal && P.clips[nc].start == snap(4 * (long)SR),
+              "Put it at the playhead places the sung line");
+        int c = new_note_clip(P.ntracks - 1, 12 * beat_frames());   /* a melody to sing on */
+        roll_close();
+        int pat = P.clips[c].pattern;
+        long bf = beat_frames();
+        note_add(pat, 67, P.clips[c].offset, bf, 0.8f);
+        note_add(pat, 69, P.clips[c].offset + bf, bf, 0.8f);
+        note_add(pat, 71, P.clips[c].offset + 2 * bf, 2 * bf, 0.8f);
+        selected = c;
+        r = sv_tune_r[TUNE_CLIP];
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        frame();
+        check(SV.tune == TUNE_CLIP && SV.nnotes == 3 && SV.notes[1].note == 69 && fabs(SV.notes[2].start - 2) < 1e-6 &&
+                  fabs(SV.notes[2].len - 2) < 1e-6,
+              "From a note clip sings on that clip's notes");
+        nc = P.nclips;
+        r = sv_place_r;
+        sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
+        check(P.nclips == nc + 1 && P.clips[nc].start == P.clips[c].start && P.clips[nc].track != P.clips[c].track,
+              "Put it with the clip lines it up under the melody");
+        play_scratch(NULL, 0);
+        sounds_sub = 0;
+        history_check();
+    } else {
+        check(1, "(eSpeak NG isn't installed here: the singing tests were skipped)");
     }
 
     /* ---- Export: choosing the folder and file name */
@@ -9561,7 +10126,7 @@ static void export_dialog(void)
 static void frame(void)
 {
     static int min_for = -1;            /* the pane needs a wider window */
-    int need = 70 + (theory_open || pads_open || mixer_open || vis_open || (sounds_open && sounds_sub == 1) ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0) + 520;
+    int need = 70 + (theory_open || pads_open || mixer_open || vis_open || sounds_open ? PANE_W : settings_open ? 440 : 0) + 520;
     if (min_for != need) {              /* the panel plus a usable timeline */
         min_for = need;
         SDL_SetWindowMinimumSize(win, need, 560);
@@ -9580,7 +10145,8 @@ static void frame(void)
     vis_update();
     dd_input();
     if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
-    if (tf.buf && (((lpress || rpress) && !hit(tf.r)) || !export_open)) tf_end(1);
+    if (tf.buf && (((lpress || rpress) && !hit(tf.r)) || !tf_drawn)) tf_end(1);   /* clicked away, or it's gone */
+    tf_drawn = 0;
 
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
@@ -9979,6 +10545,13 @@ int main(int argc, char **argv)
                 lib_badge = 3;
                 lib_badge_at = 0;
             }
+        }
+        if (getenv("TINYDAW_SHOT_SING")) {       /* the Singer, with words typed */
+            show_panel(RI_SOUNDS);
+            sounds_sub = 2;
+            sv_defaults();
+            snprintf(SV.words, sizeof SV.words, "%s", getenv("TINYDAW_SHOT_SING"));
+            sounds_scroll = getenv("TINYDAW_SHOT_SCROLL") ? atoi(getenv("TINYDAW_SHOT_SCROLL")) : 0;
         }
         if (getenv("TINYDAW_SHOT_GEN")) {        /* "genre,kind,preset,scroll": the Generator */
             int ge = -1, ki = -1, pr = -1, sc = 0;

@@ -62,7 +62,9 @@ see [win/README.md](win/README.md). It behaves the same; projects open on either
 | Scroll a pane | Mouse wheel, drag its scrollbar, click above or below the handle for a page, or Page Up/Down |
 | Snap | **Snap** button cycles off / bar / 1/2 / 1/4 / 1/8 / 1/16. Hold Shift while dragging to ignore it |
 | Play / stop | Space, or **Play**. Home jumps back to the start |
-| Playhead | Click or drag in the ruler |
+| Playhead | Click or drag in the ruler. The ruler shows bars above and minutes:seconds below, and the playhead's time |
+| Move around | Ctrl+Left/Right a bar, Ctrl+Shift+Left/Right a beat, Alt+Left/Right the previous/next clip edge, Home/End the start/end, F brings the playhead into view, Z zooms to fit the song |
+| Metronome | **Click** in the top bar (or M) turns it on; the arrow beside it has the sound, volume, 8th/16th ticks, accent, a 1-2 bar count-in (always or only when recording), and tempo: BPM, +/-1, half/double, tap tempo (T). The four lights show the beat |
 | Loop | Right-drag in the ruler to set a region, **Loop** or L to toggle |
 | Zoom / scroll | Ctrl+wheel to zoom, wheel to scroll; +/- also zoom |
 | Mute / solo / volume | M and S buttons and the bar under each track name |

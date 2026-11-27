@@ -231,13 +231,12 @@ static void disc(int cx, int cy, int r, Col c);
 enum { RI_SOUNDS, RI_THEORY, RI_PADS, RI_MIXER, RI_VISUAL, RI_SETTINGS, RI_COUNT };
 static void open_panel(int which);
 static void show_toggle(void);
+static void settings_save(void);
 static Mixer *MX;                       /* the live mixer (see audio_cb) */
 static int sel_track;                   /* the track the Mixer pane shows */
 static int headless;                    /* self-test or screenshot: touch no files */
 static int pads_drop(int sample);
 static int theory_open, theory_tab = 6, th_root, th_scale, th_sevenths, th_track = 4, th_scroll, th_content_h;
-static Uint32 taps[8];
-static int ntaps;
 
 /* one-off preview buffer (chords, intervals, notes) played on top of everything */
 static float *scratch;
@@ -259,7 +258,7 @@ static void layout(void)
     SDL_GetWindowSize(win, &W, &H);
     L.top = 48;
     L.head = 150;
-    L.ruler = 28;
+    L.ruler = 44;                       /* bar numbers above, minutes:seconds below */
     L.status = 26;
     L.pane_x = 70;                      /* RAIL_W: the category rail is on the far left */
     L.pane_w = theory_open || pads_open || mixer_open || vis_open ? PANE_W : settings_open ? 440 : sounds_open ? 300 : 0;
@@ -519,12 +518,170 @@ static void preview(int sample)
     UNLOCK();
 }
 
+/* ---------------------------------------------------------------- metronome */
+
+/* A click on every beat (or 8th/16th), louder on the first beat of each bar, and an optional
+ * count-in before playback starts. It plays in the audio callback on top of everything and is
+ * never exported. Its settings belong to this computer (settings.conf), not to a project. */
+enum { CLICK_CLICK, CLICK_BEEP, CLICK_WOOD, CLICK_SOUNDS };
+static struct {
+    int on, sound, sub, accent, countin, countin_rec_only;
+    float volume;
+} MET = {0, CLICK_CLICK, 1, 1, 1, 1, 0.6f};
+static const char *const CLICK_NAMES[CLICK_SOUNDS] = {"Click", "Beep", "Wood"};
+static float *click_buf[3];             /* bar, beat, subdivision */
+static long click_len, click_pos = -1;
+static int click_kind, click_rate, click_sound = -1;
+static long countin_left, countin_total; /* frames of count-in still to play (audio thread) */
+static int pads_rec;
+#define MET_PI 3.14159265358979323846
+
+static void metronome_prepare(void)     /* (re)make the click sounds at the project rate */
+{
+    if (click_rate == SR && click_sound == MET.sound) return;
+    long n = SR / 16;                   /* 62 ms */
+    float *nb[3];
+    static const double freq[CLICK_SOUNDS][3] = {{2200, 1600, 1600}, {1320, 880, 880}, {1900, 1500, 1500}};
+    static const float level[3] = {1.0f, 0.7f, 0.38f};
+    for (int k = 0; k < 3; k++) {
+        nb[k] = calloc((size_t)n * 2, sizeof(float));
+        if (!nb[k]) {
+            while (k--) free(nb[k]);
+            return;
+        }
+        Uint32 seed = 12345;
+        for (long i = 0; i < n; i++) {
+            double t = (double)i / SR, f = freq[MET.sound][k], v;
+            seed = seed * 1664525u + 1013904223u;
+            double noise = (seed >> 9) / 4194304.0 - 1;
+            if (MET.sound == CLICK_BEEP) v = sin(2 * MET_PI * f * t) * exp(-t * 45) * (t < 0.002 ? t / 0.002 : 1);
+            else if (MET.sound == CLICK_WOOD) v = (sin(2 * MET_PI * f * t) * 0.7 + noise * 0.3) * exp(-t * 110);
+            else v = sin(2 * MET_PI * f * t) * exp(-t * 160) + noise * exp(-t * 900) * 0.4;
+            nb[k][2 * i] = nb[k][2 * i + 1] = (float)(v * level[k] * 0.6);
+        }
+    }
+    float *old[3];
+    LOCK();
+    for (int k = 0; k < 3; k++) {
+        old[k] = click_buf[k];
+        click_buf[k] = nb[k];
+    }
+    click_len = n;
+    click_pos = -1;
+    click_rate = SR;
+    click_sound = MET.sound;
+    UNLOCK();
+    for (int k = 0; k < 3; k++) free(old[k]);
+}
+
+/* Adds the clicks for song frames [start, start + n) to out (audio thread). force: count-in */
+static void metronome_mix(float *out, long start, int n, int force)
+{
+    if ((!MET.on && !force) || !click_buf[0] || click_rate != SR) return;
+    int sub = MET.sub < 1 ? 1 : MET.sub;
+    double tick = 60.0 / P.bpm * SR / sub;
+    long k = (long)ceil(start / tick - 1e-9);
+    long next = (long)llround(k * tick);
+    for (int i = 0; i < n; i++) {
+        if (start + i == next) {
+            click_pos = 0;
+            click_kind = k % (4 * sub) == 0 && MET.accent ? 0 : k % sub == 0 ? 1 : 2;
+            k++;
+            next = (long)llround(k * tick);
+        }
+        if (click_pos >= 0) {
+            out[2 * i] += click_buf[click_kind][2 * click_pos] * MET.volume;
+            out[2 * i + 1] += click_buf[click_kind][2 * click_pos + 1] * MET.volume;
+            if (++click_pos >= click_len) click_pos = -1;
+        }
+    }
+}
+
 static void toggle_play(void)
 {
     LOCK();
     P.playing = !P.playing;
+    countin_left = 0;
+    if (P.playing && MET.countin > 0 && (!MET.countin_rec_only || pads_rec)) {
+        countin_total = countin_left = MET.countin * 4 * beat_frames();   /* a bar or two of clicks first */
+        click_pos = -1;
+    }
     UNLOCK();
 }
+
+static Uint32 taps[8];
+static int ntaps;
+
+static void tap_tempo(void)             /* tap along: the average gap sets the tempo */
+{
+    Uint32 now = SDL_GetTicks();
+    if (ntaps && now - taps[ntaps - 1] > 2000) ntaps = 0;
+    if (ntaps == 8) {
+        memmove(taps, taps + 1, 7 * sizeof *taps);
+        ntaps = 7;
+    }
+    taps[ntaps++] = now;
+    if (ntaps >= 2) {
+        double bpm = 60000.0 * (ntaps - 1) / (taps[ntaps - 1] - taps[0]);
+        if (bpm >= 40 && bpm <= 300) {
+            P.bpm = round(bpm);
+            status("Tempo %.0f BPM from %d taps (clips keep their times)", P.bpm, ntaps);
+        }
+    } else {
+        status("Tap: keep tapping on the beat");
+    }
+}
+
+/* ---- moving around the timeline */
+
+static void view_show(long f)           /* scroll so frame f is in view (centred if it was off) */
+{
+    double x = frame_to_x(f);
+    if (x < L.tl_x + 20 || x > L.tl_x + L.tl_w - 20) {
+        view_start = (double)f / SR - L.tl_w / 2.0 / pps;
+        if (view_start < 0) view_start = 0;
+    }
+}
+
+static void playhead_to(long f)
+{
+    LOCK();
+    P.playhead = f < 0 ? 0 : f;
+    UNLOCK();
+    view_show(P.playhead);
+}
+
+static void playhead_step(long unit, int dir)  /* to the previous/next multiple of unit */
+{
+    long ph = P.playhead, k = ph / unit;
+    if (dir > 0) playhead_to((k + 1) * unit);
+    else playhead_to(ph % unit ? k * unit : (k - 1) * unit);
+}
+
+static void playhead_to_edge(int dir)   /* the next/previous clip start or end, on any track */
+{
+    long ph = P.playhead, best = dir > 0 ? -1 : -1;
+    for (int i = 0; i < P.nclips; i++) {
+        long e[2] = {P.clips[i].start, P.clips[i].start + P.clips[i].length};
+        for (int j = 0; j < 2; j++) {
+            if (dir > 0 && e[j] > ph && (best < 0 || e[j] < best)) best = e[j];
+            if (dir < 0 && e[j] < ph && (best < 0 || e[j] > best)) best = e[j];
+        }
+    }
+    if (best >= 0) playhead_to(best);
+    else if (dir < 0) playhead_to(0);
+}
+
+static void zoom_to_fit(void)
+{
+    long end = project_end(&P);
+    if (end <= 0) end = 8 * beat_frames();
+    pps = (L.tl_w - 40) / ((double)end / SR);
+    if (pps < 8) pps = 8;
+    if (pps > 4000) pps = 4000;
+    view_start = 0;
+}
+
 
 static void toggle_loop(void)
 {
@@ -1417,7 +1574,7 @@ static void bind_label(int pad, char *buf, size_t n)   /* short, for the pad its
 
 static void rec_push(int pad, int note, int down)
 {
-    if (!pads_rec || !P.playing || nrecq >= (int)(sizeof recq / sizeof *recq)) return;
+    if (!pads_rec || !P.playing || countin_left > 0 || nrecq >= (int)(sizeof recq / sizeof *recq)) return;
     recq[nrecq++] = (RecEv){pad, note, down, P.playhead};
 }
 
@@ -1988,7 +2145,8 @@ static int pads_take_key(SDL_Keysym k)
 
 /* ---- File menu and the "save changes?" question */
 
-static SDL_Rect file_btn;
+static SDL_Rect file_btn, met_btn;
+static int met_open;
 
 static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int enabled)
 {
@@ -2041,6 +2199,72 @@ static void file_menu(void)
     case 9: show_toggle(); break;
     case 11: request(ACT_QUIT, NULL); break;
     }
+}
+
+/* The metronome's options and the tempo, under the arrow next to Click. */
+static void metronome_menu(void)
+{
+    int w = 380, h = 404;
+    SDL_Rect m = {met_btn.x + met_btn.w - w, met_btn.y + met_btn.h + 2, w, h};
+    if (m.x < 4) m.x = 4;
+    fill(m, PANEL);
+    outline(m, LINE);
+    int x = m.x + 14, y = m.y + 12, iw = w - 28, changed = 0;
+    char buf[64];
+    text(x, y, "METRONOME", DIM);
+    y += font_h + 8;
+    if (button((SDL_Rect){x, y, 110, 28}, MET.on ? "Click: on" : "Click: off", MET.on)) MET.on = !MET.on, changed = 1;
+    double vol = MET.volume;
+    number((SDL_Rect){x + 118, y, iw - 118, 28}, "Volume", &vol, 0, 1.5, 0.005, "%.2f");
+    if ((float)vol != MET.volume) MET.volume = (float)vol, changed = 1;
+    y += 36;
+    text(x, y + 7, "Sound", DIM);
+    int bw = (iw - 80 - 8) / 3;
+    for (int i = 0; i < CLICK_SOUNDS; i++)
+        if (button((SDL_Rect){x + 80 + i * (bw + 4), y, bw, 28}, CLICK_NAMES[i], MET.sound == i)) {
+            MET.sound = i;
+            metronome_prepare();
+            changed = 1;
+        }
+    y += 34;
+    text(x, y + 7, "Ticks", DIM);
+    static const char *const SUBN[] = {"Beats", "8ths", "16ths"};
+    static const int SUBV[] = {1, 2, 4};
+    for (int i = 0; i < 3; i++)
+        if (button((SDL_Rect){x + 80 + i * (bw + 4), y, bw, 28}, SUBN[i], MET.sub == SUBV[i])) MET.sub = SUBV[i], changed = 1;
+    y += 34;
+    if (button((SDL_Rect){x, y, iw, 28}, MET.accent ? "Louder first beat of each bar: on" : "Louder first beat of each bar: off",
+               MET.accent))
+        MET.accent = !MET.accent, changed = 1;
+    y += 34;
+    text(x, y + 7, "Count-in", DIM);
+    static const char *const CIN[] = {"Off", "1 bar", "2 bars"};
+    for (int i = 0; i < 3; i++)
+        if (button((SDL_Rect){x + 80 + i * (bw + 4), y, bw, 28}, CIN[i], MET.countin == i)) MET.countin = i, changed = 1;
+    y += 34;
+    if (button((SDL_Rect){x + 80, y, iw - 80, 28}, MET.countin_rec_only ? "Only when recording (Rec)" : "Every time play starts",
+               0))
+        MET.countin_rec_only = !MET.countin_rec_only, changed = 1;
+    y += 42;
+    text(x, y, "TEMPO", DIM);
+    y += font_h + 8;
+    number((SDL_Rect){x, y, 120, 28}, "BPM", &P.bpm, 40, 300, 0.25, "%.1f");
+    static const char *const TB[] = {"-1", "+1", "/2", "x2"};
+    for (int i = 0; i < 4; i++)
+        if (button((SDL_Rect){x + 128 + i * 46, y, 42, 28}, TB[i], 0)) {
+            double v = i == 0 ? P.bpm - 1 : i == 1 ? P.bpm + 1 : i == 2 ? P.bpm / 2 : P.bpm * 2;
+            P.bpm = v < 40 ? 40 : v > 300 ? 300 : round(v * 4) / 4;
+        }
+    y += 36;
+    if (button((SDL_Rect){x, y, 150, 28}, "Tap tempo (T)", 0)) tap_tempo();
+    snprintf(buf, sizeof buf, "beat %.0f ms, bar %.2f s", 60000.0 / P.bpm, 240.0 / P.bpm);
+    text_clip((SDL_Rect){x + 158, y, iw - 158, 28}, x + 158, y + 7, buf, DIM);
+    y += 34;
+    text(x, y + 2, "M toggles the click. Clips keep their times", DIM);
+    text(x, y + font_h + 4, "when the tempo changes.", DIM);
+    if (changed) settings_save();
+    if ((lpress || rpress) && !hit(m) && !hit(met_btn)) met_open = 0;   /* a click outside closes it */
+    if (hit(m)) lpress = rpress = 0;
 }
 
 static void confirm_dialog(void)
@@ -3122,7 +3346,10 @@ static int settings_content(int x, int y, int w)
         break;
     case 3: {
         static const char *const KEYS[][2] = {
-            {"Space", "play / stop"}, {"Home", "back to the start"}, {"L", "loop on/off"},
+            {"Space", "play / stop"}, {"Home / End", "start / end of the song"},
+            {"Ctrl+Left / Right", "playhead one bar"}, {"Ctrl+Shift+Left / Right", "playhead one beat"},
+            {"Alt+Left / Right", "previous / next clip edge"}, {"F", "show the playhead"}, {"Z", "zoom to fit"},
+            {"M", "metronome on/off"}, {"T", "tap tempo"}, {"L", "loop on/off"},
             {"Ctrl+Z / Ctrl+Shift+Z", "undo / redo"}, {"Ctrl+S, Ctrl+O, Ctrl+N", "save, open, new"},
             {"Ctrl+E", "export"}, {"Ctrl+1 .. Ctrl+6", "open a panel"}, {"Ctrl+B", "hide / show the panel"},
             {"Ctrl+,", "settings"}, {"F11", "full-screen show"}, {"Ctrl+A, Esc", "select all, none"},
@@ -3197,6 +3424,8 @@ static void settings_save(void)
     FILE *f = fopen(settings_file(), "w");
     if (!f) return;
     fprintf(f, "# tinydaw settings\ntheme %d\naudio_output %s\npanel %d\n", theme_choice, audio_out, last_panel);
+    fprintf(f, "metronome %d %d %d %d %d %d %.3f\n", MET.on, MET.sound, MET.sub, MET.accent, MET.countin,
+            MET.countin_rec_only, MET.volume);
     fclose(f);
 }
 
@@ -3211,6 +3440,13 @@ static void settings_load(void)
         if (sscanf(line_, "theme %d", &v) == 1 && v >= 0 && v <= 2) theme_choice = v;
         else if (!strncmp(line_, "audio_output ", 13)) snprintf(audio_out, sizeof audio_out, "%.255s", line_ + 13);
         else if (sscanf(line_, "panel %d", &v) == 1 && v >= 0 && v < RI_COUNT) last_panel = v;
+        else if (!strncmp(line_, "metronome ", 10)) {
+            int on, so, sub, ac, ci, ro;
+            float vol;
+            if (sscanf(line_, "metronome %d %d %d %d %d %d %f", &on, &so, &sub, &ac, &ci, &ro, &vol) == 7 &&
+                so >= 0 && so < CLICK_SOUNDS && (sub == 1 || sub == 2 || sub == 4) && ci >= 0 && ci <= 2)
+                MET = (typeof(MET)){on, so, sub, ac, ci, ro, vol < 0 ? 0 : vol > 1.5f ? 1.5f : vol};
+        }
     }
     fclose(f);
 }
@@ -3302,7 +3538,30 @@ static void top_bar(void)
     x += 104;
     snprintf(buf, sizeof buf, "Snap %s", SNAP_NAMES[snap_i]);
     if (button((SDL_Rect){x, y, 96, h}, buf, 0)) snap_i = (snap_i + 1) % 6;
-    x += 110;
+    x += 104;
+    if (button((SDL_Rect){x, y, 62, h}, "Click", MET.on)) {
+        MET.on = !MET.on;
+        settings_save();
+    }
+    met_btn = (SDL_Rect){x + 64, y, 22, h};
+    if (button(met_btn, "", met_open)) met_open = !met_open;
+    for (int i = 0; i < 4; i++)                     /* a small down arrow */
+        line(met_btn.x + 7 + i, y + 13 + i, met_btn.x + 15 - i, y + 13 + i, met_open ? DARK : TEXT);
+    x += 92;
+    {                                               /* the beat: four lights, the first is the bar */
+        double bt = countin_left > 0 ? (double)(countin_total - countin_left) / beat_frames()
+                                     : (double)P.playhead / beat_frames();
+        int beat = (int)floor(bt) % 4, lit = P.playing && bt - floor(bt) < 0.35;
+        for (int i = 0; i < 4; i++) {
+            SDL_Rect d = {x + i * 12, y + 11, 8, 8};
+            fill(d, lit && i == beat ? (i == 0 ? ACCENT : HEAD) : PANEL3);
+        }
+        if (countin_left > 0) {
+            snprintf(buf, sizeof buf, "%d", (int)((countin_left - 1) / beat_frames()) + 1);
+            text(x + 52, y + (h - font_h) / 2, buf, ACCENT);
+        }
+    }
+    x += 70;
     line(x - 6, y + 4, x - 6, y + h - 4, LINE);
 
     double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
@@ -3369,6 +3628,42 @@ static void track_headers(void)
     }
 }
 
+/* "1:05", or "1:05.25" with hundredths */
+static void fmt_clock(double secs, int fine, char *buf, size_t n)
+{
+    if (secs < 0) secs = 0;
+    int m = (int)(secs / 60);
+    double r = secs - m * 60;
+    if (fine) snprintf(buf, n, "%d:%05.2f", m, r);
+    else if (r - floor(r) > 1e-6) snprintf(buf, n, "%d:%04.1f", m, r);
+    else snprintf(buf, n, "%d:%02d", m, (int)r);
+}
+
+/* The minutes:seconds scale: labelled ticks at a step that keeps labels apart, small ones between */
+static void time_scale(SDL_Rect r)
+{
+    static const double STEPS[][2] = {{0.1, 0.02}, {0.25, 0.05}, {0.5, 0.1}, {1, 0.25}, {2, 0.5}, {5, 1},
+                                      {10, 2}, {15, 5}, {30, 10}, {60, 15}, {120, 30}, {300, 60}, {600, 120}};
+    int k = 0;
+    while (k < 12 && STEPS[k][0] * pps < 64) k++;
+    double major = STEPS[k][0], minor = STEPS[k][1];
+    fill(r, tone(PANEL, 0.92f));
+    double t0 = floor(view_start / minor) * minor;
+    for (double t = t0;; t += minor) {
+        double xd = L.tl_x + (t - view_start) * pps;
+        if (xd > W) break;
+        if (xd < r.x) continue;
+        int x = (int)xd;
+        int is_major = fabs(t / major - floor(t / major + 0.5)) < 1e-6;
+        line(x, r.y, x, r.y + (is_major ? 8 : 3), DIM);
+        if (is_major) {
+            char b[16];
+            fmt_clock(t, 0, b, sizeof b);
+            text(x + 3, r.y + 3, b, DIM);
+        }
+    }
+}
+
 static void timeline(void)
 {
     SDL_Rect area = {L.tl_x, L.lanes_y, L.tl_w, P.ntracks * L.lane_h};
@@ -3383,7 +3678,7 @@ static void timeline(void)
     /* loop region */
     if (P.loop_end > P.loop_start) {
         int x0 = (int)frame_to_x(P.loop_start), x1 = (int)frame_to_x(P.loop_end);
-        fill((SDL_Rect){x0, L.top + 4, x1 - x0, L.ruler - 8}, alpha(ACCENT, P.loop ? 110 : 40));
+        fill((SDL_Rect){x0, L.top + 4, x1 - x0, 18}, alpha(ACCENT, P.loop ? 110 : 40));
         if (P.loop) fill((SDL_Rect){x0, area.y, x1 - x0, area.h}, alpha(ACCENT, 14));
     }
 
@@ -3401,13 +3696,15 @@ static void timeline(void)
         if (xd < L.tl_x) continue;
         int x = (int)xd, bar = b % 4 == 0;
         line(x, area.y, x, area.y + area.h, bar ? LINE : tone(LINE, 0.62f));
-        line(x, L.top + L.ruler - (bar ? 10 : 5), x, L.top + L.ruler, DIM);
+        line(x, L.top + 24 - (bar ? 8 : 4), x, L.top + 24, DIM);
         if (bar && (b / 4) % label_every == 0) {
             char buf[24];
             snprintf(buf, sizeof buf, "%ld", b / 4 + 1);
             text(x + 4, L.top + 3, buf, DIM);
         }
     }
+    time_scale((SDL_Rect){L.tl_x, L.top + 24, L.tl_w, L.ruler - 24});
+    line(L.tl_x, L.top + 24, W, L.top + 24, tone(LINE, 0.8f));
     line(L.tl_x, L.top + L.ruler - 1, W, L.top + L.ruler - 1, LINE);
 
     /* clips */
@@ -3496,6 +3793,11 @@ static void timeline(void)
     if (phx >= L.tl_x && phx < W) {
         line(phx, L.top, phx, area.y + area.h, HEAD);
         fill((SDL_Rect){phx - 5, L.top, 11, 8}, HEAD);
+        char tb[24];                            /* the playhead's time, on the time scale */
+        fmt_clock((double)P.playhead / SR, 1, tb, sizeof tb);
+        int tw = text_w(tb) + 8, tx = phx + 4 + tw > W ? phx - 4 - tw : phx + 4;
+        fill((SDL_Rect){tx, L.top + 26, tw, font_h + 2}, HEAD);
+        text(tx + 4, L.top + 27, tb, DARK);
     }
     SDL_RenderSetClipRect(ren, NULL);
 
@@ -3771,8 +4073,8 @@ static void key(SDL_Keysym k)
         if (k.sym == SDLK_ESCAPE) confirm_act = ACT_NONE;
         return;
     }
-    if (menu_open && k.sym == SDLK_ESCAPE) {
-        menu_open = 0;
+    if ((menu_open || met_open) && k.sym == SDLK_ESCAPE) {
+        menu_open = met_open = 0;
         return;
     }
     if (learn_pad >= 0 && k.sym == SDLK_ESCAPE) {
@@ -3860,11 +4162,31 @@ static void key(SDL_Keysym k)
         }
         break;
     case SDLK_l: toggle_loop(); break;
+    case SDLK_END: playhead_to(project_end(&P)); break;
+    case SDLK_f:                        /* bring the playhead into the middle of the view */
+        view_start = (double)P.playhead / SR - L.tl_w / 2.0 / pps;
+        if (view_start < 0) view_start = 0;
+        break;
+    case SDLK_z: zoom_to_fit(); break;
+    case SDLK_t: tap_tempo(); break;
+    case SDLK_m:
+        MET.on = !MET.on;
+        settings_save();
+        status(MET.on ? "Metronome on" : "Metronome off");
+        break;
     case SDLK_e:
         if (ctrl) open_export();
         break;
     case SDLK_LEFT:
     case SDLK_RIGHT:
+        if (k.mod & KMOD_CTRL) {        /* Ctrl: the playhead by a bar, Ctrl+Shift by a beat */
+            playhead_step(k.mod & KMOD_SHIFT ? beat_frames() : 4 * beat_frames(), k.sym == SDLK_RIGHT ? 1 : -1);
+            break;
+        }
+        if (k.mod & KMOD_ALT) {         /* Alt: to the next/previous clip edge */
+            playhead_to_edge(k.sym == SDLK_RIGHT ? 1 : -1);
+            break;
+        }
         if (sel_count()) {
             group_remember();
             group_place(k.sym == SDLK_LEFT ? -nudge : nudge, 0);
@@ -3922,9 +4244,16 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
     float *out = (float *)stream;
     int frames = len / (int)(2 * sizeof(float));
     memset(stream, 0, (size_t)len);
+    int done = 0;
+    if (P.playing && countin_left > 0) {        /* the count-in: clicks only, the song waits */
+        int n = countin_left < frames ? (int)countin_left : frames;
+        mixer_run(MX, &P, P.playhead, 0, out, n, -1, 1);
+        metronome_mix(out, countin_total - countin_left, n, 1);
+        countin_left -= n;
+        done = n;
+    }
     if (!P.playing) mixer_run(MX, &P, P.playhead, 0, out, frames, -1, 1);   /* pads, instrument, tails */
     if (P.playing) {
-        int done = 0;
         while (done < frames) {
             int n = frames - done;
             int looping = P.loop && P.loop_end > P.loop_start && P.playhead < P.loop_end;
@@ -3934,6 +4263,7 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
                 continue;
             }
             mixer_run(MX, &P, P.playhead, 1, out + 2 * done, n, -1, 1);
+            metronome_mix(out + 2 * done, P.playhead, n, 0);
             P.playhead += n;
             done += n;
             if (looping && P.playhead >= P.loop_end) P.playhead = P.loop_start;
@@ -3998,6 +4328,7 @@ static void set_rate(int rate)
     UNLOCK();
     history_scale(ratio);
     open_audio();
+    metronome_prepare();
     status("%s", msg);
 }
 
@@ -4725,6 +5056,113 @@ static int selftest(void)
         open_panel(RI_SOUNDS);
     }
 
+    /* the time scale, the metronome, count-in and navigation keys */
+    {
+        char tb[24];
+        fmt_clock(65.25, 1, tb, sizeof tb);
+        check(!strcmp(tb, "1:05.25"), "the playhead clock reads 1:05.25");
+        fmt_clock(90, 0, tb, sizeof tb);
+        char tc[24];
+        fmt_clock(2.5, 0, tc, sizeof tc);
+        check(!strcmp(tb, "1:30") && !strcmp(tc, "0:02.5"), "the time scale labels read 1:30 and 0:02.5");
+
+        typeof(MET) saved_met = MET;
+        MET = (typeof(MET)){1, CLICK_CLICK, 1, 1, 0, 1, 1.0f};
+        metronome_prepare();
+        long bf2 = beat_frames();
+        float *mb = calloc((size_t)bf2 * 4 * 2, sizeof(float));
+        LOCK();
+        click_pos = -1;
+        metronome_mix(mb, 0, (int)(2 * bf2), 0);
+        UNLOCK();
+        double at0 = test_rms(mb, 0, SR / 50, 2), at1 = test_rms(mb, bf2, bf2 + SR / 50, 2);
+        double between = test_rms(mb, bf2 / 2, bf2 / 2 + SR / 50, 2);
+        check(at0 > 0.01 && at1 > 0.01 && between < 1e-6, "the metronome clicks on each beat and is silent between");
+        check(at0 > at1 * 1.2, "the first beat of the bar is louder");
+        memset(mb, 0, sizeof(float) * (size_t)bf2 * 8);
+        MET.sub = 2;
+        LOCK();
+        click_pos = -1;
+        metronome_mix(mb, 0, (int)bf2, 0);
+        UNLOCK();
+        check(test_rms(mb, bf2 / 2, bf2 / 2 + SR / 50, 2) > 0.005, "8ths add a tick halfway through the beat");
+        free(mb);
+
+        MET.sub = 1;
+        MET.countin = 1;
+        MET.countin_rec_only = 0;
+        LOCK();
+        P.playing = 0;
+        P.loop = 0;
+        P.playhead = 0;
+        UNLOCK();
+        toggle_play();
+        check(P.playing && countin_left == 4 * bf2, "with a count-in, play starts with a bar of clicks");
+        float *cb = calloc((size_t)bf2 * 2, sizeof(float));
+        LOCK();
+        audio_cb(NULL, (Uint8 *)cb, (int)(bf2 * 2 * sizeof(float)));
+        long ph_during = P.playhead;
+        for (int i = 0; i < 3; i++) audio_cb(NULL, (Uint8 *)cb, (int)(bf2 * 2 * sizeof(float)));
+        audio_cb(NULL, (Uint8 *)cb, (int)(bf2 * 2 * sizeof(float)));
+        long ph_after = P.playhead;
+        UNLOCK();
+        free(cb);
+        check(ph_during == 0 && ph_after == bf2, "the song waits for the count-in, then plays from where it was");
+        toggle_play();
+        MET = saved_met;
+        metronome_prepare();
+
+        LOCK();
+        P.nclips = 0;
+        UNLOCK();
+        sel_clear();
+        clip_add(0, 0, 2 * bf2, 0, bf2);
+        clip_add(0, 1, 9 * bf2, 0, 3 * bf2);
+        playhead_to(0);
+        SDL_Keysym nk = {0};
+        nk.sym = SDLK_RIGHT;
+        nk.mod = KMOD_CTRL;
+        key(nk);
+        check(P.playhead == 4 * bf2, "Ctrl+Right moves the playhead to the next bar");
+        nk.mod = KMOD_CTRL | KMOD_SHIFT;
+        key(nk);
+        check(P.playhead == 5 * bf2, "Ctrl+Shift+Right moves it one beat");
+        nk.sym = SDLK_LEFT;
+        nk.mod = KMOD_CTRL;
+        key(nk);
+        key(nk);
+        check(P.playhead == 0, "Ctrl+Left goes back to the bar, then the bar before");
+        nk.mod = KMOD_ALT;
+        nk.sym = SDLK_RIGHT;
+        key(nk);
+        long e1 = P.playhead;
+        key(nk);
+        check(e1 == 2 * bf2 && P.playhead == 3 * bf2, "Alt+Right jumps to each clip edge in turn");
+        nk.mod = 0;
+        nk.sym = SDLK_END;
+        key(nk);
+        check(P.playhead == 12 * bf2, "End goes to the end of the song");
+        frame();                                     /* the layout as it is now */
+        nk.sym = SDLK_z;
+        key(nk);
+        frame();
+        check(frame_to_x(12 * bf2) <= L.tl_x + L.tl_w && view_start == 0, "Z zooms so the whole song fits");
+        pps = 400;
+        nk.sym = SDLK_f;
+        key(nk);
+        frame();
+        double phx = frame_to_x(P.playhead);
+        check(phx > L.tl_x + L.tl_w / 4 && phx < L.tl_x + 3 * L.tl_w / 4, "F brings the playhead into view");
+        pps = 110;
+        Uint32 tnow = SDL_GetTicks();
+        taps[0] = tnow - 1500;
+        taps[1] = tnow - 1000;
+        taps[2] = tnow - 500;
+        ntaps = 3;
+        tap_tempo();
+        check(fabs(P.bpm - 120) <= 2, "tapping every half second sets 120 BPM");
+    }
+
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
     int vj = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 4, 12, 1);
     if (vj >= 0) {
@@ -5222,22 +5660,7 @@ static int tab_tempo(int x, int y, int w)
     y += 2 * (font_h + 2) + 12;
 
     Uint32 now = SDL_GetTicks();
-    if (button((SDL_Rect){x, y, 150, 34}, "Tap tempo", 0)) {
-        if (ntaps && now - taps[ntaps - 1] > 2000) ntaps = 0;
-        if (ntaps == 8) {
-            memmove(taps, taps + 1, 7 * sizeof *taps);
-            ntaps = 7;
-        }
-        taps[ntaps++] = now;
-        if (ntaps >= 2) {
-            double avg = (double)(taps[ntaps - 1] - taps[0]) / (ntaps - 1);
-            double bpm = 60000.0 / avg;
-            if (bpm >= 40 && bpm <= 300) {
-                P.bpm = round(bpm);
-                status("Tempo %.0f BPM from %d taps (clips keep their times)", P.bpm, ntaps);
-            }
-        }
-    }
+    if (button((SDL_Rect){x, y, 150, 34}, "Tap tempo (T)", 0)) tap_tempo();
     if (ntaps && now - taps[ntaps - 1] > 2000) ntaps = 0;
     snprintf(buf, sizeof buf, ntaps ? "%d taps: keep tapping" : "Tap along on the beat, 4+ times", ntaps);
     text(x + 162, y + (34 - font_h) / 2, buf, DIM);
@@ -5833,7 +6256,7 @@ static void frame(void)
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
     int picking = SDL_AtomicGet(&fd_state) != 0;
-    int modal = export_open || export_pending || menu_open || confirm_act || picking;
+    int modal = export_open || export_pending || menu_open || met_open || confirm_act || picking;
     if (modal) {
         mx = my = -10000;
         lpress = rpress = wheel_x = wheel_y = 0;
@@ -5864,6 +6287,7 @@ static void frame(void)
     }
     if (export_open) export_dialog();
     if (menu_open && !picking) file_menu();
+    if (met_open && !picking) metronome_menu();
     if (confirm_act && !picking) confirm_dialog();
     if (picking) {
         lpress = rpress = 0;
@@ -6119,6 +6543,7 @@ int main(int argc, char **argv)
         if (theme_choice == THEME_SYSTEM) theme_follow();
         else theme_apply(theme_choice == THEME_LIGHT);
         if (audio_out[0]) open_audio();          /* the saved output device */
+        metronome_prepare();
         open_panel(last_panel);
         sounds_open = last_panel == RI_SOUNDS;
         binds_load();
@@ -6153,6 +6578,10 @@ int main(int argc, char **argv)
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
         if (getenv("TINYDAW_SHOT_LIGHT")) theme_apply(1);
+        if (getenv("TINYDAW_SHOT_MET")) {
+            met_open = 1;
+            MET.on = 1;
+        }
         if (getenv("TINYDAW_SHOT_PANEL")) {      /* "index[:sub]", or -1 for none */
             int pn = -1, sub = 0;
             sscanf(getenv("TINYDAW_SHOT_PANEL"), "%d:%d", &pn, &sub);

@@ -69,8 +69,10 @@ Settings > **Keys** lists every shortcut.
 | To | Do this |
 |---|---|
 | Play / stop | Space, or **Play**. Home goes to the start, End to the end |
+| Transport | The buttons at the bottom centre: to the start, back a bar, play/pause, stop (back to where play began; again for the start), forward a bar, to the end, loop and record |
 | Put a sound in the song | Drag it from the library onto a track |
 | Hear a sound first | Click it in the library (click again to stop) |
+| Remove a sound | The **×** on its row in the library, or right-click it. Its clips go too; Ctrl+Z brings both back |
 | Move a clip | Drag it, in time and between tracks. Arrow keys nudge it |
 | Trim a clip | Drag its left or right edge |
 | Fade a clip | Drag the small squares on its top corners |
@@ -86,6 +88,7 @@ Settings > **Keys** lists every shortcut.
 | Zoom / scroll | Ctrl + wheel to zoom, wheel to scroll, + and - also zoom |
 | Change any number | Click it and type, or drag it, or use the wheel (Shift for fine steps) |
 | Tempo | Click **BPM** and type, or use the metronome menu (±1, half, double, tap tempo with T) |
+| Tuning | **A4** beside BPM (415–466 Hz, e.g. 432). New sounds use it |
 | Metronome | **Click** in the top bar, or M. Its arrow sets the sound, 8th/16th ticks, accent and a 1-2 bar count-in |
 | Add a track | **+** next to TRACKS (up to 16). Each track has mute, solo and volume |
 | Bring in audio | Drop WAV, FLAC, OGG or MP3 files on the window |
@@ -94,7 +97,7 @@ Settings > **Keys** lists every shortcut.
 
 **Sounds** has your library and **New sound**: choose sine, square, saw, triangle, noise, kick,
 snare or hat. Then set the note, length, volume and envelope (attack, release), and the tuning (A4,
-415–466 Hz). Pitched and reversed copies made for clips stay out of the library list.
+415–466 Hz). **Play** lets you hear it before adding it to the library. Pitched and reversed copies made for clips stay out of the library list.
 
 **Theory** has four tabs. Everything you can hear in them has a **+** that adds it to the library.
 The strip at the top of each tab sets which wave and length those sounds use. Adding the same thing
@@ -123,7 +126,17 @@ sounds exactly like what you hear, including the delay and reverb dying away aft
 
 ## Playing live: pads and MIDI
 
-**Pads** (or F2) has 16 pads. Drag library sounds onto them, or press **Fill from library**.
+**Pads** (or F2) has 16 pads. Drag library sounds onto them, press **Fill from library**, or pick a
+**Preset** to fill all 16 at once (Ctrl+Z puts the old pads back):
+
+| Preset | What goes on the pads |
+|---|---|
+| Drum kit | The Beats style's kit: kick, snare, clap, hats and percussion, then toms, a ghost snare and tuned variations |
+| Drums + chords | Eight drums, then the seven chords of the Theory key and the first one with a seventh |
+| Chords of the key | The key's seven triads, its seven sevenths, then I up an octave and IV, held while you press |
+| Scale notes | 16 notes of the Theory scale, climbing from the key note in the middle octave |
+| Bass notes | The same, two octaves down, on the bass track |
+| Beat loops | The Beats style's whole beat and its parts as loops, then other styles' beats |
 
 - **Playing them:** keys 1-4, Q-R, A-F and Z-V (while the panel is open), a game-controller button,
   a MIDI note, or a click.

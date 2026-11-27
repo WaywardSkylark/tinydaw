@@ -30,6 +30,7 @@ void project_free(Project *p)
 
 static const char *kind_of(const Sample *s)
 {
+    if (s->is_beat == 2) return "hit";
     if (s->is_beat) return "beat";
     if (s->generated && s->nchord) return "chord";
     if (s->generated) return "gen";
@@ -86,6 +87,7 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
         }
         if (s->pitched) fprintf(f, "variant %d %d %d\n", s->src, s->semis, s->reversed);
         if (s->path[0]) fprintf(f, "path %s\n", s->path);
+        if (s->removed) fprintf(f, "removed\n");
         fprintf(f, "end\n");
     }
     for (int c = 0; c < p->nclips; c++) {
@@ -119,7 +121,7 @@ typedef struct {
     double gen_bpm;
     int chord[6], nchord;
     BeatSpec beat;
-    int mask, src, semis, reversed;
+    int mask, src, semis, reversed, removed;
 } Pending;
 
 static const char *rest_after(const char *line, int fields)   /* the text after n words */
@@ -154,6 +156,8 @@ static int build(Project *p, Pending *s, int *missing)
     } else if (!strcmp(s->kind, "beat") && s->has_beat) {
         p->bpm = s->gen_bpm;
         idx = sample_generate_beat(p, &s->beat, s->mask, s->name);
+    } else if (!strcmp(s->kind, "hit") && s->has_beat) {
+        idx = sample_generate_hit(p, &s->beat, s->mask, s->name);
     } else if ((!strcmp(s->kind, "pitched") || !strcmp(s->kind, "variant")) && s->src >= 0 && s->src < p->nsamples) {
         idx = sample_variant(p, s->src, s->semis, s->reversed);
     } else if (!strcmp(s->kind, "file") && s->path[0]) {
@@ -169,6 +173,7 @@ static int build(Project *p, Pending *s, int *missing)
     if (idx >= 0 && idx < before) idx = -1;      /* must be a new sound, or later indices shift */
     if (idx < 0) idx = silence(p, s->name, s->frames);
     if (idx >= 0) snprintf(p->samples[idx].name, sizeof p->samples[idx].name, "%s", s->name);
+    if (idx >= 0) p->samples[idx].removed = s->removed;
     return idx;
 }
 
@@ -265,6 +270,8 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
             ok = sscanf(line, "pitch %d %d", &s.src, &s.semis) == 2;
         } else if (in_sample && !strcmp(word, "variant")) {
             ok = sscanf(line, "variant %d %d %d", &s.src, &s.semis, &s.reversed) == 3;
+        } else if (in_sample && !strcmp(word, "removed")) {
+            s.removed = 1;
         } else if (in_sample && !strcmp(word, "path")) {
             snprintf(s.path, sizeof s.path, "%.1023s", rest_after(line, 1));
         } else if (in_sample && !strcmp(word, "end")) {

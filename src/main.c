@@ -748,10 +748,13 @@ static void metronome_mix(float *out, long start, int n, int force)
     }
 }
 
+static long play_from;                  /* where playback last started: Stop goes back there */
+
 static void toggle_play(void)
 {
     LOCK();
     P.playing = !P.playing;
+    if (P.playing) play_from = P.playhead;
     countin_left = 0;
     if (P.playing && MET.countin > 0 && (!MET.countin_rec_only || pads_rec)) {
         countin_total = countin_left = MET.countin * 4 * beat_frames();   /* a bar or two of clicks first */
@@ -833,6 +836,18 @@ static void zoom_to_fit(void)
     view_start = 0;
 }
 
+
+static void playhead_to(long f);
+
+static void transport_stop(void)         /* stop and go back to where play began; again: to the start */
+{
+    LOCK();
+    int was = P.playing;
+    P.playing = 0;
+    countin_left = 0;
+    P.playhead = was ? play_from : 0;
+    UNLOCK();
+}
 
 static void toggle_loop(void)
 {
@@ -1301,6 +1316,7 @@ typedef struct {
     Pad pads[NPADS];
     int inst_sample, inst_root, inst_track;
     MasterFx fx;
+    unsigned char removed[MAX_SAMPLES];  /* sounds taken out of the library */
     char label[48];
 } State;
 
@@ -1336,7 +1352,15 @@ static void state_capture(State *s)
     s->inst_root = P.inst_root;
     s->inst_track = P.inst_track;
     s->fx = P.fx;
+    for (int i = 0; i < MAX_SAMPLES; i++) s->removed[i] = i < P.nsamples && P.samples[i].removed;
     s->label[0] = 0;
+}
+
+static int removed_same(const State *s)
+{
+    for (int i = 0; i < P.nsamples; i++)
+        if (s->removed[i] != (P.samples[i].removed != 0)) return 0;
+    return 1;
 }
 
 static int state_same(const State *s)
@@ -1345,7 +1369,8 @@ static int state_same(const State *s)
            s->ntracks == P.ntracks && !memcmp(s->tracks, P.tracks, sizeof s->tracks) && s->bpm == P.bpm &&
            s->a4 == P.a4 && s->loop_start == P.loop_start && s->loop_end == P.loop_end &&
            !memcmp(s->pads, P.pads, sizeof s->pads) && s->inst_sample == P.inst_sample &&
-           s->inst_root == P.inst_root && s->inst_track == P.inst_track && !memcmp(&s->fx, &P.fx, sizeof s->fx);
+           s->inst_root == P.inst_root && s->inst_track == P.inst_track && !memcmp(&s->fx, &P.fx, sizeof s->fx) &&
+           removed_same(s);
 }
 
 static void state_restore(const State *s)
@@ -1364,13 +1389,15 @@ static void state_restore(const State *s)
     P.inst_root = s->inst_root;
     P.inst_track = s->inst_track;
     P.fx = s->fx;
+    for (int i = 0; i < P.nsamples; i++) P.samples[i].removed = s->removed[i];
     UNLOCK();
 }
 
 /* What changed between a snapshot and the project now, in a few words. */
 static void describe(const State *s, char *buf, size_t n)
 {
-    if (P.nclips > s->nclips) snprintf(buf, n, "add %d clip%s", P.nclips - s->nclips, P.nclips - s->nclips == 1 ? "" : "s");
+    if (!removed_same(s)) snprintf(buf, n, "remove a sound");
+    else if (P.nclips > s->nclips) snprintf(buf, n, "add %d clip%s", P.nclips - s->nclips, P.nclips - s->nclips == 1 ? "" : "s");
     else if (P.nclips < s->nclips) snprintf(buf, n, "delete %d clip%s", s->nclips - P.nclips, s->nclips - P.nclips == 1 ? "" : "s");
     else if (memcmp(s->clips, P.clips, (size_t)P.nclips * sizeof(Clip))) snprintf(buf, n, "clip edit");
     else if (s->ntracks != P.ntracks) snprintf(buf, n, "add track");
@@ -2277,6 +2304,12 @@ static int devices_section(int x, int y, int w)
 
 static int pads_sub, mixer_sub, vis_sub, settings_sub, sounds_sub;
 
+enum { PAD_PRESET_COUNT = 6 };
+static const char *const PAD_PRESETS[PAD_PRESET_COUNT] = {"Drum kit", "Drums + chords", "Chords of the key",
+                                                          "Scale notes", "Bass notes", "Beat loops"};
+static void load_pad_preset(int k);
+static int gn_sel;
+
 static int pads_content(int x, int y, int w)
 {
     char buf[160], b2[64];
@@ -2297,13 +2330,26 @@ static int pads_content(int x, int y, int w)
     text_clip((SDL_Rect){x + 86, y, w - 86, 28}, x + 86, y + (28 - font_h) / 2, buf, pads_rec ? HEAD : DIM);
     y += 40;
 
+    {                                           /* preset layouts: fill all 16 pads at once */
+        static int preset;
+        if (dropdown((SDL_Rect){x, y, w - 76, 30}, "Preset: ", PAD_PRESETS, PAD_PRESET_COUNT, &preset, 0))
+            load_pad_preset(preset);
+        if (button((SDL_Rect){x + w - 70, y, 70, 30}, "Load", 0)) load_pad_preset(preset);   /* again, e.g. after a key change */
+        y += 34;
+        snprintf(buf, sizeof buf, "Uses the key in Theory (%s %s), the Beats style (%s)", pitch_name(th_root, key_uses_flats(th_root, th_scale)),
+                 SCALES[th_scale].name, GENRES[gn_sel].name);
+        text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, DIM);
+        text_clip((SDL_Rect){x, y + font_h + 2, w, font_h + 2}, x, y + font_h + 2,
+                  "and the New sound wave. Ctrl+Z puts the old pads back.", DIM);
+        y += 2 * font_h + 12;
+    }
     text(x, y + 6, "PADS", DIM);
     if (button((SDL_Rect){x + w - 246, y, 150, 26}, "Fill from library", 0)) {
         int s = 0, filled = 0;
         LOCK();
         for (int i = 0; i < NPADS && s < P.nsamples; i++)
             if (P.pads[i].sample < 0) {
-                while (s < P.nsamples && P.samples[s].pitched) s++;   /* skip clip variants */
+                while (s < P.nsamples && (P.samples[s].pitched || P.samples[s].removed)) s++;   /* skip clip variants */
                 if (s >= P.nsamples) break;
                 P.pads[i].sample = s++;
                 filled++;
@@ -2494,7 +2540,7 @@ static int pads_take_key(SDL_Keysym k)
 
 /* ---- File menu and the "save changes?" question */
 
-static SDL_Rect file_btn, met_btn, snap_rect;
+static SDL_Rect file_btn, met_btn, snap_rect, bpm_rect, a4_rect;
 static int met_open;
 
 static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int enabled)
@@ -3576,12 +3622,19 @@ static int *const RAIL_FLAG[RI_COUNT] = {&sounds_open, &theory_open, &pads_open,
 static const char *const RAIL_NAME[RI_COUNT] = {"Sounds", "Theory", "Pads", "Mixer", "Visual", "Settings"};
 static int last_panel = RI_SOUNDS;
 
+static void show_panel(int which);
+
 static void open_panel(int which)        /* toggles it; the others close */
 {
     int was = *RAIL_FLAG[which];
     for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
     *RAIL_FLAG[which] = !was;
     if (!was) last_panel = which;
+}
+
+static void show_panel(int which)        /* opens it (never closes it); the others close */
+{
+    if (!*RAIL_FLAG[which]) open_panel(which);
 }
 
 static void rail_icon(int kind, int cx, int cy, Col c)
@@ -3700,13 +3753,38 @@ static void panel_end(SDL_Rect pane, int *scroll, int content_h, int inside, int
 
 static int sounds_scroll, sounds_content_h;
 
+/* Takes a sound out of the library, with every clip that plays it (or a pitched or reversed copy
+ * of it), off its pads and the instrument. One undo step puts it all back. */
+static void remove_sound(int i)
+{
+    if (i < 0 || i >= P.nsamples || P.samples[i].removed) return;
+    int gone = 0;
+    for (int c = P.nclips - 1; c >= 0; c--)
+        if (sample_base(&P, P.clips[c].sample) == i) {
+            clip_delete(c);
+            gone++;
+        }
+    LOCK();
+    for (int k = 0; k < NPADS; k++)
+        if (P.pads[k].sample >= 0 && sample_base(&P, P.pads[k].sample) == i) P.pads[k].sample = -1;
+    if (P.inst_sample >= 0 && sample_base(&P, P.inst_sample) == i) P.inst_sample = -1;
+    if (P.preview >= 0 && sample_base(&P, P.preview) == i) P.preview = -1;
+    for (int v = 0; v < MAX_VOICES; v++)
+        if (P.voices[v].active && sample_base(&P, P.voices[v].sample) == i) P.voices[v].active = 0;
+    P.samples[i].removed = 1;
+    UNLOCK();
+    if (gone) status("Removed \"%s\" and its %d clip%s. Ctrl+Z brings them back.", P.samples[i].name, gone,
+                     gone == 1 ? "" : "s");
+    else status("Removed \"%s\". Ctrl+Z brings it back.", P.samples[i].name);
+}
+
 static void library_list(int x, int y, int w, int bottom)
 {
     char buf[64];
     static int vis[MAX_SAMPLES];              /* pitched/reversed copies made for clips are hidden */
     int nvis = 0;
     for (int i = 0; i < P.nsamples; i++)
-        if (!P.samples[i].pitched) vis[nvis++] = i;
+        if (!P.samples[i].pitched && !P.samples[i].removed) vis[nvis++] = i;
     snprintf(buf, sizeof buf, "%d sound%s", nvis, nvis == 1 ? "" : "s");
     text(x, y, buf, DIM);
     y += font_h + 10;
@@ -3734,9 +3812,29 @@ static void library_list(int x, int y, int w, int bottom)
         fill(r, P.preview == i ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
         snprintf(buf, sizeof buf, "%.2fs", (double)P.samples[i].frames / SR);
         int dw = text_w(buf);
-        text_clip((SDL_Rect){r.x + 6, r.y, r.w - dw - 18, r.h}, r.x + 8, r.y + (r.h - font_h) / 2,
+        SDL_Rect xr = {r.x + r.w - 24, r.y + 2, 20, r.h - 4};     /* remove: shown on the row under the mouse */
+        text_clip((SDL_Rect){r.x + 6, r.y, r.w - dw - 18 - (hov ? 24 : 0), r.h}, r.x + 8, r.y + (r.h - font_h) / 2,
                   P.samples[i].name, TEXT);
-        text(r.x + r.w - dw - 8, r.y + (r.h - font_h) / 2, buf, DIM);
+        text(r.x + r.w - dw - 8 - (hov ? 24 : 0), r.y + (r.h - font_h) / 2, buf, DIM);
+        if (hov) {
+            int xh = hit(xr);
+            fill(xr, xh ? rgb(200, 60, 55) : PANEL3);
+            Col xc = xh ? rgb(255, 255, 255) : TEXT;
+            for (int d = -1; d <= 1; d++) {
+                line(xr.x + 6 + d, xr.y + 5, xr.x + 14 + d, xr.y + xr.h - 6, xc);
+                line(xr.x + 14 + d, xr.y + 5, xr.x + 6 + d, xr.y + xr.h - 6, xc);
+            }
+            if (xh && lpress) {
+                lpress = 0;
+                remove_sound(i);
+                continue;
+            }
+        }
+        if (hov && rpress) {                     /* right-click removes too */
+            rpress = 0;
+            remove_sound(i);
+            continue;
+        }
         if (hov && lpress) {
             drag = (typeof(drag)){.kind = D_LIBPEND, .sample = i, .sx = mx, .sy = my};
             lpress = 0;
@@ -3752,6 +3850,8 @@ static void library_list(int x, int y, int w, int bottom)
     text(x, bottom - 2 * font_h - 10, "Click to hear, drag onto a track.", DIM);
     text(x, bottom - font_h - 6, "Drop audio files here to import.", DIM);
 }
+
+static float *heard_buf;                /* what the New sound Play button started */
 
 static int new_sound(int x, int y, int w)
 {
@@ -3779,7 +3879,24 @@ static int new_sound(int x, int y, int w)
         y += 34;
     }
     y += 6;
-    if (button((SDL_Rect){x, y, w, 32}, "+ Add to library", 1)) {
+    int hearing = scratch && scratch == heard_buf && scratch_pos < scratch_len;
+    if (button((SDL_Rect){x, y, 96, 32}, hearing ? "Stop" : "Play", hearing)) {
+        if (hearing) {
+            play_scratch(NULL, 0);
+        } else {                                 /* hear it as it stands, without keeping it */
+            GenParams g = G;
+            g.a4 = P.a4;
+            long len;
+            int note = G.note;
+            float *b = render_notes(&g, P.bpm, &note, 1, &len);
+            if (b) {
+                for (long k = 0; k < 2 * len; k++) b[k] /= 0.8f;   /* render_notes scales chords down */
+                play_scratch(b, len);
+                heard_buf = b;
+            }
+        }
+    }
+    if (button((SDL_Rect){x + 102, y, w - 102, 32}, "+ Add to library", 1)) {
         G.a4 = P.a4;
         int idx = sample_generate(&P, &G);
         if (idx >= 0) {
@@ -4138,8 +4255,12 @@ static void top_bar(void)
     if (button((SDL_Rect){x, y, 62, h}, "Loop", P.loop)) toggle_loop();
     x += 72;
     line(x - 6, y + 4, x - 6, y + h - 4, sep);
-    number((SDL_Rect){x, y, 100, h}, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
+    bpm_rect = (SDL_Rect){x, y, 100, h};
+    number(bpm_rect, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
     x += 104;
+    a4_rect = (SDL_Rect){x, y, 116, h};
+    number(a4_rect, "A4", &P.a4, 415, 466, 0.05, "%.1f Hz");   /* tuning for new sounds */
+    x += 120;
     snap_rect = (SDL_Rect){x, y, 110, h};
     dropdown(snap_rect, "Snap ", SNAP_NAMES, 6, &snap_i, 1);   /* click: next, arrow: list */
     x += 118;
@@ -4512,16 +4633,86 @@ static void timeline(void)
     }
 }
 
+/* the transport's icons, drawn so they look the same in every theme and font */
+enum { TI_START, TI_BACK, TI_PLAY, TI_PAUSE, TI_STOP, TI_FWD, TI_END, TI_LOOP, TI_REC };
+
+static void tri(int x, int cy, int hgt, int dir, Col c)  /* a filled triangle pointing left (-1) or right */
+{
+    for (int i = 0; i <= hgt; i++) {
+        int half = (hgt - i) * 6 / 10;
+        int xx = dir > 0 ? x + i : x - i;
+        line(xx, cy - half, xx, cy + half, c);
+    }
+}
+
+static void transport_icon(int kind, SDL_Rect r, Col c)
+{
+    int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    switch (kind) {
+    case TI_START: fill((SDL_Rect){cx - 6, cy - 5, 2, 11}, c); tri(cx + 4, cy, 8, -1, c); break;
+    case TI_BACK: tri(cx, cy, 7, -1, c); tri(cx + 7, cy, 7, -1, c); break;
+    case TI_PLAY: tri(cx - 4, cy, 9, 1, c); break;
+    case TI_PAUSE: fill((SDL_Rect){cx - 5, cy - 5, 3, 11}, c); fill((SDL_Rect){cx + 2, cy - 5, 3, 11}, c); break;
+    case TI_STOP: fill((SDL_Rect){cx - 5, cy - 5, 10, 10}, c); break;
+    case TI_FWD: tri(cx - 7, cy, 7, 1, c); tri(cx, cy, 7, 1, c); break;
+    case TI_END: tri(cx - 4, cy, 8, 1, c); fill((SDL_Rect){cx + 5, cy - 5, 2, 11}, c); break;
+    case TI_LOOP:
+        ring(cx, cy, 6, c);
+        ring(cx, cy, 5, c);
+        tri(cx + 5, cy - 1, 4, 1, c);
+        break;
+    case TI_REC: disc(cx, cy, 5, c); break;
+    }
+}
+
+static int transport_button(SDL_Rect r, int kind, int on, Col tint)
+{
+    int hov = hit(r) && drag.kind == D_NONE;
+    style_box(r, on ? 2 : hov ? 1 : 0);
+    transport_icon(kind, r, on ? btn_fg(1) : tint.a ? tint : btn_fg(0));
+    if (hov && lpress) {
+        lpress = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* the bottom bar: messages on the left, the transport in the middle, a hint on the right */
+static SDL_Rect transport_rect;
+
 static void status_bar(void)
 {
     int y = H - L.status;
     fill((SDL_Rect){0, y, W, L.status}, PANEL);
     line(0, y, W, y, LINE);
-    const char *hint = "Space play · Ctrl+Z undo · Ctrl+S save · Ctrl+B hide panel · Settings > Keys lists every shortcut";
-    int hw = text_w(hint), show = W - hw > 420;
-    int msg_w = W - 24 - (show ? hw + 24 : 0);
-    text_clip((SDL_Rect){8, y, msg_w, L.status}, 10, y + (L.status - font_h) / 2, status_msg, TEXT);
-    if (show) text(W - hw - 12, y + (L.status - font_h) / 2, hint, DIM);
+    int bw = 30, gap = 3, n = 8, tw = n * bw + (n - 1) * gap, tx = (W - tw) / 2, by = y + 2, bh = L.status - 4;
+    transport_rect = (SDL_Rect){tx, by, tw, bh};
+    long bar = 4 * beat_frames();
+    Col none = {0, 0, 0, 0};
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_START, 0, none)) playhead_to(0);
+    tx += bw + gap;
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_BACK, 0, none)) playhead_step(bar, -1);
+    tx += bw + gap;
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, P.playing ? TI_PAUSE : TI_PLAY, P.playing, none)) toggle_play();
+    tx += bw + gap;
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_STOP, 0, none)) transport_stop();
+    tx += bw + gap;
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_FWD, 0, none)) playhead_step(bar, 1);
+    tx += bw + gap;
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_END, 0, none)) playhead_to(project_end(&P));
+    tx += bw + gap;
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_LOOP, P.loop, none)) toggle_loop();
+    tx += bw + gap;
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_REC, pads_rec, rgb(220, 60, 55))) {
+        pads_rec = !pads_rec;
+        status(pads_rec ? "Recording: pads and the instrument go onto the timeline while it plays"
+                        : "Recording off");
+    }
+    int left_w = transport_rect.x - 18;
+    text_clip((SDL_Rect){8, y, left_w, L.status}, 10, y + (L.status - font_h) / 2, status_msg, TEXT);
+    const char *hint = "Settings > Keys lists every shortcut";
+    int hw = text_w(hint), right_x = transport_rect.x + transport_rect.w + 16;
+    if (W - hw - 12 > right_x) text(W - hw - 12, y + (L.status - font_h) / 2, hint, DIM);
 }
 
 /* ---------------------------------------------------------------- dragging */
@@ -5832,9 +6023,7 @@ static int selftest(void)
     {
         frame();
         double bpm0 = P.bpm;
-        int bx = 0;
-        for (int xx = 280; xx < 520 && !bx; xx++)         /* the BPM box sits after Play and Loop */
-            if (xx > snap_rect.x - 112 && xx < snap_rect.x - 20) bx = xx + 40;
+        int bx = bpm_rect.x + bpm_rect.w / 2;
         sim(bx, 24, 1, 0, 0, 0);
         sim(bx, 24, 0, 1, 0, 0);
         check(numedit.active && numedit.v == &P.bpm && P.bpm == bpm0, "clicking BPM opens it for typing");
@@ -5945,6 +6134,155 @@ static int selftest(void)
             run_action(ACT_OPEN_EXAMPLE);
             check(proj_path[0] == 0 && !is_dirty() && P.nclips > 100, "an example opens as an untitled copy, nothing to save yet");
         }
+    }
+
+    /* tuning in the top bar, beside BPM: both open for typing and both still drag */
+    {
+        frame();
+        double bpm0 = P.bpm, a40 = P.a4;
+        int ax = a4_rect.x + a4_rect.w / 2, bx = bpm_rect.x + bpm_rect.w / 2;
+        sim(ax, 24, 1, 0, 0, 0);
+        sim(ax, 24, 0, 1, 0, 0);
+        check(numedit.active && numedit.v == &P.a4, "clicking A4 opens the tuning for typing");
+        numedit_text("432");
+        SDL_Keysym ek = {0};
+        ek.sym = SDLK_RETURN;
+        numedit_key(ek);
+        frame();
+        check(P.a4 == 432 && P.bpm == bpm0, "typing 432 sets the tuning and leaves the tempo alone");
+        sim(bx, 24, 1, 0, 0, 0);
+        for (int i = 1; i <= 5; i++) sim(bx + i * 8, 24, 0, 0, 0, 0);
+        sim(bx + 40, 24, 0, 1, 0, 0);
+        check(P.bpm > bpm0 && P.a4 == 432 && !numedit.active, "dragging BPM still changes the tempo, not the tuning");
+        P.bpm = bpm0;
+        P.a4 = a40;
+        frame();
+    }
+
+    /* pad presets fill all 16 pads, and undo puts the old ones back */
+    {
+        frame();
+        Pad before[NPADS];
+        memcpy(before, P.pads, sizeof before);
+        int u0 = nundo;
+        gn_sel = 0;
+        load_pad_preset(0);
+        frame();
+        int filled = 0, kicks = 0;
+        for (int k = 0; k < NPADS; k++) {
+            filled += P.pads[k].sample >= 0;
+            kicks += P.pads[k].sample >= 0 && P.samples[P.pads[k].sample].is_beat == 2 && P.samples[P.pads[k].sample].beat_mask == 0;
+        }
+        check(filled == 16 && kicks >= 4 && P.pads[7].volume < 0.5f, "Drum kit fills 16 pads: kicks, toms from the kick, a ghost snare");
+        check(nundo == u0 + 1, "loading a preset is one undo step");
+        undo_redo(0);
+        check(!memcmp(P.pads, before, sizeof before), "and undo puts the old pads back");
+        th_root = 9;
+        th_scale = 1;
+        load_pad_preset(2);
+        frame();
+        check(P.pads[0].mode == PAD_HOLD && P.samples[P.pads[0].sample].nchord == 3 &&
+                  !strncmp(P.samples[P.pads[0].sample].name, "Am", 2), "Chords of the key in A minor starts on Am, held");
+        load_pad_preset(3);
+        check(P.samples[P.pads[0].sample].chord[0] == 69 && P.samples[P.pads[7].sample].chord[0] == 81,
+              "Scale notes climb the scale: A4 on pad 1, A5 on pad 8");
+        load_pad_preset(5);
+        check(P.pads[0].mode == PAD_LOOP && P.samples[P.pads[0].sample].is_beat == 1, "Beat loops start and stop on a press");
+        load_pad_preset(0);
+        int ns = P.nsamples;
+        load_pad_preset(0);
+        check(P.nsamples == ns, "loading a preset again reuses its sounds");
+        frame();
+    }
+
+    /* removing a sound takes its clips too, and undo brings both back */
+    {
+        frame();
+        GenParams g = {WAVE_SINE, 72, 1.0, 0.5, 5, 50, 440};
+        int si = sample_generate(&P, &g);
+        clip_add(si, 0, 0, 0, P.samples[si].frames);
+        clip_add(si, 1, beat_frames(), 0, P.samples[si].frames);
+        frame();
+        int n0 = P.nclips, u0 = nundo;
+        remove_sound(si);
+        frame();
+        check(P.samples[si].removed && P.nclips == n0 - 2 && nundo == u0 + 1, "removing a sound removes its 2 clips, as one step");
+        show_panel(RI_SOUNDS);
+        sounds_sub = 0;
+        lib_scroll = 1000;                        /* the newest sounds are at the end */
+        memset(lib_rects, 0, sizeof lib_rects);
+        frame();
+        int shown_other = 0;
+        for (int k = 0; k < P.nsamples; k++) shown_other |= k != si && lib_rects[k].w > 0;
+        check(lib_rects[si].w == 0 && shown_other, "a removed sound leaves the library list");
+        undo_redo(0);
+        check(!P.samples[si].removed && P.nclips == n0, "undo brings the sound and its clips back");
+        undo_redo(1);
+        check(P.samples[si].removed && P.nclips == n0 - 2, "and redo removes them again");
+        undo_redo(0);
+        frame();
+    }
+
+    /* New sound: Play hears it without adding it to the library */
+    {
+        show_panel(RI_SOUNDS);
+        sounds_sub = 1;
+        frame();
+        int ns = P.nsamples;
+        SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
+        int found = 0;
+        for (int yy = pane.y + 60; yy < pane.y + pane.h && !found; yy += 4) {   /* find the Play button */
+            sim(pane.x + 12 + 40, yy, 1, 0, 0, 0);
+            sim(pane.x + 12 + 40, yy, 0, 1, 0, 0);
+            if (scratch && scratch == heard_buf) found = yy;
+        }
+        check(found && P.nsamples == ns, "Play in New sound plays it without adding it to the library");
+        sim(pane.x + 12 + 40, found, 1, 0, 0, 0);
+        sim(pane.x + 12 + 40, found, 0, 1, 0, 0);
+        check(!scratch, "and pressing it again stops it");
+        sounds_sub = 0;
+    }
+
+    /* the transport at the bottom */
+    {
+        frame();
+        LOCK();
+        P.playing = 0;
+        P.loop = 0;
+        P.playhead = 0;
+        UNLOCK();
+        SDL_Rect tr = transport_rect;
+        int bw = 33, cy = tr.y + tr.h / 2;
+        long bar = 4 * beat_frames();
+        sim(tr.x + 4 * bw + 15, cy, 1, 0, 0, 0);             /* forward a bar */
+        sim(tr.x + 4 * bw + 15, cy, 0, 1, 0, 0);
+        check(P.playhead == bar, "the forward button moves the playhead a bar on");
+        sim(tr.x + 2 * bw + 15, cy, 1, 0, 0, 0);             /* play */
+        sim(tr.x + 2 * bw + 15, cy, 0, 1, 0, 0);
+        int playing = P.playing;
+        LOCK();
+        P.playhead = 3 * bar;                                  /* as if it had played on */
+        UNLOCK();
+        sim(tr.x + 3 * bw + 15, cy, 1, 0, 0, 0);             /* stop */
+        sim(tr.x + 3 * bw + 15, cy, 0, 1, 0, 0);
+        check(playing && !P.playing && P.playhead == bar, "Play plays; Stop stops and goes back to where it began");
+        sim(tr.x + 3 * bw + 15, cy, 1, 0, 0, 0);
+        sim(tr.x + 3 * bw + 15, cy, 0, 1, 0, 0);
+        check(P.playhead == 0, "Stop again goes to the start");
+        sim(tr.x + 5 * bw + 15, cy, 1, 0, 0, 0);             /* to the end */
+        sim(tr.x + 5 * bw + 15, cy, 0, 1, 0, 0);
+        check(P.playhead == project_end(&P), "the end button goes to the end of the song");
+        sim(tr.x + 6 * bw + 15, cy, 1, 0, 0, 0);             /* loop */
+        sim(tr.x + 6 * bw + 15, cy, 0, 1, 0, 0);
+        check(P.loop, "the loop button turns looping on");
+        P.loop = 0;
+        sim(tr.x + 7 * bw + 15, cy, 1, 0, 0, 0);             /* record */
+        sim(tr.x + 7 * bw + 15, cy, 0, 1, 0, 0);
+        check(pads_rec, "the record button arms recording");
+        pads_rec = 0;
+        sim(tr.x + 15, cy, 1, 0, 0, 0);                       /* to the start */
+        sim(tr.x + 15, cy, 0, 1, 0, 0);
+        check(P.playhead == 0, "the start button goes to the beginning");
     }
 
     /* the full-screen show: every scene draws, arrows step through them, cycling moves on */
@@ -6096,7 +6434,7 @@ static int chord_sample(const int *notes, int n, const char *label, double beats
     snprintf(name, sizeof name, "%s %s %gb", label, WAVE_NAMES[g.wave], beats);
     for (int i = 0; i < P.nsamples; i++) {
         const Sample *s = &P.samples[i];
-        if (s->generated && s->nchord == n && !strcmp(s->name, name) && s->gen.volume == g.volume &&
+        if (s->generated && !s->removed && s->nchord == n && !strcmp(s->name, name) && s->gen.volume == g.volume &&
             s->gen.attack_ms == g.attack_ms && s->gen.release_ms == g.release_ms && s->gen_bpm == P.bpm &&
             !memcmp(s->chord, notes, (size_t)n * sizeof(int)))
             return i;
@@ -6760,9 +7098,121 @@ static int beat_sample(const BeatSpec *b, int mask, const char *name)
 {
     for (int i = 0; i < P.nsamples; i++) {
         const Sample *s = &P.samples[i];
-        if (s->is_beat && s->beat_mask == mask && s->gen_bpm == P.bpm && same_beat(&s->beat, b)) return i;
+        if (s->is_beat == 1 && !s->removed && s->beat_mask == mask && s->gen_bpm == P.bpm && same_beat(&s->beat, b)) return i;
     }
     return sample_generate_beat(&P, b, mask, name);
+}
+
+/* ---- pad presets */
+
+static int hit_sample(const BeatSpec *b, int lane, const char *name)    /* one drum of a kit, reused */
+{
+    for (int i = 0; i < P.nsamples; i++) {
+        const Sample *s = &P.samples[i];
+        if (s->is_beat == 2 && !s->removed && s->beat_mask == lane && same_beat(&s->beat, b)) return i;
+    }
+    return sample_generate_hit(&P, b, lane, name);
+}
+
+static void set_pad(int k, int sample, int mode, float vol, int pitch, int track)
+{
+    if (sample < 0 || k < 0 || k >= NPADS) return;
+    LOCK();
+    voice_stop(&P, k, -1);
+    P.pads[k] = (Pad){sample, mode, vol, pitch, track < P.ntracks ? track : P.ntracks - 1, 0};
+    UNLOCK();
+}
+
+static void preset_drums(int first, int count)  /* the Beats style's kit, with tuned variations */
+{
+    BeatSpec b = genre_spec(gn_sel);
+    int lane_s[DRUM_LANES];
+    for (int l = 0; l < DRUM_LANES; l++) {
+        char name[64];
+        snprintf(name, sizeof name, "%s %s", GENRES[gn_sel].name, DRUM_LANE_NAMES[l]);
+        lane_s[l] = hit_sample(&b, l, name);
+    }
+    /* lane, pitch, volume: kit pieces first, then toms from the kick, a shaker from the hat... */
+    static const int layout[16][3] = {{0, 0, 90}, {1, 0, 80}, {2, 0, 80}, {3, 0, 70}, {4, 0, 70}, {5, 0, 75},
+                                      {0, -5, 90}, {1, 0, 35}, {0, 5, 80}, {0, 9, 80}, {0, 12, 80}, {5, -7, 75},
+                                      {2, -3, 80}, {3, 7, 55}, {4, -5, 70}, {1, 4, 75}};
+    for (int i = 0; i < count; i++)
+        set_pad(first + i, lane_s[layout[i][0]], PAD_ONESHOT, layout[i][2] / 100.0f, layout[i][1], 0);
+}
+
+static void preset_chords(int first, int count, int track)   /* the chords of the Theory key */
+{
+    for (int i = 0; i < count; i++) {
+        int seventh = i >= 7 && i < 14, deg = i % 7, t;
+        char num[24], name[48];
+        if (i >= 14) {                                  /* the last two: I up an octave, and IV */
+            deg = i == 14 ? 0 : 3;
+            seventh = 0;
+        }
+        int pc = diatonic_chord(th_root, th_scale, deg, seventh, &t, num, sizeof num);
+        if (pc < 0) {                                   /* pentatonic and blues: use the major/minor chords */
+            pc = diatonic_chord(th_root, SCALES[th_scale].minor ? 1 : 0, deg, seventh, &t, num, sizeof num);
+            if (pc < 0) continue;
+            diatonic_chord_name(th_root, SCALES[th_scale].minor ? 1 : 0, deg, t, name, sizeof name);
+        } else {
+            diatonic_chord_name(th_root, th_scale, deg, t, name, sizeof name);
+        }
+        int notes[6], n = chord_notes(pc, t, i == 14 ? 60 : 48, notes);
+        set_pad(first + i, chord_sample(notes, n, name, 4), PAD_HOLD, 0.8f, 0, track);
+    }
+}
+
+static void preset_notes(int base, int track, const char *tag)   /* 16 notes of the scale, upwards */
+{
+    const Scale *sc = &SCALES[th_scale];
+    for (int i = 0; i < NPADS; i++) {
+        int note = base + th_root + 12 * (i / sc->n) + sc->steps[i % sc->n];
+        char nn[16], label[32];
+        note_name(note, nn, sizeof nn);
+        snprintf(label, sizeof label, "%s%s", nn, tag);
+        set_pad(i, chord_sample(&note, 1, label, 1), PAD_HOLD, 0.8f, 0, track);
+    }
+}
+
+static void preset_loops(void)                  /* this style's parts, then other styles' whole beats */
+{
+    BeatSpec b = genre_spec(gn_sel);
+    static const int masks[5] = {63, 1, 2 | 4, 8 | 16, 32};
+    static const char *const parts[5] = {"beat", "kick", "snare+clap", "hats", "perc"};
+    int k = 0;
+    for (int i = 0; i < 5; i++) {
+        int used = 0;
+        for (int l = 0; l < DRUM_LANES; l++) used |= (masks[i] >> l & 1) && strpbrk(b.lanes[l], "xXor") != NULL;
+        if (!used) continue;
+        char name[64];
+        snprintf(name, sizeof name, "%s %s %.0f", GENRES[gn_sel].name, parts[i], P.bpm);
+        set_pad(k++, beat_sample(&b, masks[i], name), PAD_LOOP, 0.8f, 0, 0);
+    }
+    for (int g = 0; g < NGENRES && k < NPADS; g++) {
+        if (g == gn_sel) continue;
+        BeatSpec o = genre_spec(g);
+        char name[64];
+        snprintf(name, sizeof name, "%s beat %.0f", GENRES[g].name, P.bpm);
+        set_pad(k++, beat_sample(&o, 63, name), PAD_LOOP, 0.8f, 0, 0);
+    }
+}
+
+static void load_pad_preset(int k)
+{
+    switch (k) {
+    case 0: preset_drums(0, 16); break;
+    case 1:
+        preset_drums(0, 8);
+        preset_chords(8, 8, 1);
+        break;
+    case 2: preset_chords(0, 16, 1); break;
+    case 3: preset_notes(60, 2, ""); break;
+    case 4: preset_notes(36, 3, " bass"); break;
+    default: preset_loops(); break;
+    }
+    pad_sel = 0;
+    status("Pads: %s, %s. Ctrl+Z puts the old pads back.", PAD_PRESETS[k],
+           k == 0 || k == 5 ? GENRES[gn_sel].name : SCALES[th_scale].name);
 }
 
 static int track_empty(int t)

@@ -57,7 +57,9 @@ typedef struct {
     double gen_bpm;
     int chord[6];           /* for generated chords: the MIDI notes (nchord > 0) */
     int nchord;
-    int is_beat;            /* generated drum loop: rebuilt from beat + beat_mask */
+    int is_beat;            /* generated drum loop: rebuilt from beat + beat_mask; 2 = one hit of drum
+                             * lane beat_mask from that kit (pads) */
+    int removed;            /* taken out of the library (kept so undo can bring it back) */
     BeatSpec beat;
     int beat_mask;          /* which lanes it contains */
     char path[1024];
@@ -211,6 +213,9 @@ int sample_generate_notes(Project *p, const GenParams *g, const int *notes, int 
 /* One pass of a drum pattern (lanes in `mask`) as a seamless loop: tails wrap to the start. */
 float *render_beat(const BeatSpec *b, int mask, double bpm, long *frames);
 int sample_generate_beat(Project *p, const BeatSpec *b, int mask, const char *name);
+/* One hit of one drum (lane 0-5: kick, snare, clap, closed hat, open hat, percussion) from a kit */
+float *render_hit(const BeatSpec *b, int lane, long *frames);
+int sample_generate_hit(Project *p, const BeatSpec *b, int lane, const char *name);
 int project_add_track(Project *p, const char *name);   /* new row, or -1 when full */
 int sample_import(Project *p, const char *path, char *err, size_t errlen);
 void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);

@@ -455,6 +455,43 @@ float *render_beat(const BeatSpec *b, int mask, double bpm, long *frames)
     return out;
 }
 
+float *render_hit(const BeatSpec *b, int lane, long *frames)
+{
+    static const float lane_gain[DRUM_LANES] = {0.9f, 0.7f, 0.65f, 0.38f, 0.32f, 0.45f};
+    if (lane < 0 || lane >= DRUM_LANES) return NULL;
+    long n;
+    float *mono = drum_hit(lane, b, &n);
+    if (!mono) return NULL;
+    float *d = malloc((size_t)n * 2 * sizeof(float));
+    if (d) {
+        float g = lane_gain[lane] * (float)b->volume;
+        for (long i = 0; i < n; i++) {
+            float e = n - i < 96 ? (float)(n - i) / 96 : 1.0f;   /* no click at the end */
+            d[2 * i] = d[2 * i + 1] = mono[i] * g * e;
+        }
+    }
+    free(mono);
+    *frames = n;
+    return d;
+}
+
+int sample_generate_hit(Project *p, const BeatSpec *b, int lane, const char *name)
+{
+    long len;
+    float *d = render_hit(b, lane, &len);
+    if (!d) return -1;
+    int idx = sample_add(p, name, d, len);
+    if (idx >= 0) {
+        Sample *s = &p->samples[idx];
+        s->generated = 1;
+        s->is_beat = 2;
+        s->beat = *b;
+        s->beat_mask = lane;
+        s->gen_bpm = p->bpm;
+    }
+    return idx;
+}
+
 int sample_generate_beat(Project *p, const BeatSpec *b, int mask, const char *name)
 {
     long len;
@@ -638,7 +675,8 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         float *nd = NULL;
         long nf = 0;
         char err[128];
-        if (s->is_beat) nd = render_beat(&s->beat, s->beat_mask, s->gen_bpm, &nf);
+        if (s->is_beat == 2) nd = render_hit(&s->beat, s->beat_mask, &nf);
+        else if (s->is_beat) nd = render_beat(&s->beat, s->beat_mask, s->gen_bpm, &nf);
         else if (s->generated && s->nchord) nd = render_notes(&s->gen, s->gen_bpm, s->chord, s->nchord, &nf);
         else if (s->generated) nd = render_gen(&s->gen, s->gen_bpm, &nf);
         else if (s->path[0]) nd = load_file(s->path, &nf, err, sizeof err);

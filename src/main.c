@@ -961,11 +961,87 @@ static void number_box(SDL_Rect r, const char *label, const char *value, int act
     text(r.x + r.w - 8 - text_w(value), r.y + (r.h - font_h) / 2, value, TEXT);
 }
 
-/* drag sideways or up/down to change; mouse wheel steps; Shift = fine */
+/* Typing a value: a click on a number box (one that doesn't drag) opens it for typing.
+ * Enter or a click elsewhere sets it, Esc leaves it as it was. The value is handed back to the
+ * widget the next time it's drawn, so float settings go through their usual proxy. */
+static struct {
+    int active, pending;
+    double *v, lo, hi, value;
+    char buf[24];
+    SDL_Rect r;
+} numedit;
+
+static void numedit_begin(double *v, double lo, double hi)
+{
+    numedit.active = 1;
+    numedit.pending = 0;
+    numedit.v = v;
+    numedit.lo = lo;
+    numedit.hi = hi;
+    numedit.buf[0] = 0;                  /* start empty: just type the new value */
+    SDL_StartTextInput();
+    status("Type a value (%g to %g), Enter to set it, Esc to cancel", lo, hi);
+}
+
+static void numedit_end(int commit)
+{
+    if (!numedit.active) return;
+    numedit.active = 0;
+    char *end;
+    double v = strtod(numedit.buf, &end);
+    if (commit && numedit.buf[0] && end != numedit.buf) {
+        numedit.value = v < numedit.lo ? numedit.lo : v > numedit.hi ? numedit.hi : v;
+        numedit.pending = 1;
+    }
+}
+
+static void numedit_text(const char *t)
+{
+    if (!numedit.active) return;
+    for (; *t; t++) {
+        size_t n = strlen(numedit.buf);
+        if (strchr("0123456789.-", *t) && n + 1 < sizeof numedit.buf) {
+            numedit.buf[n] = *t;
+            numedit.buf[n + 1] = 0;
+        }
+    }
+}
+
+static int numedit_key(SDL_Keysym k)     /* returns 1 when typing took the key */
+{
+    if (!numedit.active) return 0;
+    size_t n = strlen(numedit.buf);
+    if (k.sym == SDLK_RETURN || k.sym == SDLK_KP_ENTER || k.sym == SDLK_TAB) numedit_end(1);
+    else if (k.sym == SDLK_ESCAPE) numedit_end(0);
+    else if (k.sym == SDLK_BACKSPACE && n) numedit.buf[n - 1] = 0;
+    return 1;
+}
+
+/* while typing into v: the text and a caret instead of the value; afterwards, the typed value */
+static int numedit_widget(SDL_Rect r, const char *label, double *v)
+{
+    if (numedit.pending && numedit.v == v) {
+        *v = numedit.value;
+        numedit.pending = 0;
+    }
+    if (!numedit.active || numedit.v != v) return 0;
+    numedit.r = r;
+    fill(r, PANEL);
+    outline(r, ACCENT);
+    outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, ACCENT);
+    text(r.x + 8, r.y + (r.h - font_h) / 2, label, DIM);
+    int tw = text_w(numedit.buf), tx = r.x + r.w - 10 - tw;
+    text(tx, r.y + (r.h - font_h) / 2, numedit.buf, TEXT);
+    if ((SDL_GetTicks() / 500) % 2 == 0) fill((SDL_Rect){tx + tw + 1, r.y + 6, 2, r.h - 12}, ACCENT);
+    return 1;
+}
+
+/* drag sideways or up/down to change; mouse wheel steps; Shift = fine; click to type */
 /* like number(), but shows `shown` instead of formatting the value (log scales, L/R pan...) */
 static void number_text(SDL_Rect r, const char *label, double *v, double lo, double hi, double step,
                         const char *shown)
 {
+    if (numedit_widget(r, label, v)) return;
     number_box(r, label, shown, drag.kind == D_NUM && drag.num == v);
     if (drag.kind == D_NONE && hit(r)) {
         if (lpress) {
@@ -1029,6 +1105,7 @@ static void number(SDL_Rect r, const char *label, double *v, double lo, double h
                    const char *fmt)
 {
     char buf[48];
+    if (numedit_widget(r, label, v)) return;
     snprintf(buf, sizeof buf, fmt, *v);
     number_box(r, label, buf, drag.kind == D_NUM && drag.num == v);
     if (drag.kind == D_NONE && hit(r)) {
@@ -4161,6 +4238,10 @@ static void update_drag(void)
 
 static void end_drag(void)
 {
+    if (drag.kind == D_NUM && abs(mx - drag.sx) + abs(my - drag.sy) < 3) {
+        *drag.num = drag.norig;                 /* a click, not a drag: type the value instead */
+        numedit_begin(drag.num, drag.nmin, drag.nmax);
+    }
     SDL_Rect area = {L.tl_x, L.lanes_y, L.tl_w, P.ntracks * L.lane_h};
     if (drag.kind == D_LIB && pads_drop(drag.sample)) {
         /* dropped onto a pad or the instrument slot */
@@ -5343,6 +5424,48 @@ static int selftest(void)
         open_panel(RI_SOUNDS);
         frame();
         check(lib_badge == 0, "opening Sounds clears the count");
+    }
+
+    /* typing the tempo: a click on BPM opens it for typing */
+    {
+        frame();
+        double bpm0 = P.bpm;
+        int bx = 0;
+        for (int xx = 280; xx < 520 && !bx; xx++)         /* the BPM box sits after Play and Loop */
+            if (xx > snap_rect.x - 112 && xx < snap_rect.x - 20) bx = xx + 40;
+        sim(bx, 24, 1, 0, 0, 0);
+        sim(bx, 24, 0, 1, 0, 0);
+        check(numedit.active && numedit.v == &P.bpm && P.bpm == bpm0, "clicking BPM opens it for typing");
+        numedit_text("98.5");
+        SDL_Keysym ek = {0};
+        ek.sym = SDLK_RETURN;
+        numedit_key(ek);
+        frame();
+        check(!numedit.active && P.bpm == 98.5, "typing 98.5 and Enter sets the tempo");
+        sim(bx, 24, 1, 0, 0, 0);
+        sim(bx, 24, 0, 1, 0, 0);
+        numedit_text("500");
+        numedit_key(ek);
+        frame();
+        check(P.bpm == 300, "a tempo above 300 is held at 300");
+        sim(bx, 24, 1, 0, 0, 0);
+        sim(bx, 24, 0, 1, 0, 0);
+        numedit_text("60");
+        ek.sym = SDLK_ESCAPE;
+        numedit_key(ek);
+        frame();
+        check(P.bpm == 300, "Esc leaves it as it was");
+        sim(bx, 24, 1, 0, 0, 0);
+        sim(bx, 24, 0, 1, 0, 0);
+        numedit_text("110");
+        sim(W / 2, H / 2, 1, 0, 0, 0);
+        sim(W / 2, H / 2, 0, 1, 0, 0);
+        check(P.bpm == 110 && !numedit.active, "clicking elsewhere sets what was typed");
+        sim(bx, 24, 1, 0, 0, 0);
+        for (int i = 1; i <= 5; i++) sim(bx + i * 6, 24, 0, 0, 0, 0);
+        sim(bx + 30, 24, 0, 1, 0, 0);
+        check(!numedit.active && P.bpm != 110, "dragging still changes it without typing");
+        P.bpm = bpm0;
     }
 
     /* drop-down lists */
@@ -6624,6 +6747,7 @@ static void frame(void)
     SDL_RenderClear(ren);
     vis_update();
     dd_input();
+    if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
 
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
@@ -6951,6 +7075,10 @@ int main(int argc, char **argv)
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
         if (getenv("TINYDAW_SHOT_LIGHT")) theme_apply(1);
+        if (getenv("TINYDAW_SHOT_TYPE")) {      /* the BPM box being typed into */
+            numedit_begin(&P.bpm, 40, 300);
+            numedit_text("12");
+        }
         if (getenv("TINYDAW_SHOT_MET")) {
             met_open = 1;
             MET.on = 1;
@@ -7075,7 +7203,11 @@ int main(int argc, char **argv)
                 SDL_free(e.drop.file);
                 break;
             }
+            case SDL_TEXTINPUT:
+                numedit_text(e.text.text);
+                break;
             case SDL_KEYDOWN:
+                if (numedit_key(e.key.keysym)) break;      /* typing a value */
                 if (pads_take_key(e.key.keysym) && e.key.keysym.sym != SDLK_ESCAPE) {
                     int sc = e.key.keysym.scancode, bound = 0;
                     for (int i = 0; i < NPADS; i++) bound |= binds[i].key == sc;

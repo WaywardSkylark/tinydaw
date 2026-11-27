@@ -53,7 +53,7 @@ the output device and the beat style are lists too.
 | Do | How |
 |---|---|
 | Make a sound | Pick a wave (sine, square, saw, tri, noise) or drum (kick, snare, hat), set note, length, volume, attack, release, press **+ Add to library** (Sounds > New sound) |
-| Change a number | Drag it left/right or up/down, or use the mouse wheel. Hold Shift for fine steps |
+| Change a number | Click it and type a value (Enter sets it, Esc cancels), drag it left/right or up/down, or use the mouse wheel. Hold Shift for fine steps |
 | Import audio | Drop WAV, FLAC, OGG, MP3 (or anything libsndfile reads) onto the window |
 | Hear a sound | Click it in the library (click again to stop) |
 | Place a sound | Drag it from the library onto a track |

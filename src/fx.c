@@ -109,13 +109,166 @@ int project_has_tails(const Project *p)
     return 0;
 }
 
+/* ---------------------------------------------------------------- automation */
+
+const char *AUTO_NAMES[AUTO_PARAMS] = {"Volume", "Pan", "Cutoff", "Delay send", "Reverb send"};
+
+float auto_to_value(int param, float v)
+{
+    v = v < 0 ? 0 : v > 1 ? 1 : v;
+    switch (param) {
+    case AUTO_VOLUME: return 1.5f * v;          /* the fader's range: 1.0 sits two thirds up */
+    case AUTO_PAN: return 2 * v - 1;
+    case AUTO_CUTOFF: return 20.0f * powf(1000.0f, v);       /* 20 Hz .. 20 kHz, evenly by ear */
+    default: return v;
+    }
+}
+
+float value_to_auto(int param, float value)
+{
+    float v = param == AUTO_VOLUME ? value / 1.5f : param == AUTO_PAN ? (value + 1) / 2 : param == AUTO_CUTOFF ? logf(fmaxf(value, 20) / 20) / logf(1000) : value;
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+static int auto_cmp(const void *a, const void *b)
+{
+    const AutoPoint *x = a, *y = b;
+    if (x->track != y->track) return x->track - y->track;
+    if (x->param != y->param) return x->param - y->param;
+    return x->at < y->at ? -1 : x->at > y->at;
+}
+
+void auto_sort(Project *p) { qsort(p->autos, (size_t)p->nautos, sizeof(AutoPoint), auto_cmp); }
+
+int auto_lane(const Project *p, int track, int param, int *first)
+{
+    int lo = 0, hi = p->nautos;                  /* the first point at or after (track, param) */
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        const AutoPoint *q = &p->autos[mid];
+        if (q->track < track || (q->track == track && q->param < param)) lo = mid + 1;
+        else hi = mid;
+    }
+    int n = 0;
+    while (lo + n < p->nautos && p->autos[lo + n].track == track && p->autos[lo + n].param == param) n++;
+    if (first) *first = lo;
+    return n;
+}
+
+float auto_at(const Project *p, int track, int param, long at, int *has)
+{
+    int first, n = auto_lane(p, track, param, &first);
+    if (has) *has = n > 0;
+    if (!n) return 0;
+    const AutoPoint *a = &p->autos[first];
+    if (at <= a[0].at) return a[0].v;
+    if (at >= a[n - 1].at) return a[n - 1].v;
+    int lo = 0, hi = n - 1;                      /* a[lo].at <= at < a[hi].at */
+    while (hi - lo > 1) {
+        int mid = (lo + hi) / 2;
+        if (a[mid].at <= at) lo = mid;
+        else hi = mid;
+    }
+    double k = (double)(at - a[lo].at) / (double)(a[hi].at - a[lo].at);
+    return (float)(a[lo].v + (a[hi].v - a[lo].v) * k);
+}
+
+void auto_apply(const Project *p, int track, long at, Track *out)
+{
+    *out = p->tracks[track];
+    if (!p->nautos) return;
+    int has;
+    float v = auto_at(p, track, AUTO_VOLUME, at, &has);
+    if (has) out->volume = auto_to_value(AUTO_VOLUME, v);
+    v = auto_at(p, track, AUTO_PAN, at, &has);
+    if (has) out->pan = auto_to_value(AUTO_PAN, v);
+    v = auto_at(p, track, AUTO_CUTOFF, at, &has);
+    if (has) {
+        out->cutoff = auto_to_value(AUTO_CUTOFF, v);
+        if (out->filter == FILT_OFF) out->filter = FILT_LOW;   /* automating the cutoff turns the filter on */
+    }
+    v = auto_at(p, track, AUTO_DELAY, at, &has);
+    if (has) out->delay_send = auto_to_value(AUTO_DELAY, v);
+    v = auto_at(p, track, AUTO_REVERB, at, &has);
+    if (has) out->reverb_send = auto_to_value(AUTO_REVERB, v);
+}
+
+/* ---------------------------------------------------------------- note clips */
+
+int sample_root(const Sample *s)
+{
+    if (s->generated && !s->is_beat) return s->nchord ? s->chord[0] : s->gen.note;
+    return 60;                                   /* drums and imported sounds: as is at middle C */
+}
+
+long pattern_end(const Project *p, int pattern)
+{
+    long end = 0;
+    for (int i = 0; i < p->nnotes; i++)
+        if (p->notes[i].pattern == pattern && p->notes[i].start + p->notes[i].length > end)
+            end = p->notes[i].start + p->notes[i].length;
+    return end;
+}
+
+int pattern_new_id(const Project *p)
+{
+    int id = 0;
+    for (int i = 0; i < p->nclips; i++) id = p->clips[i].pattern > id ? p->clips[i].pattern : id;
+    for (int i = 0; i < p->nnotes; i++) id = p->notes[i].pattern > id ? p->notes[i].pattern : id;
+    return id + 1;
+}
+
 /* ---------------------------------------------------------------- sources */
+
+#define NOTE_ATTACK 32                  /* frames: no click where a note starts mid-sound */
+#define NOTE_RELEASE (SR / 33)          /* the fade after a note's end */
+
+static void add_pattern(Mixer *m, const Project *p, const Clip *cl, long start, int n)
+{
+    const Sample *s = &p->samples[cl->sample];
+    if (!s->data || s->frames < 2) return;
+    long ca = start > cl->start ? start : cl->start;
+    long cb = start + n < cl->start + cl->length ? start + n : cl->start + cl->length;
+    if (ca >= cb) return;
+    long origin = cl->start - cl->offset, rel_f = NOTE_RELEASE;
+    float gain = cl->gain_db == 0 ? 1.0f : powf(10.0f, cl->gain_db / 20.0f);
+    float *out = m->trk[cl->track];
+    for (int k = 0; k < p->nnotes; k++) {
+        const Note *nt = &p->notes[k];
+        if (nt->pattern != cl->pattern) continue;
+        long ns = origin + nt->start, ne = ns + nt->length;
+        long a = ca > ns ? ca : ns, b = cb < ne + rel_f ? cb : ne + rel_f;
+        if (a >= b) continue;
+        double step = pow(2.0, (nt->note - cl->root) / 12.0);
+        long last = ns + (long)((s->frames - 1) / step);     /* where the sound runs out */
+        if (b > last) b = last;
+        for (long f = a; f < b; f++) {
+            double pos = (f - ns) * step;
+            long i = (long)pos;
+            float fr = (float)(pos - i), g = gain * nt->vel;
+            long rel = f - cl->start, right = cl->length - 1 - rel, into = f - ns;
+            if (rel < CLIP_EDGE) g *= (float)rel / CLIP_EDGE;
+            if (right < CLIP_EDGE) g *= (float)right / CLIP_EDGE;
+            if (cl->fade_in > 0 && rel < cl->fade_in) g *= (float)rel / cl->fade_in;
+            if (cl->fade_out > 0 && right < cl->fade_out) g *= (float)right / cl->fade_out;
+            if (into < NOTE_ATTACK) g *= (float)into / NOTE_ATTACK;
+            if (f >= ne) g *= 1 - (float)(f - ne) / rel_f;
+            const float *d = s->data + 2 * i;
+            out[2 * (f - start)] += (d[0] + (d[2] - d[0]) * fr) * g;
+            out[2 * (f - start) + 1] += (d[1] + (d[3] - d[1]) * fr) * g;
+        }
+    }
+}
 
 static void add_clips(Mixer *m, const Project *p, long start, int n)
 {
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
         if (cl->track < 0 || cl->track >= p->ntracks) continue;
+        if (cl->pattern > 0) {
+            add_pattern(m, p, cl, start, n);
+            continue;
+        }
         long a = start > cl->start ? start : cl->start;
         long b = start + n < cl->start + cl->length ? start + n : cl->start + cl->length;
         if (a >= b) continue;
@@ -217,9 +370,8 @@ static void biquad_run(Biquad *q, float *buf, int n)
         }
 }
 
-static void process_track(Mixer *m, const Project *p, int t, float *b, int n)
+static void process_track(Mixer *m, const Project *p, int t, const Track *tr, float *b, int n)
 {
-    const Track *tr = &p->tracks[t];
     if (tr->drive > 0.001f) {                    /* soft saturation, level-matched at the top */
         float k = 1 + 9 * tr->drive * tr->drive, norm = 1.0f / tanhf(k), makeup = 1 / (1 + 0.6f * tr->drive);
         for (int i = 0; i < 2 * n; i++) b[i] = tanhf(k * b[i]) * norm * makeup;
@@ -348,10 +500,12 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
 
         int sending = 0;
         for (int t = 0; t < p->ntracks; t++) {
-            const Track *tr = &p->tracks[t];
+            Track eff;                           /* the track as its automation has it now */
+            auto_apply(p, t, start + done, &eff);
+            const Track *tr = &eff;
             if (only_track >= 0 ? t != only_track : (tr->mute || (any_solo && !tr->solo))) continue;
             float *b = m->trk[t];
-            process_track(m, p, t, b, n);
+            process_track(m, p, t, tr, b, n);
             double ang = (tr->pan + 1) * PI_F / 4;
             float gl = tr->volume * (float)(cos(ang) * 1.41421356), gr = tr->volume * (float)(sin(ang) * 1.41421356);
             if (!m->g_ready[t]) {

@@ -92,8 +92,18 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     }
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
-        fprintf(f, "clip %d %d %ld %ld %ld %.9g %ld %ld\n", cl->sample, cl->track, cl->start, cl->offset, cl->length,
+        fprintf(f, "clip %d %d %ld %ld %ld %.9g %ld %ld", cl->sample, cl->track, cl->start, cl->offset, cl->length,
                 cl->gain_db, cl->fade_in, cl->fade_out);
+        if (cl->pattern > 0) fprintf(f, " %d %d", cl->pattern, cl->root);
+        fprintf(f, "\n");
+    }
+    for (int i = 0; i < p->nnotes; i++) {
+        const Note *n = &p->notes[i];
+        fprintf(f, "note %d %d %ld %ld %.6g\n", n->pattern, n->note, n->start, n->length, n->vel);
+    }
+    for (int i = 0; i < p->nautos; i++) {
+        const AutoPoint *a = &p->autos[i];
+        fprintf(f, "auto %d %d %ld %.6g\n", a->track, a->param, a->at, a->v);
     }
     for (int i = 0; i < NPADS; i++) {
         const Pad *pd = &p->pads[i];
@@ -284,10 +294,18 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         } else if (!strcmp(word, "clip")) {
             Clip c;
             memset(&c, 0, sizeof c);
-            ok = sscanf(line, "clip %d %d %ld %ld %ld %f %ld %ld", &c.sample, &c.track, &c.start, &c.offset, &c.length,
-                        &c.gain_db, &c.fade_in, &c.fade_out) >= 5 &&
+            ok = sscanf(line, "clip %d %d %ld %ld %ld %f %ld %ld %d %d", &c.sample, &c.track, &c.start, &c.offset,
+                        &c.length, &c.gain_db, &c.fade_in, &c.fade_out, &c.pattern, &c.root) >= 5 &&
                  c.sample >= 0 && c.sample < p->nsamples && c.track >= 0 && c.track < MAX_TRACKS;
-            if (ok && p->nclips < MAX_CLIPS) {
+            if (c.pattern < 0) c.pattern = 0;
+            if (ok && c.pattern > 0 && p->nclips < MAX_CLIPS) {   /* a note clip */
+                if (c.offset < 0) c.offset = 0;
+                if (c.length < 1) c.length = 1;
+                if (c.start < 0) c.start = 0;
+                if (c.fade_in < 0 || c.fade_in > c.length) c.fade_in = 0;
+                if (c.fade_out < 0 || c.fade_in + c.fade_out > c.length) c.fade_out = 0;
+                p->clips[p->nclips++] = c;
+            } else if (ok && p->nclips < MAX_CLIPS) {
                 long fr = p->samples[c.sample].frames;
                 if (c.offset < 0) c.offset = 0;
                 if (c.offset > fr - 1) c.offset = fr - 1;
@@ -297,6 +315,25 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 if (c.fade_in < 0 || c.fade_in > c.length) c.fade_in = 0;
                 if (c.fade_out < 0 || c.fade_in + c.fade_out > c.length) c.fade_out = 0;
                 p->clips[p->nclips++] = c;
+            }
+        } else if (!strcmp(word, "note")) {
+            Note n = {0};
+            ok = sscanf(line, "note %d %d %ld %ld %f", &n.pattern, &n.note, &n.start, &n.length, &n.vel) == 5 &&
+                 n.pattern > 0 && n.note >= 0 && n.note < 128;
+            if (ok && p->nnotes < MAX_NOTES) {
+                if (n.start < 0) n.start = 0;
+                if (n.length < 1) n.length = 1;
+                n.vel = n.vel < 0 ? 0 : n.vel > 1 ? 1 : n.vel;
+                p->notes[p->nnotes++] = n;
+            }
+        } else if (!strcmp(word, "auto")) {
+            AutoPoint a = {0};
+            ok = sscanf(line, "auto %d %d %ld %f", &a.track, &a.param, &a.at, &a.v) == 4 && a.track >= 0 &&
+                 a.track < MAX_TRACKS && a.param >= 0 && a.param < AUTO_PARAMS;
+            if (ok && p->nautos < MAX_AUTO) {
+                if (a.at < 0) a.at = 0;
+                a.v = a.v < 0 ? 0 : a.v > 1 ? 1 : a.v;
+                p->autos[p->nautos++] = a;
             }
         } else if (!strcmp(word, "pad")) {
             int i = -1;
@@ -320,6 +357,7 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
     fclose(f);
     f = NULL;
     p->ntracks = ntracks > 0 ? ntracks : DEFAULT_TRACKS;
+    auto_sort(p);
     for (int c = 0; c < p->nclips; c++)
         if (p->clips[c].track >= p->ntracks) p->ntracks = p->clips[c].track + 1;
     if (p->inst_sample >= p->nsamples) p->inst_sample = -1;

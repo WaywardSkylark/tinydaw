@@ -697,12 +697,19 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         s->frames = nf;
         build_peaks(s);
     }
+    for (int i = 0; i < p->nnotes; i++) {
+        p->notes[i].start = llround(p->notes[i].start * ratio);
+        p->notes[i].length = llround(p->notes[i].length * ratio);
+        if (p->notes[i].length < 1) p->notes[i].length = 1;
+    }
+    for (int i = 0; i < p->nautos; i++) p->autos[i].at = llround(p->autos[i].at * ratio);
     for (int c = 0; c < p->nclips; c++) {
         Clip *cl = &p->clips[c];
         long frames = p->samples[cl->sample].frames;
         cl->start = llround(cl->start * ratio);
         cl->offset = llround(cl->offset * ratio);
         cl->length = llround(cl->length * ratio);
+        if (cl->pattern > 0) continue;           /* a note clip isn't bound by its sound's length */
         if (cl->offset > frames - 1) cl->offset = frames - 1;
         if (cl->offset + cl->length > frames) cl->length = frames - cl->offset;
         if (cl->length < 1) cl->length = 1;

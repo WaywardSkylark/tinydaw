@@ -11,6 +11,8 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
 - **Makes its own sounds:** sine, square, saw, triangle and noise tones, kicks, snares and hats.
   It can also bring in WAV, FLAC, OGG and MP3 files.
 - **A real mixer:** per-track filter, EQ, drive, pan and sidechain ducking, plus delay and reverb.
+- **Piano roll and automation:** write melodies note by note, and draw volume, pan, filter and
+  send changes over time.
 - **Live play:** 16 pads and a MIDI instrument, with recording onto the timeline.
 - **Exports** to WAV, AIFF, FLAC, OGG, Opus or MP3, as a full mix or as one file per track.
 - **Looks how you like:** Dark, Light, follow-your-desktop, Windows XP, Frutiger Aero and Blender themes.
@@ -92,6 +94,34 @@ Settings > **Keys** lists every shortcut.
 | Metronome | **Click** in the top bar, or M. Its arrow sets the sound, 8th/16th ticks, accent and a 1-2 bar count-in |
 | Add a track | **+** next to TRACKS (up to 16). Each track has mute, solo and volume |
 | Bring in audio | Drop WAV, FLAC, OGG or MP3 files on the window |
+
+## Notes and automation
+
+**Piano roll.** Double-click an empty spot on a track to make a note clip (one bar, using the
+Instrument sound from Pads, or a saw if none is set), or double-click a note clip (or select it and
+press Enter) to open it. The roll takes over the timeline until you press **Done** or Esc.
+
+| To | Do this |
+|---|---|
+| Add a note | Click the grid. It snaps to the grid and is as long as the last note you drew |
+| Move / stretch | Drag a note, or drag its right end. Shift turns snapping off |
+| Delete | Right-click it, or select and press Delete |
+| Select | Click, Shift+click, Shift+drag a box, Ctrl+A |
+| Transpose / nudge | Up / Down (Shift: an octave), Left / Right |
+| Copy | Ctrl+drag, or Ctrl+D for a copy straight after |
+| Velocity | Drag across the bars in the Velocity strip at the bottom |
+| Hear a note | Click a key on the keyboard |
+
+The bar along the top picks the clip's sound, the note it plays unpitched at (**Root**) and its
+length in bars; a note past the end makes the clip grow. Copies of a note clip share their notes, so
+editing one edits all of them; **Make unique** gives a copy its own. `[` and `]` and the Mixer's
+Pitch still transpose a whole note clip.
+
+**Automation.** Press **A** on a track to open its lane underneath, pick what it automates (volume,
+pan, filter cutoff, delay send or reverb send), then click to add points, drag them and right-click to
+remove them. Between points the value moves in a straight line; before the first and after the last
+it holds. A lane with points overrides that control, and an orange dot on **A** means a hidden lane
+has points. Automating the cutoff turns the track's filter on as a low-pass if it was off.
 
 ## Making sounds
 
@@ -246,6 +276,7 @@ style, meant as a starting point.
 - `src/fx.c`: the mixer and effects: a state-variable filter, RBJ biquad EQ, tanh drive, a tempo-synced
   delay and a Freeverb-style reverb
 - `src/analysis.c`: the FFT behind the analyzer and the show
+- `src/fx.c` also plays note clips and evaluates automation, per 256-frame block
 - `src/scenes.c`: the show's geometry and shader scenes. Lines are drawn by stamping soft points
   along them and blurring once for the glow; per-pixel scenes run on every core
 - `src/project.c`: the `.tdaw` format

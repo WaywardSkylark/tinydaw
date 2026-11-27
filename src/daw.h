@@ -15,6 +15,8 @@ extern int g_rate;
 
 #define MAX_SAMPLES 256
 #define MAX_CLIPS 2048
+#define MAX_NOTES 8192
+#define MAX_AUTO 4096
 #define MAX_TRACKS 16
 #define DEFAULT_TRACKS 8
 #define DRUM_LANES 6        /* kick, snare, clap, closed hat, open hat, percussion */
@@ -68,15 +70,38 @@ typedef struct {
     int src, semis, reversed;
 } Sample;
 
-/* A placed region on the timeline that plays part of a sample. All positions in frames. */
+/* A placed region on the timeline that plays part of a sample. All positions in frames.
+ * A note clip (pattern > 0) plays the notes of its pattern instead, with `sample` pitched to
+ * each note (it sounds as is at note `root`); offset is then how far into the pattern it starts.
+ * Copies of a note clip share its pattern, so editing one edits them all. */
 typedef struct {
     int sample, track;
     long start;             /* timeline position */
-    long offset;            /* first frame of the sample that plays */
+    long offset;            /* first frame of the sample (or pattern) that plays */
     long length;            /* frames played */
     float gain_db;          /* clip volume, 0 = as is */
     long fade_in, fade_out; /* frames */
+    int pattern;            /* 0 = an audio clip */
+    int root;               /* note clips: the note at which the sound plays unpitched */
 } Clip;
+
+/* A note in a pattern (piano roll). start is in frames from the start of the pattern. */
+typedef struct {
+    int pattern, note;
+    long start, length;
+    float vel;              /* 0..1 */
+} Note;
+
+/* Automation: points on a track's lane for one parameter, kept sorted by track, param, at.
+ * v is 0..1 across the parameter's range (see auto_to_value). Between points the value moves
+ * in a straight line; before the first and after the last it holds. */
+enum { AUTO_VOLUME, AUTO_PAN, AUTO_CUTOFF, AUTO_DELAY, AUTO_REVERB, AUTO_PARAMS };
+extern const char *AUTO_NAMES[AUTO_PARAMS];
+typedef struct {
+    int track, param;
+    long at;
+    float v;
+} AutoPoint;
 
 enum { FILT_OFF, FILT_LOW, FILT_HIGH, FILT_BAND, FILT_TYPES };
 
@@ -158,6 +183,10 @@ typedef struct {
     int inst_root;          /* the note at which it plays unpitched */
     int inst_track;         /* the track it plays through and records to */
     MasterFx fx;
+    Note notes[MAX_NOTES];
+    int nnotes;
+    AutoPoint autos[MAX_AUTO];
+    int nautos;
     Voice voices[MAX_VOICES];
     float bend;             /* live pitch wheel, -1..1 (not saved) */
     float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */
@@ -244,6 +273,17 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
 int project_has_tails(const Project *p);        /* any delay or reverb in use */
 /* Each track's loudest sample (left, right) since the last call, after its fader; then resets. */
 void mixer_levels(Mixer *m, float out[][2]);
+
+/* ---- automation and note clips (fx.c) ---- */
+float auto_to_value(int param, float v);        /* 0..1 to the parameter's own units */
+float value_to_auto(int param, float value);
+void auto_sort(Project *p);                     /* after adding or moving points */
+int auto_lane(const Project *p, int track, int param, int *first);   /* how many points; first index */
+float auto_at(const Project *p, int track, int param, long at, int *has);   /* 0..1 at frame `at` */
+void auto_apply(const Project *p, int track, long at, Track *out);  /* the track with its automation */
+int sample_root(const Sample *s);              /* the note a sound plays at, for note clips */
+long pattern_end(const Project *p, int pattern);   /* the end of its last note, in frames */
+int pattern_new_id(const Project *p);
 
 /* ---- analysis (analysis.c) ---- */
 #define VIS_FFT 4096

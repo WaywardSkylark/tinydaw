@@ -31,6 +31,20 @@ libasound2-dev fonts-dejavu-core zenity`). Without alsa-lib it builds without MI
 `make dist-windows` cross-compiles a Windows build on Linux and zips it with its DLLs and font:
 see [win/README.md](win/README.md). It behaves the same; projects open on either system.
 
+## Example songs
+
+**☰ > Open an example song** opens one of three songs as an untitled copy (saving asks where, so
+the example stays as it was). Each is about a minute long and made only from tinydaw's own sounds
+and effects, so they double as a tour.
+
+| Song | What's in it |
+|---|---|
+| House: Late Train | 124 BPM in A minor. Four-on-the-floor kit split over kick, clap and hats; an off-beat saw bass and chord stabs ducked by the kick (sidechain); a pad; a square lead with ping-pong delay over the drop; a reversed-pad riser and snare roll into it |
+| Hip-hop: Corner Store | 88 BPM in D minor. Swung boom-bap drums with drive, an 808-style sine bass, soft triangle keys (Dm9, Gm7, Bbmaj7, A7) with an airy upper layer, delayed bell melody, tape hiss through a high-pass |
+| Experimental: Glass Weather | 96 BPM in F Lydian. Resonant band-passed saw drones, glass bells falling every 1.25 beats (five against four) into a long ping-pong delay and big reverb, reversed bells an octave down, filtered wind, a breakbeat looping every 3.5 beats so it drifts against the bar and ducks the drones, glitched snares and a sub |
+
+The songs are written by `examples/make_examples.py`; run it to remake them.
+
 ## The window
 
 Controls that step through choices when clicked (Snap, the Theory sound) also have an arrow

@@ -1323,7 +1323,7 @@ static int recovered;                   /* opened from the autosave: unsaved by 
 static int autosaved_serial = -1;
 static Uint32 last_autosave;
 
-enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_OPEN_PATH, ACT_QUIT, ACT_RECOVER };
+enum { ACT_NONE, ACT_NEW, ACT_OPEN, ACT_OPEN_PATH, ACT_QUIT, ACT_RECOVER, ACT_OPEN_EXAMPLE };
 static int confirm_act;                 /* an action waiting on "save changes?" */
 static int after_save_act;              /* an action to run once a Save As completes */
 static char act_path[1024];
@@ -1669,6 +1669,15 @@ static void run_action(int act)
     case ACT_OPEN: file_dialog(0); break;
     case ACT_OPEN_PATH: open_project(act_path, 0); break;
     case ACT_RECOVER: open_project(autosave_file(), 1); break;
+    case ACT_OPEN_EXAMPLE:              /* an untitled copy: Save asks where, so the example stays as it is */
+        if (open_project(act_path, 0) == 0) {
+            char title[200];
+            snprintf(title, sizeof title, "%.190s", base_name(act_path));
+            proj_path[0] = 0;
+            mark_saved();
+            status("Opened the example %s. Press Space to play; Save keeps your own copy.", title);
+        }
+        break;
     case ACT_QUIT: quit_now = 1; break;
     }
 }
@@ -2358,13 +2367,77 @@ static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int en
     return 0;
 }
 
+/* ---- the example songs, from the examples folder next to the program */
+
+#include <dirent.h>
+static char example_path[8][1024], example_title[8][96];
+static int nexamples, example_pick;
+
+static void examples_scan(void)
+{
+    nexamples = 0;
+    char dir[1100] = "examples";
+    char *base = SDL_GetBasePath();
+    if (base) {
+        snprintf(dir, sizeof dir, "%sexamples", base);
+        SDL_free(base);
+    }
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) && nexamples < 8) {
+        size_t n = strlen(e->d_name);
+        if (n < 6 || strcmp(e->d_name + n - 5, ".tdaw")) continue;
+        snprintf(example_path[nexamples], sizeof example_path[0], "%.900s/%.100s", dir, e->d_name);
+        snprintf(example_title[nexamples], sizeof example_title[0], "%.*s", (int)(n - 5), e->d_name);
+        FILE *f = fopen(example_path[nexamples], "r");      /* its title line, if it has one */
+        char line_[200];
+        for (int k = 0; f && k < 4 && fgets(line_, sizeof line_, f); k++)
+            if (!strncmp(line_, "title ", 6)) {
+                line_[strcspn(line_, "\r\n")] = 0;
+                snprintf(example_title[nexamples], sizeof example_title[0], "%.90s", line_ + 6);
+            }
+        if (f) fclose(f);
+        nexamples++;
+    }
+    closedir(d);
+    for (int i = 0; i < nexamples; i++)                        /* in title order */
+        for (int j = i + 1; j < nexamples; j++)
+            if (strcmp(example_title[j], example_title[i]) < 0) {
+                char t[1024];
+                memcpy(t, example_path[i], sizeof t);
+                memcpy(example_path[i], example_path[j], sizeof t);
+                memcpy(example_path[j], t, sizeof t);
+                char u[96];
+                memcpy(u, example_title[i], sizeof u);
+                memcpy(example_title[i], example_title[j], sizeof u);
+                memcpy(example_title[j], u, sizeof u);
+            }
+}
+
+static void examples_menu(SDL_Rect anchor)   /* the list of examples, as a drop-down */
+{
+    examples_scan();
+    if (!nexamples) {
+        status("No examples found: they belong in an examples folder next to the program");
+        return;
+    }
+    dd.open = 1;
+    dd.sel = &example_pick;
+    example_pick = -1;
+    dd.n = nexamples;
+    for (int i = 0; i < nexamples; i++) snprintf(dd.items[i], sizeof dd.items[i], "%.46s", example_title[i]);
+    dd.anchor = anchor;
+}
+
 static void file_menu(void)
 {
     int w = 270, ih = 30;
     static const struct { const char *label, *keys; } ITEMS[] = {
         {"New", "Ctrl+N"}, {"Open...", "Ctrl+O"}, {"Save", "Ctrl+S"}, {"Save As...", "Ctrl+Shift+S"},
         {"Recover unsaved work", NULL}, {NULL, NULL}, {"Export audio...", "Ctrl+E"}, {NULL, NULL},
-        {"Settings", "Ctrl+,"}, {"Full-screen show", "F11"}, {NULL, NULL}, {"Quit", "Ctrl+Q"}};
+        {"Settings", "Ctrl+,"}, {"Full-screen show", "F11"}, {NULL, NULL}, {"Quit", "Ctrl+Q"},
+        {NULL, NULL}, {"Open an example song", NULL}};
     int n = sizeof ITEMS / sizeof *ITEMS, hgt = 8;
     for (int i = 0; i < n; i++) hgt += ITEMS[i].label ? ih : 9;
     SDL_Rect m = {file_btn.x, file_btn.y + file_btn.h + 2, w, hgt + font_h + 12};
@@ -2395,6 +2468,7 @@ static void file_menu(void)
     case 8: if (!settings_open) open_panel(RI_SETTINGS); break;
     case 9: show_toggle(); break;
     case 11: request(ACT_QUIT, NULL); break;
+    case 13: examples_menu((SDL_Rect){m.x + m.w - 4, y - ih - font_h, 4, 4}); break;
     }
 }
 
@@ -5512,6 +5586,39 @@ static int selftest(void)
         open_panel(RI_SOUNDS);
     }
 
+    /* the example songs open, sound right, and open as untitled copies */
+    {
+        examples_scan();
+        check(nexamples == 3, "the three example songs are found next to the program");
+        int good = 0;
+        for (int i = 0; i < nexamples; i++) {
+            Project *q = malloc(sizeof *q);
+            int old_rate = g_rate;
+            if (project_load(q, example_path[i], msg, sizeof msg) == 0) {
+                long end = project_end(q), n = 2 * SR, at = end / 2;
+                float *b = calloc((size_t)n * 2, sizeof(float));
+                Mixer *m = mixer_new();
+                for (long pos = 0; pos < n; pos += 1024)
+                    mixer_run(m, q, at + pos, 1, b + 2 * pos, (int)(n - pos < 1024 ? n - pos : 1024), -1, 0);
+                double r = test_rms(b, 0, n, 2);
+                if (q->nclips > 100 && end > 50L * SR && r > 0.02 && strstr(msg, "missing") == NULL) good++;
+                else fprintf(stderr, "example %s: %d clips, %.1f s, rms %.3f: %s\n", example_title[i], q->nclips,
+                             (double)end / SR, r, msg);
+                mixer_free(m);
+                free(b);
+                project_free(q);
+            }
+            free(q);
+            g_rate = old_rate;
+        }
+        check(good == nexamples && good > 0, "each example opens, runs about a minute and is playing sound mid-song");
+        if (nexamples) {
+            snprintf(act_path, sizeof act_path, "%s", example_path[0]);
+            run_action(ACT_OPEN_EXAMPLE);
+            check(proj_path[0] == 0 && !is_dirty() && P.nclips > 100, "an example opens as an untitled copy, nothing to save yet");
+        }
+    }
+
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
     int vj = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 4, 12, 1);
     if (vj >= 0) {
@@ -6819,6 +6926,10 @@ static void frame(void)
         do_export_now();
     }
 
+    if (dd.changed_for == &example_pick) {   /* an example was picked from the list */
+        dd.changed_for = NULL;
+        if (example_pick >= 0 && example_pick < nexamples) request(ACT_OPEN_EXAMPLE, example_path[example_pick]);
+    }
     rec_drain();
     if (drag.kind == D_NONE && !(pads_rec && P.playing)) history_check();   /* a take is one undo step */
     file_dialog_poll();
@@ -7075,6 +7186,11 @@ int main(int argc, char **argv)
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
         if (getenv("TINYDAW_SHOT_LIGHT")) theme_apply(1);
+        if (getenv("TINYDAW_SHOT_FIT")) {
+            for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+            layout();
+            zoom_to_fit();
+        }
         if (getenv("TINYDAW_SHOT_TYPE")) {      /* the BPM box being typed into */
             numedit_begin(&P.bpm, 40, 300);
             numedit_text("12");

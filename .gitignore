@@ -3,3 +3,4 @@
 *.tmp
 *.wav
 *.bmp
+__pycache__/

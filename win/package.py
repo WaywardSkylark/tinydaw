@@ -56,6 +56,10 @@ def main():
     if os.path.isdir(lic):
         for pkg in sorted(os.listdir(lic)):
             shutil.copytree(os.path.join(lic, pkg), os.path.join(OUT, "licenses", pkg))
+    os.makedirs(os.path.join(OUT, "examples"))          # the example songs (Menu > Open an example song)
+    for f in sorted(os.listdir(os.path.join(ROOT, "examples"))):
+        if f.endswith(".tdaw"):
+            shutil.copy2(os.path.join(ROOT, "examples", f), os.path.join(OUT, "examples"))
     shutil.copy2(os.path.join(ROOT, "README.md"), OUT)
     shutil.copy2(os.path.join(HERE, "README-windows.txt"), OUT)
     zpath = os.path.join(HERE, "dist", NAME + ".zip")

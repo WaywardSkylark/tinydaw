@@ -146,20 +146,23 @@ other USB controllers through SDL, MIDI keyboards and pad controllers through AL
 so they're kept in `~/.config/tinydaw/pads.conf`; the sounds on the pads are saved in the project.
 Controllers work even when the window is in the background.
 
-## Theory pane
+## Theory
 
-**Theory** on the rail (or F1) opens a reference panel. Sounds you hear from it
-use the generator's current wave, volume and envelope (noise and drums fall back to triangle).
+**Theory** on the rail (or F1) has four tabs: **Beats**, **Keys**, **Chords** and **Reference**
+(Circle, Intervals, Tempo, Notes). Everything you can hear has a **+** that puts it in the library,
+ready to drag onto a track. The strip at the top sets what those sounds are: the wave (shared with
+Sounds > New sound) and the length (a beat to two bars). Adding the same thing twice doesn't make
+a copy, and the Sounds button on the rail counts what's waiting there.
 
 | Tab | What's there |
 |---|---|
-| Genres | 12 styles (house, techno, hip-hop, trap, drum & bass, rock, funk, reggaeton, dubstep, lo-fi, disco, jazz swing), each with a tempo and typical range, swing, a suggested key, tuning and its own drum kit. An editable step grid (kick, snare, clap, closed/open hat, perc; click to cycle hit, accent, ghost, roll). **Play** previews it, **Place on new row(s)** adds it at the bar nearest the playhead as one row or a row per drum, and the orange handle can be **dragged** onto any row and position. The kick is tuned to the key root chosen in Keys |
-| Keys | Any root and 12 scales/modes: notes (click to hear), degree formula, steps, key signature. The chords of the key as triads or 7ths with Roman numerals (click: hear, Shift+click: add to the library). 12 common progressions spelled in the key, with **Play** and **Place** (one chord per bar from the bar nearest the playhead, on the chosen track) |
-| Circle | Circle of fifths with relative minors and key signatures; click a key to select it |
-| Chords | 19 chord types with symbol, formula and notes on the current root |
-| Intervals | Semitones, names, just-intonation ratios, cents off in equal temperament; click to hear |
-| Tempo | Straight, dotted and triplet times in ms and Hz at the project tempo, tap tempo, tempo markings |
-| Notes | Frequency of every note C0–B8; click to set the generator's note |
+| Beats | 12 styles (house, techno, hip-hop, trap, drum & bass, rock, funk, reggaeton, dubstep, lo-fi, disco, jazz swing), each with a tempo and typical range, swing, a suggested key, tuning and its own drum kit. An editable step grid (kick, snare, clap, closed/open hat, perc; click to cycle hit, accent, ghost, roll). **Play** previews it, **+ Library** adds it as a loop (or one per drum with Row per drum), **Place on new row(s)** puts it at the bar nearest the playhead, and the orange handle can be **dragged** onto any row. The kick is tuned to the key root chosen in Keys |
+| Keys | Any root and 12 scales/modes: notes (click to hear, + adds all of them), steps, key signature. The chords of the key as triads or 7ths with Roman numerals: click to hear, + under each to add, or add all 7. 12 common progressions spelled in the key: + adds their chords, **Play**, and **Place** (one chord per bar on the chosen track) |
+| Chords | 19 chord types with symbol, formula and notes on the current root: click to hear, + to add |
+| Reference > Circle | Circle of fifths with relative minors and key signatures; click a key to select it |
+| Reference > Intervals | Semitones, names, just-intonation ratios, cents off in equal temperament; click to hear, + to add |
+| Reference > Tempo | Straight, dotted and triplet times in ms and Hz at the project tempo, tap tempo, tempo markings |
+| Reference > Notes | Frequency of every note C0–B8; click to hear and choose it, then add it |
 
 Notes are spelled with one letter per scale degree, so Eb minor contains Cb and Gm is G Bb D.
 

@@ -226,6 +226,11 @@ static int mixer_open;                  /* the Mixer pane: clip, track and maste
 static int vis_open;                    /* the Visualizer pane: spectrum, scope, meters */
 static int show_open;                   /* the full-screen show */
 static int sounds_open = 1;             /* the Sounds panel: library and new sounds */
+static int lib_badge;                   /* sounds added since the Sounds panel was last opened */
+static Uint32 lib_badge_at;
+static int th_len = 2;
+static int add_to_library(const int *notes, int n, const char *label);
+static void add_beat_to_library(int g);
 static int settings_open;
 static void disc(int cx, int cy, int r, Col c);
 enum { RI_SOUNDS, RI_THEORY, RI_PADS, RI_MIXER, RI_VISUAL, RI_SETTINGS, RI_COUNT };
@@ -797,7 +802,7 @@ static void scrollbar(SDL_Rect area, int *scroll, int content_h)
         if (*scroll > 0) line(area.x, area.y + i, trk.x - 3, area.y + i, alpha(DARK, a));
         if (*scroll < max) line(area.x, area.y + area.h - 1 - i, trk.x - 3, area.y + area.h - 1 - i, alpha(DARK, a));
     }
-    if (*scroll == 0) {                          /* until it's first scrolled: say there's more */
+    if (*scroll == 0 && !hit(area)) {            /* there's more: shown until you reach in or scroll */
         const char *more = "more ▾";
         int mw = text_w(more) + 12;
         SDL_Rect pill = {trk.x - mw - 6, area.y + area.h - font_h - 8, mw, font_h + 4};
@@ -3092,6 +3097,18 @@ static void rail(void)
         if (on) fill((SDL_Rect){0, y + 6, 3, 44}, ACCENT);
         Col c = on ? ACCENT : hov ? TEXT : DIM;
         rail_icon(i, RAIL_W / 2, y + 20, c);
+        if (i == RI_SOUNDS) {
+            if (on) lib_badge = 0;
+            if (lib_badge > 0) {                /* "+3": sounds added elsewhere, waiting in the library */
+                char bd[8];
+                snprintf(bd, sizeof bd, "+%d", lib_badge > 99 ? 99 : lib_badge);
+                int bw = text_w(bd) + 8;
+                int pulse = SDL_GetTicks() - lib_badge_at < 600;
+                SDL_Rect pb = {b.x + b.w - bw - 2, y + 2, bw, font_h + 2};
+                fill(pb, pulse ? HEAD : ACCENT);
+                text(pb.x + 4, pb.y + 1, bd, DARK);
+            }
+        }
         text(RAIL_W / 2 - text_w(RAIL_NAME[i]) / 2, y + 36, RAIL_NAME[i], on ? TEXT : DIM);
         if (hov && lpress) {
             open_panel(i);
@@ -4517,10 +4534,10 @@ static int selftest(void)
     theory_open = 1;
     sim(-1, -1, 0, 0, 0, 0);
     th_scroll = 0;
-    SDL_Rect circle_tab = tab_rect(2, L.pane_x + 14, L.top + 10, PANE_W - 28);   /* Genres, Keys, Circle */
-    sim(circle_tab.x + circle_tab.w / 2, circle_tab.y + 14, 1, 0, 0, 0);
-    sim(circle_tab.x + circle_tab.w / 2, circle_tab.y + 14, 0, 1, 0, 0);
-    check(theory_tab == 1, "clicking a pane tab switches to it");
+    SDL_Rect ref_tab = tab_rect(3, L.pane_x + 14, L.top + 10, PANE_W - 28);   /* Beats, Keys, Chords, Reference */
+    sim(ref_tab.x + ref_tab.w / 2, ref_tab.y + 14, 1, 0, 0, 0);
+    sim(ref_tab.x + ref_tab.w / 2, ref_tab.y + 14, 0, 1, 0, 0);
+    check(theory_tab == 1, "clicking Reference opens its first page, the circle of fifths");
     int chord[3] = {57, 60, 64};
     preview_notes(chord, 3, 2);
     check(scratch && scratch_len == 2 * beat_frames(), "chord preview renders two beats");
@@ -5163,6 +5180,45 @@ static int selftest(void)
         check(fabs(P.bpm - 120) <= 2, "tapping every half second sets 120 BPM");
     }
 
+    /* Theory: + puts sounds in the library */
+    {
+        open_panel(RI_THEORY);
+        theory_tab = 2;                          /* Chords */
+        th_scroll = 0;
+        th_root = 0;
+        th_len = 2;
+        lib_badge = 0;
+        frame();
+        int ns0 = P.nsamples;
+        SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
+        /* the first chord row's + is at the right edge, below the tabs, strip and headings */
+        int found = -1;
+        for (int yy = pane.y + 60; yy < pane.y + pane.h && found < 0; yy += 2) {
+            sim(pane.x + pane.w - 14 - 13, yy, 1, 0, 0, 0);
+            sim(pane.x + pane.w - 14 - 13, yy, 0, 1, 0, 0);
+            if (P.nsamples > ns0) found = yy;
+        }
+        check(found > 0 && !strncmp(P.samples[P.nsamples - 1].name, "C ", 2) &&
+                  P.samples[P.nsamples - 1].nchord == 3, "+ on the Major row adds a C major chord to the library");
+        check(lib_badge == 1, "and the Sounds button counts it");
+        int ns1 = P.nsamples;
+        sim(pane.x + pane.w - 14 - 13, found, 1, 0, 0, 0);
+        sim(pane.x + pane.w - 14 - 13, found, 0, 1, 0, 0);
+        check(P.nsamples == ns1, "adding the same chord again doesn't make a copy");
+        th_len = 0;
+        int note = 69;
+        int s1 = add_to_library(&note, 1, "A4");
+        check(s1 >= 0 && labs(P.samples[s1].frames - beat_frames()) <= 2, "the length setting sets how long added sounds are");
+        int ns2 = P.nsamples;
+        gn_split = 1;
+        add_beat_to_library(0);
+        check(P.nsamples == ns2 + 4 && P.samples[ns2].is_beat, "+ Library on a beat adds one loop per drum");
+        gn_split = 0;
+        open_panel(RI_SOUNDS);
+        frame();
+        check(lib_badge == 0, "opening Sounds clears the count");
+    }
+
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
     int vj = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 4, 12, 1);
     if (vj >= 0) {
@@ -5280,11 +5336,69 @@ static int chord_sample(const int *notes, int n, const char *label, double beats
     return sample_generate_notes(&P, &g, notes, n, name);
 }
 
-static void add_chord_to_library(const int *notes, int n, const char *label)
+/* Sounds added from Theory: the New sound panel's wave and envelope, at this length */
+static const double TH_LENS[4] = {1, 2, 4, 8};
+static const char *const TH_LEN_NAMES[4] = {"1 beat", "2 beats", "1 bar", "2 bars"};
+
+static void library_added(int s, int existed)
 {
-    int s = chord_sample(notes, n, label, 4);
-    if (s >= 0) status("Added \"%s\" to the library. Drag it onto a track.", P.samples[s].name);
-    else status("Library is full");
+    if (s < 0) {
+        status("Library is full");
+        return;
+    }
+    if (existed) {
+        status("\"%s\" is already in the library", P.samples[s].name);
+        return;
+    }
+    lib_badge++;
+    lib_badge_at = SDL_GetTicks();
+    status("Added \"%s\" to the library (Sounds)", P.samples[s].name);
+}
+
+/* notes (one or a chord) as a library sound; returns its index */
+static int add_to_library(const int *notes, int n, const char *label)
+{
+    int before = P.nsamples;
+    int s = chord_sample(notes, n, label, TH_LENS[th_len]);
+    library_added(s, s >= 0 && s < before);
+    return s;
+}
+
+/* a small "+" button: adds something to the library */
+static int plus_button(SDL_Rect r)
+{
+    int hov = hit(r) && drag.kind == D_NONE;
+    fill(r, hov ? ACCENT : PANEL3);
+    Col c = hov ? DARK : TEXT;
+    int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    fill((SDL_Rect){cx - 5, cy - 1, 11, 2}, c);
+    fill((SDL_Rect){cx - 1, cy - 5, 2, 11}, c);
+    if (hov && lpress) {
+        lpress = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* the strip above Theory's sound pages: what added sounds will be */
+static int adds_as(int x, int y, int w)
+{
+    char buf[48];
+    static const int PITCHED[4] = {WAVE_SINE, WAVE_SQUARE, WAVE_SAW, WAVE_TRIANGLE};
+    GenParams g = chord_params(1);
+    text(x, y, "+ adds to the library as:", DIM);
+    y += font_h + 6;
+    snprintf(buf, sizeof buf, "Sound: %s", WAVE_NAMES[g.wave]);
+    if (button((SDL_Rect){x, y, 112, 26}, buf, 0)) {   /* cycles the generator's wave */
+        int k = 0;
+        for (int i = 0; i < 4; i++)
+            if (PITCHED[i] == g.wave) k = i;
+        G.wave = PITCHED[(k + 1) % 4];
+    }
+    int lw = (w - 120 - 12) / 4;
+    for (int i = 0; i < 4; i++)
+        if (button((SDL_Rect){x + 120 + i * (lw + 4), y, lw, 26}, TH_LEN_NAMES[i], th_len == i)) th_len = i;
+    return y + 38;
 }
 
 static int prog_flats(const Progression *pr)
@@ -5385,6 +5499,17 @@ static int tab_keys(int x, int y, int w)
     const Scale *sc = &SCALES[th_scale];
     int flats = key_uses_flats(th_root, th_scale);
     text(x, y + 4, "Notes", DIM);
+    if (plus_button((SDL_Rect){x, y + font_h + 10, 52, 20})) {     /* every note of the scale */
+        int added = 0;
+        for (int k = 0; k < sc->n; k++) {
+            int note = 60 + th_root + sc->steps[k];
+            char nn[16];
+            scale_note_name(th_root, th_scale, k, nn, sizeof nn);
+            snprintf(b2, sizeof b2, "%s4", nn);
+            if (add_to_library(&note, 1, b2) >= 0) added++;
+        }
+        status("Added the %d notes of %s %s to the library", added, pitch_name(th_root, flats), sc->name);
+    }
     int cell = (w - 64) / 7;
     for (int k = 0; k < sc->n; k++) {
         SDL_Rect r = {x + 64 + k * cell, y, cell - 4, 2 * font_h + 8};
@@ -5408,24 +5533,42 @@ static int tab_keys(int x, int y, int w)
     y += font_h + 14;
 
     if (sc->n == 7) {
-        text(x, y + 6, "Chords   click: hear   Shift+click: add", DIM);
+        text(x, y + 6, "Chords   click to hear", DIM);
         if (button((SDL_Rect){x + w - 124, y, 60, 26}, "Triads", !th_sevenths)) th_sevenths = 0;
         if (button((SDL_Rect){x + w - 60, y, 60, 26}, "7ths", th_sevenths)) th_sevenths = 1;
         y += 32;
-        int cw = (w - 6 * 4) / 7;
+        int cw = (w - 6 * 4) / 7, all = 0;
         for (int d = 0; d < 7; d++) {
             int t;
             char num[24];
             int pc = diatonic_chord(th_root, th_scale, d, th_sevenths, &t, num, sizeof num);
             if (pc < 0) continue;
             diatonic_chord_name(th_root, th_scale, d, t, buf, sizeof buf);
+            int notes[6], n = chord_notes(pc, t, 48, notes);
             if (chord_button((SDL_Rect){x + d * (cw + 4), y, cw, 2 * font_h + 12}, num, buf)) {
-                int notes[6], n = chord_notes(pc, t, 48, notes);
-                if (mods & KMOD_SHIFT) add_chord_to_library(notes, n, buf);
+                if (mods & KMOD_SHIFT) add_to_library(notes, n, buf);
                 else preview_notes(notes, n, 2);
             }
+            if (plus_button((SDL_Rect){x + d * (cw + 4), y + 2 * font_h + 16, cw, 20})) add_to_library(notes, n, buf);
         }
-        y += 2 * font_h + 22;
+        y += 3 * font_h + 26;
+        if (button((SDL_Rect){x, y, w, 26}, "+ Add all 7 chords to the library", 0)) all = 1;
+        if (all) {
+            int added = 0;
+            for (int d = 0; d < 7; d++) {
+                int t;
+                char num[24];
+                int pc = diatonic_chord(th_root, th_scale, d, th_sevenths, &t, num, sizeof num);
+                if (pc < 0) continue;
+                diatonic_chord_name(th_root, th_scale, d, t, buf, sizeof buf);
+                int notes[6], n = chord_notes(pc, t, 48, notes);
+                if (chord_sample(notes, n, buf, TH_LENS[th_len]) >= 0) added++;
+            }
+            lib_badge += added;
+            lib_badge_at = SDL_GetTicks();
+            status("The %d chords of %s %s are in the library", added, pitch_name(th_root, flats), sc->name);
+        }
+        y += 38;
     } else {
         text(x, y, "Pentatonic and blues scales: use the chords of", DIM);
         text(x, y + font_h + 2, "the Major or Minor key with the same root.", DIM);
@@ -5451,14 +5594,27 @@ static int tab_keys(int x, int y, int w)
             len += snprintf(buf + len, sizeof buf - len, c ? "  %s" : "%s", b2);
         }
         int tx = text(x, y, pr->numerals, TEXT);
-        text_clip((SDL_Rect){x + tx + 10, y, w - tx - 132, font_h + 2}, x + tx + 10, y, pr->style, DIM);
-        text_clip((SDL_Rect){x, y + font_h + 3, w - 122, font_h + 2}, x, y + font_h + 3, buf, HEAD);
+        text_clip((SDL_Rect){x + tx + 10, y, w - tx - 164, font_h + 2}, x + tx + 10, y, pr->style, DIM);
+        text_clip((SDL_Rect){x, y + font_h + 3, w - 154, font_h + 2}, x, y + font_h + 3, buf, HEAD);
+        if (plus_button((SDL_Rect){x + w - 148, y + 4, 28, 26})) {   /* its chords, into the library */
+            int added = 0;
+            for (int c = 0; c < pr->n; c++) {
+                int notes[6], n = chord_notes((th_root + pr->root[c]) % 12, pr->type[c], 48, notes);
+                char nm[32];
+                chord_name((th_root + pr->root[c]) % 12, pr->type[c], pf, nm, sizeof nm);
+                int before = P.nsamples;
+                if (chord_sample(notes, n, nm, TH_LENS[th_len]) >= before) added++;
+            }
+            lib_badge += added;
+            lib_badge_at = SDL_GetTicks();
+            status("%s: %d new chord%s in the library", pr->numerals, added, added == 1 ? "" : "s");
+        }
         if (button((SDL_Rect){x + w - 116, y + 4, 52, 26}, "Play", 0)) play_progression(pr);
         if (button((SDL_Rect){x + w - 60, y + 4, 60, 26}, "Place", 0)) place_progression(pr);
         y += 2 * font_h + 14;
     }
-    text(x, y, "Place puts one chord per bar from the bar nearest", DIM);
-    text(x, y + font_h + 2, "the playhead, using the generator's sound.", DIM);
+    text(x, y, "+ adds the chords to the library. Place puts one per", DIM);
+    text(x, y + font_h + 2, "bar on the timeline, from the bar nearest the playhead.", DIM);
     return y + 2 * font_h + 8;
 }
 
@@ -5557,28 +5713,28 @@ static int tab_chords(int x, int y, int w)
 {
     char buf[128], sym[32];
     int flats = key_uses_flats(th_root, 0);
-    snprintf(buf, sizeof buf, "On %s (root set in Keys)   click: hear   Shift+click: add",
-             pitch_name(th_root, flats));
+    snprintf(buf, sizeof buf, "On %s (root set in Keys)   click: hear   +: add", pitch_name(th_root, flats));
     text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, DIM);
     y += font_h + 10;
     text(x + 6, y, "Chord", DIM);
-    text(x + 188, y, "Symbol", DIM);
-    text(x + 268, y, "Formula", DIM);
-    text(x + 372, y, "Notes", DIM);
+    text(x + 160, y, "Symbol", DIM);
+    text(x + 230, y, "Formula", DIM);
+    text(x + 318, y, "Notes", DIM);
     y += font_h + 6;
     for (int t = 0; t < CH_COUNT; t++) {
         const ChordType *c = &CHORDS[t];
-        SDL_Rect r = {x, y - 2, w, font_h + 6};
-        int clicked = row_hit(r);
+        SDL_Rect r = {x, y - 2, w - 30, font_h + 6};
         chord_name(th_root, t, flats, sym, sizeof sym);
+        int notes[6], n = chord_notes(th_root, t, 48, notes);
+        if (plus_button((SDL_Rect){x + w - 26, y - 2, 26, font_h + 6})) add_to_library(notes, n, sym);
+        int clicked = row_hit(r);
         chord_tone_names(th_root, t, flats, buf, sizeof buf);
-        text(x + 6, y, c->name, TEXT);
-        text(x + 188, y, sym, HEAD);
-        text(x + 268, y, c->formula, TEXT);
-        text_clip((SDL_Rect){x + 372, y, w - 372, font_h + 2}, x + 372, y, buf, TEXT);
+        text_clip((SDL_Rect){x, y, 156, font_h + 2}, x + 6, y, c->name, TEXT);
+        text(x + 160, y, sym, HEAD);
+        text(x + 230, y, c->formula, TEXT);
+        text_clip((SDL_Rect){x + 318, y, w - 350, font_h + 2}, x + 318, y, buf, TEXT);
         if (clicked) {
-            int notes[6], n = chord_notes(th_root, t, 48, notes);
-            if (mods & KMOD_SHIFT) add_chord_to_library(notes, n, sym);
+            if (mods & KMOD_SHIFT) add_to_library(notes, n, sym);
             else preview_notes(notes, n, 2);
         }
         y += font_h + 7;
@@ -5589,7 +5745,7 @@ static int tab_chords(int x, int y, int w)
 static int tab_intervals(int x, int y, int w)
 {
     char buf[64];
-    text(x, y, "Click a row to hear it from the key root.", DIM);
+    text(x, y, "Click a row to hear it from the key root, + to add it.", DIM);
     y += font_h + 10;
     static const char *head[6] = {"St", "Interval", "", "Ratio", "Cents", "Sound"};
     static const int col[6] = {6, 34, 132, 164, 220, 300};
@@ -5597,7 +5753,15 @@ static int tab_intervals(int x, int y, int w)
     y += font_h + 6;
     for (int k = 0; k <= 12; k++) {
         const Interval *iv = &INTERVALS[k];
-        SDL_Rect r = {x, y - 2, w, font_h + 6};
+        SDL_Rect r = {x, y - 2, w - 30, font_h + 6};
+        int inotes[2] = {60 + th_root, 60 + th_root + k};
+        if (plus_button((SDL_Rect){x + w - 26, y - 2, 26, font_h + 6})) {
+            char lb[32], n0[8], n1[8];
+            note_name(inotes[0], n0, sizeof n0);
+            note_name(inotes[1], n1, sizeof n1);
+            snprintf(lb, sizeof lb, k ? "%s+%s %s" : "%s%s %s", n0, k ? n1 : "", iv->abbr);
+            add_to_library(inotes, k ? 2 : 1, lb);
+        }
         int clicked = row_hit(r);
         double cents = 100.0 * k - 1200.0 * log2((double)iv->num / iv->den);
         snprintf(buf, sizeof buf, "%d", k);
@@ -5608,7 +5772,7 @@ static int tab_intervals(int x, int y, int w)
         text(x + col[3], y, buf, TEXT);
         snprintf(buf, sizeof buf, "%+.1f c", fabs(cents) < 0.05 ? 0.0 : cents);
         text(x + col[4], y, buf, fabs(cents) > 10 ? ACCENT : TEXT);
-        text_clip((SDL_Rect){x + col[5], y, w - col[5], font_h + 2}, x + col[5], y, iv->feel, DIM);
+        text_clip((SDL_Rect){x + col[5], y, w - col[5] - 32, font_h + 2}, x + col[5], y, iv->feel, DIM);
         if (clicked) {
             int notes[2] = {60 + th_root, 60 + th_root + k};
             preview_notes(notes, k ? 2 : 1, 2);
@@ -5686,7 +5850,7 @@ static int tab_notes(int x, int y, int w)
     snprintf(buf, sizeof buf, "C4 = middle C = MIDI 60.  A4 = %g Hz, equal temperament.", P.a4);
     text(x, y, buf, DIM);
     y += font_h + 4;
-    text(x, y, "Click a note to set the generator to it.", DIM);
+    text(x, y, "Click a note to hear it and choose it (also for New sound).", DIM);
     y += font_h + 10;
     int cw = (w - 34) / 9, hover = -1;
     for (int o = 0; o <= 8; o++) {
@@ -5729,7 +5893,14 @@ static int tab_notes(int x, int y, int w)
     text(x, y, buf, HEAD);
     snprintf(buf, sizeof buf, "period %.3f ms   wavelength in air %.2f m", 1000.0 / f, 343.0 / f);
     text(x, y + font_h + 3, buf, DIM);
-    return y + 2 * font_h + 12;
+    y += 2 * font_h + 12;
+    note_name(G.note, nn, sizeof nn);
+    snprintf(buf, sizeof buf, "+ Add %s to the library", nn);
+    if (button((SDL_Rect){x, y, w, 28}, buf, 0)) {
+        int note = G.note;
+        add_to_library(&note, 1, nn);
+    }
+    return y + 40;
 }
 
 /* ---------------------------------------------------------------- genre beats */
@@ -5898,6 +6069,32 @@ static void place_beat(int g, long start, int first_track)
                rows[0] + 1);
 }
 
+/* The beat as library sounds (one loop, or one per drum with Row per drum), at the current tempo */
+static void add_beat_to_library(int g)
+{
+    BeatSpec b = genre_spec(g);
+    int masks[DRUM_LANES];
+    const char *labels[DRUM_LANES];
+    int n = beat_parts(&b, masks, labels), added = 0, last = -1;
+    for (int i = 0; i < n; i++) {
+        char name[64];
+        snprintf(name, sizeof name, "%s %s %.0f", GENRES[g].name, labels[i], P.bpm);
+        int before = P.nsamples;
+        last = beat_sample(&b, masks[i], name);
+        if (last < 0) break;
+        if (last >= before) added++;
+    }
+    if (n == 0) status("The %s pattern is empty: click some steps first", GENRES[g].name);
+    else if (last < 0) status("Library is full");
+    else if (!added) status("That beat is already in the library");
+    else {
+        lib_badge += added;
+        lib_badge_at = SDL_GetTicks();
+        status("Added the %s beat to the library as %d loop%s at %.0f BPM", GENRES[g].name, added,
+               added == 1 ? "" : "s", P.bpm);
+    }
+}
+
 static void play_beat(int g)
 {
     BeatSpec b = genre_spec(g);
@@ -6042,8 +6239,9 @@ static int tab_genres(int x, int y, int w)
     y += 32;
 
     snprintf(buf, sizeof buf, "Play (%.0f BPM)", genre_bpm(gn_sel));
-    if (button((SDL_Rect){x, y, 150, 30}, buf, 0)) play_beat(gn_sel);
-    if (button((SDL_Rect){x + 156, y, w - 156, 30}, "Place on new row(s)", 0)) {
+    if (button((SDL_Rect){x, y, 140, 30}, buf, 0)) play_beat(gn_sel);
+    if (button((SDL_Rect){x + 146, y, 120, 30}, "+ Library", 0)) add_beat_to_library(gn_sel);
+    if (button((SDL_Rect){x + 272, y, w - 272, 30}, "Place on new row(s)", 0)) {
         long bar = 4 * beat_frames();
         long start = (long)llround((double)P.playhead / bar) * bar;
         place_beat(gn_sel, start, -1);
@@ -6064,16 +6262,11 @@ static int tab_genres(int x, int y, int w)
     return y + 4;
 }
 
-static const char *TAB_NAMES[7] = {"Keys", "Circle", "Chords", "Intervals", "Tempo", "Notes", "Genres"};
-static const int TAB_ORDER[7] = {6, 0, 1, 2, 3, 4, 5};   /* Genres first */
-
+/* where Theory's main tab `pos` (Beats, Keys, Chords, Reference) is drawn: as subtabs() lays it out */
 static SDL_Rect tab_rect(int pos, int x, int y, int w)
 {
-    int total = 0;
-    for (int i = 0; i < 7; i++) total += text_w(TAB_NAMES[i]) + 12;
-    int extra = (w - total - 6 * 3) / 7, tx = x;
-    for (int i = 0; i < pos; i++) tx += text_w(TAB_NAMES[TAB_ORDER[i]]) + 12 + extra + 3;
-    return (SDL_Rect){tx, y, text_w(TAB_NAMES[TAB_ORDER[pos]]) + 12 + extra, 28};
+    int bw = (w - 4 * 3) / 4;
+    return (SDL_Rect){x + pos * (bw + 4), y, pos == 3 ? w - 3 * (bw + 4) : bw, 28};
 }
 
 static void theory_pane(void)
@@ -6092,14 +6285,24 @@ static void theory_pane(void)
 
     SDL_RenderSetClipRect(ren, &pane);
     int x = pane.x + 14, w = pane.w - 28, y0 = pane.y + 10 - th_scroll, y = y0;
-    for (int pos = 0; pos < 7; pos++) {
-        int k = TAB_ORDER[pos];
-        if (button(tab_rect(pos, x, y, w), TAB_NAMES[k], theory_tab == k)) {
-            theory_tab = k;
-            th_scroll = 0;
-        }
+    static const char *const MAIN[] = {"Beats", "Keys", "Chords", "Reference"};
+    static const char *const REF[] = {"Circle", "Intervals", "Tempo", "Notes"};
+    static const int REF_ID[] = {1, 3, 4, 5};
+    static int ref_tab = 1;
+    int main_sel = theory_tab == 6 ? 0 : theory_tab == 0 ? 1 : theory_tab == 2 ? 2 : 3, was = main_sel;
+    y = subtabs(x, y, w, MAIN, 4, &main_sel);
+    if (main_sel != was) {
+        theory_tab = main_sel == 0 ? 6 : main_sel == 1 ? 0 : main_sel == 2 ? 2 : ref_tab;
+        th_scroll = 0;
     }
-    y += 42;
+    if (main_sel == 3) {
+        int rs = 0;
+        for (int i = 0; i < 4; i++)
+            if (REF_ID[i] == theory_tab) rs = i;
+        y = subtabs(x, y - 6, w, REF, 4, &rs);
+        theory_tab = ref_tab = REF_ID[rs];
+    }
+    if (theory_tab == 0 || theory_tab == 2 || theory_tab == 3 || theory_tab == 5) y = adds_as(x, y, w);
     switch (theory_tab) {
     case 0: y = tab_keys(x, y, w); break;
     case 1: y = tab_circle(x, y, w); break;
@@ -6589,6 +6792,10 @@ int main(int argc, char **argv)
             if (pn >= 0 && pn < RI_COUNT) open_panel(pn);
             int *subs[RI_COUNT] = {&sounds_sub, &theory_tab, &pads_sub, &mixer_sub, &vis_sub, &settings_sub};
             if (pn >= 0 && pn < RI_COUNT) *subs[pn] = sub;
+            if (pn == RI_THEORY) {                 /* show the badge as if three sounds were added */
+                lib_badge = 3;
+                lib_badge_at = 0;
+            }
         }
         if (getenv("TINYDAW_SHOT_VIS") || getenv("TINYDAW_SHOT_SHOW")) {   /* fill the meters with the demo */
             vis_open = getenv("TINYDAW_SHOT_VIS") != NULL;

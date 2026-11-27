@@ -168,9 +168,20 @@ Exports go to your Music folder.
 **Visual** (or F4) has a spectrum analyzer, a waveform, a stereo view (with a warning when left and
 right would cancel in mono) and level meters with clip warnings.
 
-**F11** starts a full-screen show: a glowing blob for every track that's playing, in its colour,
-circling in time with the song. They swell on the kick, a ring of spectrum bars pulses around
-them, and every beat sends out a ripple. Space plays, the pad keys still work, and Esc leaves.
+**F11** starts a full-screen show with 17 scenes. Pick one in **Visual** (the Show list), or use
+←/→ inside the show. With cycling on (Tab), they crossfade from one to the next every 24 seconds,
+or however long you set.
+
+- **Blobs:** a glowing blob for every track that's playing, in its colour, circling in time with the
+  song, with a ring of spectrum bars and a ripple on every beat.
+- **Sacred geometry** (from geoshade): the Flower of Life, Metatron's Cube, the Sri Yantra, the
+  Platonic solids, golden-angle phyllotaxis, star polygons, a torus of circles and spirographs, each
+  drawing itself in.
+- **Shaders** (from termshade): plasma, tunnel, fire, metaballs, a raymarched torus and sphere, a
+  starfield, interference and Voronoi cells.
+
+The music drives every scene: the bass makes the picture breathe, beats make it pulse, and louder
+music draws it faster. Space plays and stops, the pad keys still work, and Esc leaves.
 
 ## The example songs
 
@@ -222,6 +233,8 @@ style, meant as a starting point.
 - `src/fx.c`: the mixer and effects: a state-variable filter, RBJ biquad EQ, tanh drive, a tempo-synced
   delay and a Freeverb-style reverb
 - `src/analysis.c`: the FFT behind the analyzer and the show
+- `src/scenes.c`: the show's geometry and shader scenes. Lines are drawn by stamping soft points
+  along them and blurring once for the glow; per-pixel scenes run on every core
 - `src/project.c`: the `.tdaw` format
 - `src/midi.c`: MIDI input (ALSA on Linux, winmm on Windows)
 - `src/theory.c`: scales, chords, progressions and the beat styles

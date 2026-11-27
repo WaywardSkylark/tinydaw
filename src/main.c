@@ -6,6 +6,7 @@
 #include "daw.h"
 #include "theory.h"
 #include "midi.h"
+#include "scenes.h"
 #include "compat.h"
 
 #include <SDL.h>
@@ -367,6 +368,9 @@ static int pads_open;                   /* the Pads pane (shares the right-hand 
 static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
 static int vis_open;                    /* the Visualizer pane: spectrum, scope, meters */
 static int show_open;                   /* the full-screen show */
+static int show_scene, show_cycle = 1;  /* 0 = blobs, 1.. = scenes.c's scene show_scene - 1 */
+static double show_each = 24, show_clock, show_started[SCENE_COUNT + 1];
+static const char *show_name(int k);
 static int sounds_open = 1;             /* the Sounds panel: library and new sounds */
 static int lib_badge;                   /* sounds added since the Sounds panel was last opened */
 static Uint32 lib_badge_at;
@@ -3206,8 +3210,24 @@ static int vis_content(int x, int y, int w)
     char buf[64];
     static const char *const SUBS[] = {"Analyzer", "Meters"};
     y = subtabs(x, y, w, SUBS, 2, &vis_sub);
-    if (button((SDL_Rect){x, y, w, 30}, "Full-screen show  (F11)", 0)) show_toggle();
-    y += 42;
+    {                                           /* the show: which scene, cycling, how long each */
+        static const char *names[SCENE_COUNT + 1];
+        for (int k = 0; k <= SCENE_COUNT; k++) names[k] = show_name(k);
+        if (dropdown((SDL_Rect){x, y, w - 140, 30}, "Show: ", names, SCENE_COUNT + 1, &show_scene, 0)) {
+            show_started[show_scene] = show_clock;
+            settings_save();
+        }
+        if (button((SDL_Rect){x + w - 132, y, 132, 30}, show_cycle ? "Cycle: on" : "Cycle: off", show_cycle)) {
+            show_cycle = !show_cycle;
+            settings_save();
+        }
+        y += 36;
+        double each = show_each;
+        number((SDL_Rect){x, y, w / 2 - 4, 28}, "Each scene", &show_each, 5, 600, 0.25, "%.0f s");
+        if (show_each != each) settings_save();
+        if (button((SDL_Rect){x + w / 2 + 4, y, w / 2 - 4, 28}, "Full-screen show  (F11)", 0)) show_toggle();
+        y += 40;
+    }
     if (vis_sub == 0) {
     text(x, y, "SPECTRUM", DIM);
     y += font_h + 6;
@@ -3291,10 +3311,12 @@ static double last_beat = -1;
 
 static void ring(int cx, int cy, int r, Col c);
 
-static void show_draw(void)
+static void show_overlay(const char *name, const char *caption);
+
+static void show_blobs(void)
 {
-    int tw = 320, th = 320 * H / (W > 0 ? W : 1);
-    if (th < 90) th = 90;
+    int tw = 640, th = 640 * H / (W > 0 ? W : 1);    /* twice the old resolution */
+    if (th < 180) th = 180;
     if (!show_tex || tw != show_w || th != show_h) {
         if (show_tex) SDL_DestroyTexture(show_tex);
         free(show_px);
@@ -3413,19 +3435,135 @@ static void show_draw(void)
         int rr = r0 + (int)(ripple_t[i] * H * 0.5f);
         ring(cx, cy, rr, alpha(HEAD, (Uint8)(120 * (1 - ripple_t[i] / 1.2f))));
     }
-    /* what's playing */
-    char buf[160];
-    double secs = (double)P.playhead / SR;
+    show_overlay("Blobs", "a glowing blob for every track that's playing");
+}
+
+/* text with a dark backing, readable over any scene */
+static void show_text(int x, int y, const char *s, Col c)
+{
+    fill((SDL_Rect){x - 6, y - 2, text_w(s) + 12, font_h + 4}, (Col){0, 0, 0, 120});
+    text(x, y, s, c);
+}
+
+/* what's playing, which scene, and the keys: on top of every scene */
+static void show_overlay(const char *name, const char *caption)
+{
+    char buf[200];
+    double secs = (double)P.playhead / SR, beats = secs * P.bpm / 60.0;
     snprintf(buf, sizeof buf, "%.60s   bar %d  beat %d   %.0f BPM   %02d:%02d", proj_path[0] ? base_name(proj_path) : "tinydaw",
              (int)(beats / 4) + 1, (int)fmod(beats, 4.0) + 1, P.bpm, (int)(secs / 60), (int)fmod(secs, 60.0));
-    text(20, H - font_h - 16, buf, alpha(TEXT, 200));
-    const char *hint = P.playing ? "Esc or F11 to leave the show" : "Space to play  ·  Esc or F11 to leave the show";
-    text(W - text_w(hint) - 20, H - font_h - 16, hint, DIM);
+    show_text(20, H - font_h - 16, buf, rgb(230, 230, 236));
+    snprintf(buf, sizeof buf, "%d/%d  %s", show_scene + 1, scene_count() + 1, name);
+    show_text(20, 16, buf, rgb(255, 214, 90));
+    if (caption && caption[0]) show_text(20, 20 + font_h, caption, rgb(170, 175, 190));
+    const char *hint = show_cycle ? "Left/Right scene  ·  Tab: stop cycling  ·  Space play  ·  Esc leave"
+                                  : "Left/Right scene  ·  Tab: cycle scenes  ·  Space play  ·  Esc leave";
+    show_text(W - text_w(hint) - 20, H - font_h - 16, hint, rgb(170, 175, 190));
+}
+
+/* ---- the other scenes (scenes.c), with cycling, crossfades and the music driving them */
+
+static SDL_Texture *scene_tex;
+static int scene_tw, scene_th;
+static float *scene_buf, *scene_buf2;
+static size_t scene_cap;
+static Uint32 *scene_px;
+static double show_switch_at, show_wall;
+static int show_fade_from = -1;
+static double show_fade_left;
+static Uint32 show_last_tick;
+#define SHOW_FADE 1.6
+
+static const char *show_name(int k) { return k == 0 ? "Blobs" : scene_name(k - 1); }
+
+static void show_go(int k)               /* to scene k, crossfading from the one before */
+{
+    int n = scene_count() + 1;
+    k = ((k % n) + n) % n;
+    if (k == show_scene) return;
+    show_fade_from = show_scene != 0 && k != 0 ? show_scene : -1;   /* the blobs draw differently: cut */
+    show_fade_left = SHOW_FADE;
+    show_scene = k;
+    show_started[k] = show_clock;            /* each visit draws itself afresh */
+    if (k > 0) scene_reset(k - 1);
+    show_switch_at = show_wall + show_each;
+    settings_save();
+}
+
+static void show_draw(void)
+{
+    Uint32 now = SDL_GetTicks();
+    double dt = show_last_tick ? (now - show_last_tick) / 1000.0 : 1 / 60.0;
+    if (dt > 0.25) dt = 0.25;
+    show_last_tick = now;
+    float lv = fminf(1.0f, master_meter[0].level), bass = fminf(1.5f, low_energy);
+    double beats = (double)P.playhead / SR * P.bpm / 60.0;
+    float bf = P.playing ? (float)(beats - floor(beats)) : 1;
+    float beat = fmaxf(beat_pulse, P.playing ? expf(-bf * 7) * fminf(1, low_energy * 3) : 0);
+    show_clock += dt * (1 + 0.9 * lv);       /* louder music draws faster */
+    show_wall += dt;
+    show_fade_left = fmax(0, show_fade_left - dt);
+    if (show_cycle && show_wall >= show_switch_at) show_go(show_scene + 1);
+    if (show_scene == 0) {
+        show_blobs();
+        return;
+    }
+    int si = show_scene - 1, rw = scene_width(si, W), rh = rw * H / (W > 0 ? W : 1);
+    if (rh < 90) rh = 90;
+    size_t need = (size_t)rw * rh * 3;
+    if (need > scene_cap) {
+        free(scene_buf);
+        free(scene_buf2);
+        free(scene_px);
+        scene_buf = malloc(need * sizeof(float));
+        scene_buf2 = malloc(need * sizeof(float));
+        scene_px = malloc(need / 3 * sizeof(Uint32));
+        scene_cap = scene_buf && scene_buf2 && scene_px ? need : 0;
+        if (!scene_cap) return;
+    }
+    if (!scene_tex || rw != scene_tw || rh != scene_th) {
+        if (scene_tex) SDL_DestroyTexture(scene_tex);
+        scene_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, rw, rh);
+        if (!scene_tex) return;
+        SDL_SetTextureScaleMode(scene_tex, SDL_ScaleModeLinear);
+        scene_tw = rw;
+        scene_th = rh;
+    }
+    float zoom = 1 + 0.06f * bass + 0.05f * beat;            /* the bass breathes, beats pulse */
+    float gain = 0.9f + 0.35f * lv + 0.4f * beat;
+    char caption[96];
+    scene_render(si, show_clock - show_started[show_scene], dt, zoom, scene_buf, rw, rh, caption, sizeof caption);
+    if (show_fade_from > 0 && show_fade_left > 0) {           /* crossfade from the last scene */
+        char dummy[96];
+        scene_render(show_fade_from - 1, show_clock - show_started[show_fade_from], dt, zoom, scene_buf2, rw, rh, dummy,
+                     sizeof dummy);
+        float k = (float)(1 - show_fade_left / SHOW_FADE);
+        k = k * k * (3 - 2 * k);
+        for (size_t i = 0; i < need; i++) scene_buf[i] = scene_buf2[i] + (scene_buf[i] - scene_buf2[i]) * k;
+    }
+    for (size_t i = 0; i < need / 3; i++) {
+        float r = scene_buf[3 * i] * gain, g = scene_buf[3 * i + 1] * gain, b = scene_buf[3 * i + 2] * gain;
+        Uint32 R = r >= 1 ? 255 : r <= 0 ? 0 : (Uint32)(r * 255), G = g >= 1 ? 255 : g <= 0 ? 0 : (Uint32)(g * 255),
+               B = b >= 1 ? 255 : b <= 0 ? 0 : (Uint32)(b * 255);
+        scene_px[i] = 0xFF000000u | R << 16 | G << 8 | B;
+    }
+    SDL_UpdateTexture(scene_tex, NULL, scene_px, rw * (int)sizeof(Uint32));
+    SDL_RenderCopy(ren, scene_tex, NULL, NULL);
+    char cap2[200];
+    snprintf(cap2, sizeof cap2, caption[0] ? "%s: %s" : "%s", scene_caption(si), caption);
+    show_overlay(scene_name(si), cap2);
 }
 
 static void show_toggle(void)
 {
     show_open = !show_open;
+    if (show_open) {                         /* start the current scene afresh, cycling from now */
+        show_last_tick = 0;
+        show_started[show_scene] = show_clock;
+        show_switch_at = show_wall + show_each;
+        show_fade_left = 0;
+        if (show_scene > 0) scene_reset(show_scene - 1);
+    }
     if (!headless) SDL_SetWindowFullscreen(win, show_open ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 }
 
@@ -3867,6 +4005,7 @@ static void settings_save(void)
     fprintf(f, "# tinydaw settings\ntheme %d\naudio_output %s\npanel %d\n", theme_choice, audio_out, last_panel);
     fprintf(f, "metronome %d %d %d %d %d %d %.3f\n", MET.on, MET.sound, MET.sub, MET.accent, MET.countin,
             MET.countin_rec_only, MET.volume);
+    fprintf(f, "show %d %d %.0f\n", show_scene, show_cycle, show_each);
     fclose(f);
 }
 
@@ -3881,7 +4020,15 @@ static void settings_load(void)
         if (sscanf(line_, "theme %d", &v) == 1 && v >= 0 && v < THEME_COUNT) theme_choice = v;
         else if (!strncmp(line_, "audio_output ", 13)) snprintf(audio_out, sizeof audio_out, "%.255s", line_ + 13);
         else if (sscanf(line_, "panel %d", &v) == 1 && v >= 0 && v < RI_COUNT) last_panel = v;
-        else if (!strncmp(line_, "metronome ", 10)) {
+        else if (!strncmp(line_, "show ", 5)) {
+            int sc, cy;
+            double each;
+            if (sscanf(line_, "show %d %d %lf", &sc, &cy, &each) == 3 && sc >= 0 && sc <= SCENE_COUNT) {
+                show_scene = sc;
+                show_cycle = cy != 0;
+                show_each = each < 5 ? 5 : each > 600 ? 600 : each;
+            }
+        } else if (!strncmp(line_, "metronome ", 10)) {
             int on, so, sub, ac, ci, ro;
             float vol;
             if (sscanf(line_, "metronome %d %d %d %d %d %d %f", &on, &so, &sub, &ac, &ci, &ro, &vol) == 7 &&
@@ -4522,6 +4669,12 @@ static void key(SDL_Keysym k)
     }
     if (show_open) {                    /* the show takes the keyboard */
         if (k.sym == SDLK_ESCAPE || k.sym == SDLK_F11) show_toggle();
+        else if (k.sym == SDLK_RIGHT || k.sym == SDLK_LEFT) show_go(show_scene + (k.sym == SDLK_RIGHT ? 1 : -1));
+        else if (k.sym == SDLK_TAB) {
+            show_cycle = !show_cycle;
+            show_switch_at = show_wall + show_each;
+            settings_save();
+        }
         else if (k.sym == SDLK_SPACE) toggle_play();
         else if (k.sym == SDLK_HOME) {
             LOCK();
@@ -5792,6 +5945,46 @@ static int selftest(void)
             run_action(ACT_OPEN_EXAMPLE);
             check(proj_path[0] == 0 && !is_dirty() && P.nclips > 100, "an example opens as an untitled copy, nothing to save yet");
         }
+    }
+
+    /* the full-screen show: every scene draws, arrows step through them, cycling moves on */
+    {
+        show_open = 1;
+        show_scene = 0;
+        show_cycle = 0;
+        SDL_Keysym sk = {0};
+        int drew = 0;
+        for (int i = 0; i <= SCENE_COUNT; i++) {
+            frame();
+            frame();
+            drew += show_scene == 0 ? show_tex != NULL : scene_tex != NULL && scene_tw > 0;
+            sk.sym = SDLK_RIGHT;
+            key(sk);
+        }
+        check(drew == SCENE_COUNT + 1 && show_scene == 0, "the show steps through all 17 scenes and wraps back to the blobs");
+        sk.sym = SDLK_LEFT;
+        key(sk);
+        check(show_scene == SCENE_COUNT, "Left goes back, round to the last scene");
+        sk.sym = SDLK_TAB;
+        key(sk);
+        check(show_cycle == 1, "Tab turns cycling on");
+        show_go(3);
+        show_switch_at = show_wall - 1;          /* as if its time were up */
+        frame();
+        check(show_scene == 4 && show_fade_from == 3 && show_fade_left > 0, "cycling moves on by itself, crossfading");
+        show_cycle = 0;
+        show_scene = 0;
+        show_open = 0;
+        float probe[64 * 36 * 3];
+        int lit = 0;
+        for (int i = 0; i < SCENE_COUNT; i++) {
+            char cap[64];
+            double sum = 0;
+            for (int f = 0; f < 8; f++) scene_render(i, 12 + f * 0.05, 0.05, 1, probe, 64, 36, cap, sizeof cap);
+            for (int k = 0; k < 64 * 36 * 3; k++) sum += probe[k] == probe[k] ? probe[k] : 1e9;
+            lit += sum / (64 * 36 * 3) > 0.002 && sum / (64 * 36 * 3) < 1.0;
+        }
+        check(lit == SCENE_COUNT, "every geometry and shader scene draws something, with no bad values");
     }
 
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
@@ -7361,6 +7554,16 @@ int main(int argc, char **argv)
         }
         if (getenv("TINYDAW_SHOT_MENU")) menu_open = 1;
         if (getenv("TINYDAW_SHOT_LIGHT")) theme_apply(atoi(getenv("TINYDAW_SHOT_LIGHT")));   /* 1 light, 3-5 the others */
+        if (getenv("TINYDAW_SHOT_SCENE")) {      /* "k,seconds": the show on scene k, that far in */
+            int k = 0;
+            double at = 12;
+            sscanf(getenv("TINYDAW_SHOT_SCENE"), "%d,%lf", &k, &at);
+            show_open = 1;
+            show_cycle = 0;
+            show_scene = k;
+            show_clock = at;
+            show_started[k] = 0;
+        }
         if (getenv("TINYDAW_SHOT_FIT")) {
             for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
             layout();

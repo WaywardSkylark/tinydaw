@@ -15,6 +15,8 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
   pan and sidechain ducking, delay and reverb, a master compressor and limiter with a loudness meter
   (LUFS), and a mixing console you can pop out into its own window.
 - **Sings your words:** type a line, pick a tune and a voice, and it sings it, in 12 languages.
+- **Drum step sequencer:** patterns of any sounds over 16 or 32 steps, with velocity and a chance
+  of playing on every step, swing, and a start from any of the 30 styles.
 - **Piano roll, MIDI and automation:** play or write melodies (quantize and humanize them), import
   and export MIDI files, and draw volume, pan, filter and send changes over time.
 - **Any time signature, changing tempo:** 3/4, 6/8 and more, with changes anywhere in the song.
@@ -70,9 +72,9 @@ Settings > **Keys** lists every shortcut.
   - play and loop
   - tempo, snap and the metronome
   - where you are in the song, and the master level
-- **The rail** down the left holds Sounds, Theory, Pads, Mixer, Visual and Settings. Each opens a
-  panel with its own tabs. Click the open one again, or press **Ctrl+B**, to hide it and give the
-  timeline the full width. **Ctrl+1** to **Ctrl+6** open them from the keyboard.
+- **The rail** down the left holds Sounds, Theory, Pads, Drums, Mixer, Visual and Settings. Each
+  opens a panel with its own tabs. Click the open one again, or press **Ctrl+B**, to hide it and give
+  the timeline the full width. **Ctrl+1** to **Ctrl+7** open them from the keyboard.
 - **The timeline:** tracks down the side, bars and minutes:seconds along the top.
 - **Tooltips:** hold the mouse still over anything for a moment and it says what it is and how to
   use it (turn them off in Settings > Look).
@@ -134,6 +136,23 @@ length in bars; a note past the end makes the clip grow. While the roll is open,
 Theory > Keys and Chords put a chord (or a whole progression, a bar each) into it. Copies of a note clip share their notes, so
 editing one edits all of them; **Make unique** gives a copy its own. `[` and `]` and the Mixer's
 Pitch still transpose a whole note clip.
+
+**Drums.** The Drums panel (Ctrl+4) holds each track's drum patterns: a row per sound, 16 or 32
+steps of a 16th each. Start one with **New from style** (any of Theory's 30 beats, with its kit), or
+drag a sound from the panel's list onto it; dropping a sound on a step puts a hit there, on a row's
+name swaps that row's sound. Theory > Beats > **Edit in Drums** turns the beat you see into one.
+
+| To | Do this |
+|---|---|
+| Add or remove hits | **Hits**: click a step, or drag along a row to paint |
+| Set how hard | **Velocity**: drag up and down inside a hit |
+| Make a hit occasional | **Chance**: drag up and down inside a hit (a dot marks a hit with a chance) |
+| Feel | **Swing** moves the off-beat 16ths later |
+| Use it | **Put on the timeline** makes a drum clip, 1 to 8 bars; drag its edge to repeat it longer |
+
+Every drum clip of a pattern plays it, so editing the pattern changes them all; **Copy as new** gives
+you one to change separately. Double-click a drum clip to open its pattern. A step's chance is decided
+the same way every time, so playback and export match.
 
 **Automation.** Press **A** on a track to open its lane underneath, pick what it automates (volume,
 pan, filter cutoff, delay send or reverb send), then click to add points, drag them and right-click to

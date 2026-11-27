@@ -223,6 +223,29 @@ int pattern_new_id(const Project *p)
     return id + 1;
 }
 
+DrumPat *drum_find(Project *p, int id)
+{
+    for (int i = 0; i < p->ndrums; i++)
+        if (p->drums[i].id == id) return &p->drums[i];
+    return NULL;
+}
+
+const DrumPat *drum_find_c(const Project *p, int id) { return drum_find((Project *)p, id); }
+
+int drum_plays(const DrumPat *d, int r, long k, long seed)
+{
+    int st = (int)(k % d->steps), pr = d->prob[r][st];
+    if (!d->vel[r][st]) return 0;
+    if (pr <= 0 || pr >= 100) return 1;
+    unsigned long h = (unsigned long)seed * 2654435761u ^ (unsigned long)k * 2246822519u ^ (unsigned long)(r + 1) * 3266489917u;
+    h ^= h >> 15;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    return (int)(h % 100) < pr;
+}
+
+double drum_step_beat(const DrumPat *d, long k) { return k * 0.25 + ((k & 1) ? d->swing * 0.25 : 0); }
+
 /* ---------------------------------------------------------------- sources */
 
 #define NOTE_ATTACK 32                  /* frames: no click where a note starts mid-sound */
@@ -265,6 +288,43 @@ static void add_pattern(Mixer *m, const Project *p, const Clip *cl, long start, 
     }
 }
 
+static void add_drums(Mixer *m, const Project *p, const Clip *cl, long start, int n)
+{
+    const DrumPat *d = drum_find_c(p, -cl->pattern);
+    if (!d || d->steps < 1) return;
+    long maxlen = 0;
+    for (int r = 0; r < d->nrows; r++)
+        if (d->sample[r] >= 0 && d->sample[r] < p->nsamples && p->samples[d->sample[r]].frames > maxlen)
+            maxlen = p->samples[d->sample[r]].frames;
+    long cend = cl->start + cl->length;
+    if (start >= cend + maxlen || start + n <= cl->start || !maxlen) return;
+    long origin = cl->start - cl->offset, from = start - maxlen;
+    if (from < cl->start) from = cl->start;
+    double b0 = meter_beats(p, origin);
+    long k0 = (long)floor((meter_beats(p, from) - b0) * 4) - 1, k1 = (long)ceil((meter_beats(p, start + n) - b0) * 4);
+    if (k0 < 0) k0 = 0;
+    float gain = cl->gain_db == 0 ? 1.0f : powf(10.0f, cl->gain_db / 20.0f);
+    float *out = m->trk[cl->track];
+    for (long k = k0; k <= k1; k++) {
+        long hf = meter_beats_frame(p, b0 + drum_step_beat(d, k));
+        if (hf < cl->start || hf >= cend) continue;
+        int st = (int)(k % d->steps);
+        for (int r = 0; r < d->nrows; r++) {
+            int si = d->sample[r];
+            if (si < 0 || si >= p->nsamples || !drum_plays(d, r, k, origin)) continue;
+            const Sample *s = &p->samples[si];
+            if (!s->data) continue;
+            long a = start > hf ? start : hf, b = start + n < hf + s->frames ? start + n : hf + s->frames;
+            float g = gain * d->row_vol[r] * d->vel[r][st] / 127.0f;
+            for (long f = a; f < b; f++) {
+                long i = f - hf;
+                out[2 * (f - start)] += s->data[2 * i] * g;
+                out[2 * (f - start) + 1] += s->data[2 * i + 1] * g;
+            }
+        }
+    }
+}
+
 static void add_clips(Mixer *m, const Project *p, long start, int n)
 {
     for (int c = 0; c < p->nclips; c++) {
@@ -272,6 +332,10 @@ static void add_clips(Mixer *m, const Project *p, long start, int n)
         if (cl->track < 0 || cl->track >= p->ntracks) continue;
         if (cl->pattern > 0) {
             add_pattern(m, p, cl, start, n);
+            continue;
+        }
+        if (cl->pattern < 0) {
+            add_drums(m, p, cl, start, n);
             continue;
         }
         long a = start > cl->start ? start : cl->start;

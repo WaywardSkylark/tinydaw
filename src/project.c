@@ -116,11 +116,20 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
         if (s->listed) fprintf(f, "listed\n");
         fprintf(f, "end\n");
     }
+    for (int i = 0; i < p->ndrums; i++) {        /* drum patterns, before the clips that play them */
+        const DrumPat *d = &p->drums[i];
+        fprintf(f, "drum %d %d %d %d %.6g %s\n", d->id, d->track, d->steps, d->nrows, d->swing, d->name);
+        for (int r = 0; r < d->nrows; r++) {
+            fprintf(f, "drow %d %d %.6g", r, d->sample[r], d->row_vol[r]);
+            for (int k = 0; k < d->steps; k++) fprintf(f, " %d:%d", d->vel[r][k], d->prob[r][k]);
+            fprintf(f, "\n");
+        }
+    }
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
         fprintf(f, "clip %d %d %ld %ld %ld %.9g %ld %ld", cl->sample, cl->track, cl->start, cl->offset, cl->length,
                 cl->gain_db, cl->fade_in, cl->fade_out);
-        if (cl->pattern > 0) fprintf(f, " %d %d", cl->pattern, cl->root);
+        if (cl->pattern) fprintf(f, " %d %d", cl->pattern, cl->root);
         fprintf(f, "\n");
     }
     for (int i = 0; i < p->nnotes; i++) {
@@ -387,8 +396,8 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
             ok = sscanf(line, "clip %d %d %ld %ld %ld %f %ld %ld %d %d", &c.sample, &c.track, &c.start, &c.offset,
                         &c.length, &c.gain_db, &c.fade_in, &c.fade_out, &c.pattern, &c.root) >= 5 &&
                  c.sample >= 0 && c.sample < p->nsamples && c.track >= 0 && c.track < MAX_TRACKS;
-            if (c.pattern < 0) c.pattern = 0;
-            if (ok && c.pattern > 0 && p->nclips < MAX_CLIPS) {   /* a note clip */
+            if (c.pattern < 0 && !drum_find(p, -c.pattern)) ok = 0;   /* a drum clip whose pattern is missing */
+            if (ok && c.pattern && p->nclips < MAX_CLIPS) {   /* a note or drum clip */
                 if (c.offset < 0) c.offset = 0;
                 if (c.length < 1) c.length = 1;
                 if (c.start < 0) c.start = 0;
@@ -405,6 +414,41 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 if (c.fade_in < 0 || c.fade_in > c.length) c.fade_in = 0;
                 if (c.fade_out < 0 || c.fade_in + c.fade_out > c.length) c.fade_out = 0;
                 p->clips[p->nclips++] = c;
+            }
+        } else if (!strcmp(word, "drum")) {
+            DrumPat d;
+            memset(&d, 0, sizeof d);
+            int nm = 0;
+            ok = sscanf(line, "drum %d %d %d %d %f %n", &d.id, &d.track, &d.steps, &d.nrows, &d.swing, &nm) >= 5 && d.id > 0 &&
+                 p->ndrums < MAX_DRUMS && !drum_find(p, d.id);
+            if (ok) {
+                if (nm > 0) snprintf(d.name, sizeof d.name, "%.23s", line + nm);
+                d.name[strcspn(d.name, "\r\n")] = 0;
+                d.track = d.track < 0 ? 0 : d.track >= MAX_TRACKS ? MAX_TRACKS - 1 : d.track;
+                d.steps = d.steps <= 16 ? 16 : 32;
+                d.nrows = d.nrows < 0 ? 0 : d.nrows > DRUM_ROWS ? DRUM_ROWS : d.nrows;
+                d.swing = d.swing < 0 ? 0 : d.swing > 0.5f ? 0.5f : d.swing;
+                for (int r = 0; r < DRUM_ROWS; r++) {
+                    d.sample[r] = -1;
+                    d.row_vol[r] = 1;
+                }
+                p->drums[p->ndrums++] = d;
+            }
+        } else if (!strcmp(word, "drow") && p->ndrums > 0) {
+            DrumPat *d = &p->drums[p->ndrums - 1];
+            int r = -1, smp = -1, at = 0;
+            float vol = 1;
+            if (sscanf(line, "drow %d %d %f %n", &r, &smp, &vol, &at) >= 3 && r >= 0 && r < d->nrows) {
+                d->sample[r] = smp >= 0 && smp < p->nsamples ? smp : -1;
+                d->row_vol[r] = vol < 0 ? 0 : vol > 2 ? 2 : vol;
+                const char *q = line + at;
+                for (int k = 0; k < d->steps && *q; k++) {
+                    int v = 0, pr = 100, used = 0;
+                    if (sscanf(q, " %d:%d%n", &v, &pr, &used) < 2) break;
+                    d->vel[r][k] = (unsigned char)(v < 0 ? 0 : v > 127 ? 127 : v);
+                    d->prob[r][k] = (unsigned char)(pr < 1 ? 1 : pr > 100 ? 100 : pr);
+                    q += used;
+                }
             }
         } else if (!strcmp(word, "note")) {
             Note n = {0};

@@ -871,7 +871,7 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         cl->start = llround(cl->start * ratio);
         cl->offset = llround(cl->offset * ratio);
         cl->length = llround(cl->length * ratio);
-        if (cl->pattern > 0) continue;           /* a note clip isn't bound by its sound's length */
+        if (cl->pattern) continue;               /* note and drum clips aren't bound by a sound's length */
         if (cl->offset > frames - 1) cl->offset = frames - 1;
         if (cl->offset + cl->length > frames) cl->length = frames - cl->offset;
         if (cl->length < 1) cl->length = 1;

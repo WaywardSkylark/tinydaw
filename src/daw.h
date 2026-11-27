@@ -172,6 +172,25 @@ typedef struct {
     int root;               /* note clips: the note at which the sound plays unpitched */
 } Clip;
 
+/* A drum pattern (the Drums panel): rows of sounds over 16 or 32 sixteenth-note steps, each step with
+ * a velocity and a chance of playing. A drum clip (Clip.pattern == -id) plays it over and over for as
+ * long as the clip is; hits ring out past the clip's end. */
+#define MAX_DRUMS 64
+#define DRUM_ROWS 8
+#define DRUM_STEPS 32
+typedef struct {
+    int id;                 /* > 0 */
+    int track;              /* the track whose panel shows it */
+    char name[24];
+    int steps;              /* 16 or 32 */
+    int nrows;
+    int sample[DRUM_ROWS];  /* library sound of each row, -1 = none yet */
+    float row_vol[DRUM_ROWS];
+    unsigned char vel[DRUM_ROWS][DRUM_STEPS];    /* 0 = rest, 1..127 */
+    unsigned char prob[DRUM_ROWS][DRUM_STEPS];   /* chance it plays, 1..100 % */
+    float swing;            /* 0..0.5: how late the off-beat 16ths land, in 16ths */
+} DrumPat;
+
 /* A note in a pattern (piano roll). start is in frames from the start of the pattern. */
 typedef struct {
     int pattern, note;
@@ -292,6 +311,8 @@ typedef struct {
     int nnotes;
     AutoPoint autos[MAX_AUTO];
     int nautos;
+    DrumPat drums[MAX_DRUMS];
+    int ndrums;
     Voice voices[MAX_VOICES];
     float bend;             /* live pitch wheel, -1..1 (not saved) */
     float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */
@@ -444,6 +465,12 @@ long meter_bar_frame(const Project *p, double bar);
 void meter_at(const Project *p, long frame, double *bpm, int *num, int *den, int *bar, long *bar_start, long *bar_len);
 double meter_bpm_at(const Project *p, long frame);   /* the end of its last note, in frames */
 int pattern_new_id(const Project *p);
+DrumPat *drum_find(Project *p, int id);
+const DrumPat *drum_find_c(const Project *p, int id);
+/* Whether step `k` (counted from the clip's origin, across repeats) of row `r` plays: its chance,
+ * decided the same way every time (so playback and export agree). */
+int drum_plays(const DrumPat *d, int r, long k, long seed);
+double drum_step_beat(const DrumPat *d, long k);   /* where step k lands, in beats from the origin */
 
 /* ---- analysis (analysis.c) ---- */
 #define VIS_FFT 4096

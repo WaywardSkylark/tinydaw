@@ -462,7 +462,7 @@ static SDL_Keymod mods;
 static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h; }
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
-       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER };
+       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER, D_DRUM };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
 /* Pop-out windows: the clip editor and the mixing console. Each has its own renderer and mouse;
  * a drag belongs to the window it started in (drag_pop, -1 = the main window). */
@@ -522,6 +522,17 @@ static int chord_sample(const int *notes, int n, const char *label, double beats
 #define PANE_W 480
 static int pads_sub, mixer_sub, vis_sub, settings_sub, sounds_sub;   /* each panel's open sub-tab */
 static int pads_open;                   /* the Pads pane (shares the right-hand slot) */
+static int drums_open;                  /* the Drums pane: a track's step patterns */
+static int drum_cur;                    /* the pattern it shows (its id), 0 = none */
+static int drum_mode;                   /* editing: 0 hits, 1 velocity, 2 chance */
+static int drums_scroll;
+static void drums_pane(void);
+static int drums_drop(int sample);
+static void drums_show(int id);
+static SDL_Rect dr_cell[DRUM_ROWS][DRUM_STEPS], dr_head[DRUM_ROWS], dr_add;
+static DrumPat *drum_from_style(int track, int g);
+static int drum_place(DrumPat *d, int bars);
+static void drum_delete(int id);
 static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
 static int vis_open;                    /* the Visualizer pane: spectrum, scope, meters */
 static int show_open;                   /* the full-screen show */
@@ -536,7 +547,7 @@ static int add_to_library(const int *notes, int n, const char *label);
 static void add_beat_to_library(int g);
 static int settings_open;
 static void disc(int cx, int cy, int r, Col c);
-enum { RI_SOUNDS, RI_THEORY, RI_PADS, RI_MIXER, RI_VISUAL, RI_SETTINGS, RI_COUNT };
+enum { RI_SOUNDS, RI_THEORY, RI_PADS, RI_DRUMS, RI_MIXER, RI_VISUAL, RI_SETTINGS, RI_COUNT };
 static void open_panel(int which);
 static void show_toggle(void);
 static void settings_save(void);
@@ -715,7 +726,7 @@ static void layout(void)
     L.ruler = 44;                       /* bar numbers above, minutes:seconds below */
     L.status = 26;
     L.pane_x = 70;                      /* RAIL_W: the category rail is on the far left */
-    L.pane_w = theory_open || pads_open || mixer_open || vis_open || sounds_open ? PANE_W : settings_open ? 440 : 0;
+    L.pane_w = theory_open || pads_open || drums_open || mixer_open || vis_open || sounds_open ? PANE_W : settings_open ? 440 : 0;
     L.left = L.pane_x + L.pane_w;
     L.tl_x = L.left + L.head;
     L.tl_w = W - L.tl_x;
@@ -2033,6 +2044,8 @@ typedef struct {
     int nnotes;
     AutoPoint *autos;
     int nautos;
+    DrumPat *drums;
+    int ndrums;
     Track tracks[MAX_TRACKS];
     int ntracks;
     double bpm, a4;
@@ -2059,10 +2072,12 @@ static void state_free(State *s)
     free(s->clips);
     free(s->notes);
     free(s->autos);
+    free(s->drums);
     s->clips = NULL;
     s->notes = NULL;
     s->autos = NULL;
-    s->nclips = s->nnotes = s->nautos = 0;
+    s->drums = NULL;
+    s->nclips = s->nnotes = s->nautos = s->ndrums = 0;
 }
 
 static void *dup_mem(const void *src, size_t n)   /* malloc'd copy; never NULL for n = 0 */
@@ -2084,6 +2099,9 @@ static void state_capture(State *s)
     s->nnotes = s->notes ? P.nnotes : 0;
     s->autos = dup_mem(P.autos, (size_t)P.nautos * sizeof(AutoPoint));
     s->nautos = s->autos ? P.nautos : 0;
+    free(s->drums);
+    s->drums = dup_mem(P.drums, (size_t)P.ndrums * sizeof(DrumPat));
+    s->ndrums = s->drums ? P.ndrums : 0;
     memcpy(s->tracks, P.tracks, sizeof s->tracks);
     s->ntracks = P.ntracks;
     s->bpm = P.bpm;
@@ -2116,6 +2134,7 @@ static int state_same(const State *s)
     return s->nclips == P.nclips && !memcmp(s->clips, P.clips, (size_t)P.nclips * sizeof(Clip)) &&
            s->nnotes == P.nnotes && !memcmp(s->notes, P.notes, (size_t)P.nnotes * sizeof(Note)) &&
            s->nautos == P.nautos && !memcmp(s->autos, P.autos, (size_t)P.nautos * sizeof(AutoPoint)) &&
+           s->ndrums == P.ndrums && !memcmp(s->drums, P.drums, (size_t)P.ndrums * sizeof(DrumPat)) &&
            s->ntracks == P.ntracks && !memcmp(s->tracks, P.tracks, sizeof s->tracks) && s->bpm == P.bpm && s->ts_num == P.ts_num && s->ts_den == P.ts_den && s->nchanges == P.nchanges &&
            !memcmp(s->changes, P.changes, (size_t)P.nchanges * sizeof(MeterChange)) &&
            s->a4 == P.a4 && s->loop_start == P.loop_start && s->loop_end == P.loop_end &&
@@ -2133,6 +2152,8 @@ static void state_restore(const State *s)
     P.nnotes = s->nnotes;
     memcpy(P.autos, s->autos, (size_t)s->nautos * sizeof(AutoPoint));
     P.nautos = s->nautos;
+    memcpy(P.drums, s->drums, (size_t)s->ndrums * sizeof(DrumPat));
+    P.ndrums = s->ndrums;
     memcpy(P.tracks, s->tracks, sizeof s->tracks);
     P.ntracks = s->ntracks;
     P.bpm = s->bpm;
@@ -2168,6 +2189,8 @@ static void describe(const State *s, char *buf, size_t n)
         snprintf(buf, n, "%s", P.nnotes > s->nnotes ? "add notes" : P.nnotes < s->nnotes ? "delete notes" : "note edit");
     else if (s->nautos != P.nautos || memcmp(s->autos, P.autos, (size_t)P.nautos * sizeof(AutoPoint)))
         snprintf(buf, n, "automation");
+    else if (s->ndrums != P.ndrums || memcmp(s->drums, P.drums, (size_t)P.ndrums * sizeof(DrumPat)))
+        snprintf(buf, n, "%s", P.ndrums > s->ndrums ? "new drum pattern" : P.ndrums < s->ndrums ? "delete drum pattern" : "drum steps");
     else if (P.nclips > s->nclips) snprintf(buf, n, "add %d clip%s", P.nclips - s->nclips, P.nclips - s->nclips == 1 ? "" : "s");
     else if (P.nclips < s->nclips) snprintf(buf, n, "delete %d clip%s", s->nclips - P.nclips, s->nclips - P.nclips == 1 ? "" : "s");
     else if (memcmp(s->clips, P.clips, (size_t)P.nclips * sizeof(Clip))) snprintf(buf, n, "clip edit");
@@ -2246,7 +2269,7 @@ static void state_scale(State *s, double ratio)
         cl->start = llround(cl->start * ratio);
         cl->offset = llround(cl->offset * ratio);
         cl->length = llround(cl->length * ratio);
-        if (cl->pattern > 0) continue;
+        if (cl->pattern) continue;
         if (cl->offset > frames - 1) cl->offset = frames - 1;
         if (cl->offset + cl->length > frames) cl->length = frames - cl->offset;
         if (cl->length < 1) cl->length = 1;
@@ -5028,8 +5051,8 @@ static void show_toggle(void)
 /* A column of category buttons down the left. One panel is open beside it at a time; clicking
  * the open one again hides it and gives the timeline the room. */
 #define RAIL_W 70
-static int *const RAIL_FLAG[RI_COUNT] = {&sounds_open, &theory_open, &pads_open, &mixer_open, &vis_open, &settings_open};
-static const char *const RAIL_NAME[RI_COUNT] = {"Sounds", "Theory", "Pads", "Mixer", "Visual", "Settings"};
+static int *const RAIL_FLAG[RI_COUNT] = {&sounds_open, &theory_open, &pads_open, &drums_open, &mixer_open, &vis_open, &settings_open};
+static const char *const RAIL_NAME[RI_COUNT] = {"Sounds", "Theory", "Pads", "Drums", "Mixer", "Visual", "Settings"};
 static int last_panel = RI_SOUNDS;
 
 static void show_panel(int which);
@@ -5078,6 +5101,18 @@ static void rail_icon(int kind, int cx, int cy, Col c)
             fill((SDL_Rect){cx - 9 + i * 5, cy + 9 - h, 3, h}, c);
         }
         break;
+    case RI_DRUMS:                              /* a drum and two sticks */
+        fill((SDL_Rect){cx - 9, cy - 2, 18, 9}, c);
+        ring(cx, cy - 3, 0, c);
+        for (int d = -9; d <= 9; d++) {          /* its top, an ellipse */
+            int hh = (int)lround(3 * sqrt(1 - d * d / 81.0));
+            line(cx + d, cy - 2 - hh, cx + d, cy - 2 + hh, c);
+        }
+        line(cx - 7, cy - 11, cx - 1, cy - 4, c);
+        line(cx - 6, cy - 11, cx, cy - 4, c);
+        line(cx + 7, cy - 11, cx + 1, cy - 4, c);
+        line(cx + 6, cy - 11, cx, cy - 4, c);
+        break;
     case RI_SETTINGS:                           /* a gear */
         for (int i = 0; i < 8; i++) {
             double a = i * VIS_PI / 4;
@@ -5104,9 +5139,10 @@ static void rail(void)
             "Sounds (Ctrl+1): your library, the Generator, the Singer, and plain tones",
             "Theory (Ctrl+2): drum beats, keys and scales, chords and progressions",
             "Pads (Ctrl+3): play sounds live from the keyboard, a controller or MIDI, and record",
-            "Mixer (Ctrl+4): levels, effects, the master, and the mixing console",
-            "Visual (Ctrl+5): spectrum, waveform, meters and the full-screen show",
-            "Settings (Ctrl+6): look and size, audio, inputs, keys"};
+            "Drums (Ctrl+4): a track's step patterns: 16 or 32 steps, velocity and chance per step",
+            "Mixer (Ctrl+5): levels, effects, the master, and the mixing console",
+            "Visual (Ctrl+6): spectrum, waveform, meters and the full-screen show",
+            "Settings (Ctrl+7): look and size, audio, inputs, keys"};
         tip(b, "%s", RTIPS[i]);
         int on = *RAIL_FLAG[i], hov = hit(b) && drag.kind == D_NONE;
         if (ST.shaped) {
@@ -6447,7 +6483,7 @@ static int settings_content(int x, int y, int w)
             {"Alt+Left / Right", "previous / next clip edge"}, {"F", "show the playhead"}, {"Z", "zoom to fit"},
             {"M", "metronome on/off"}, {"T", "tap tempo"}, {"L", "loop on/off"},
             {"Ctrl+Z / Ctrl+Shift+Z", "undo / redo"}, {"Ctrl+S, Ctrl+O, Ctrl+N", "save, open, new"},
-            {"Ctrl+E", "export"}, {"Ctrl+1 .. Ctrl+6", "open a panel"}, {"Ctrl+B", "hide / show the panel"},
+            {"Ctrl+E", "export"}, {"Ctrl+1 .. Ctrl+7", "open a panel"}, {"Ctrl+B", "hide / show the panel"},
             {"Ctrl+= / Ctrl+-", "interface bigger / smaller"}, {"Ctrl+0", "interface size: automatic"},
             {"Ctrl+,", "settings"}, {"F11", "full-screen show"}, {"Ctrl+A, Esc", "select all, none"},
             {"Shift+click, drag a box", "select several"}, {"Delete", "delete selected"},
@@ -6923,6 +6959,36 @@ static void auto_lane_draw(int t)
 /* ---------------------------------------------------------------- note clips */
 
 static int black_key(int note) { return (0x54A >> (note % 12)) & 1; }
+
+/* A drum clip's hits: a dot per hit, a row per sound, repeating as the pattern does */
+static void draw_clip_drums(const Clip *c, SDL_Rect r, int body_y, int body_h, Col col)
+{
+    (void)r;
+    const DrumPat *d = drum_find_c(&P, -c->pattern);
+    if (!d || d->nrows < 1 || body_h < 4) return;
+    long origin = c->start - c->offset;
+    double b0 = meter_beats(&P, origin), bs = meter_beats(&P, c->start), be = meter_beats(&P, c->start + c->length);
+    long k0 = (long)floor((bs - b0) * 4), k1 = (long)ceil((be - b0) * 4);
+    double px_per_step = (frame_to_x(c->start + c->length) - frame_to_x(c->start)) / ((be - bs) * 4 + 1e-9);
+    int rh = body_h / d->nrows, dw = px_per_step >= 4 ? (int)px_per_step - 1 : 2;
+    if (rh < 1) rh = 1;
+    if (dw > 10) dw = 10;
+    for (long k = k0 < 0 ? 0 : k0; k <= k1; k++) {
+        long f = meter_beats_frame(&P, b0 + drum_step_beat(d, k));
+        if (f < c->start || f >= c->start + c->length) continue;
+        int x = (int)frame_to_x(f);
+        if (x + dw < L.tl_x || x > W) continue;
+        int st = (int)(k % d->steps);
+        for (int rr = 0; rr < d->nrows; rr++) {
+            int v = d->vel[rr][st];
+            if (!v) continue;
+            int hh = rh - 2 > 1 ? rh - 2 : 1;
+            Col cc = d->prob[rr][st] < 100 ? alpha(col, 140) : col;
+            fill((SDL_Rect){x, body_y + rr * rh + 1 + (hh - (hh * v / 127 > 1 ? hh * v / 127 : 1)), dw,
+                            hh * v / 127 > 1 ? hh * v / 127 : 1}, cc);
+        }
+    }
+}
 
 static void draw_clip_notes(const Clip *c, SDL_Rect r, int body_y, int body_h, Col col)
 {
@@ -7980,9 +8046,11 @@ static void timeline(void)
             pos_text(c->start, pos, sizeof pos);
             char gain[24] = "";
             if (c->gain_db != 0) snprintf(gain, sizeof gain, ", %+.1f dB", c->gain_db);
-            tip(r, "%s%s on %s, %s, %.2f s%s. Drag to move it, its edges to trim. Double-click: %s",
-                c->pattern > 0 ? "Notes: " : "", P.samples[c->sample].name, P.tracks[c->track].name, pos,
-                (double)c->length / SR, gain, c->pattern > 0 ? "the piano roll" : "the clip editor");
+            const DrumPat *dp = c->pattern < 0 ? drum_find_c(&P, -c->pattern) : NULL;
+            tip(r, "%s%s on %s, %s, %.2f s%s. Drag to move it, its edges to trim%s. Double-click: %s",
+                c->pattern > 0 ? "Notes: " : dp ? "Drums: " : "", dp ? dp->name : P.samples[c->sample].name,
+                P.tracks[c->track].name, pos, (double)c->length / SR, gain, dp ? " (the pattern repeats)" : "",
+                c->pattern > 0 ? "the piano roll" : dp ? "its steps in the Drums panel" : "the clip editor");
         }
         Col col = TRACK_COL[c->track];
         fill(r, wash(col, 0.42f));
@@ -7994,6 +8062,7 @@ static void timeline(void)
         Col wave = theme_light ? shade(col, 0.62f) : col;
         SDL_SetRenderDrawColor(ren, wave.r, wave.g, wave.b, 255);
         if (c->pattern > 0) draw_clip_notes(c, r, body_y, body_h, wave);
+        else if (c->pattern < 0) draw_clip_drums(c, r, body_y, body_h, wave);
         else for (int px = px0; px < px1; px++) {
             long fa = (long)x_to_frame_raw(px) - c->start + c->offset;
             long fb = (long)x_to_frame_raw(px + 1) - c->start + c->offset;
@@ -8012,8 +8081,10 @@ static void timeline(void)
             SDL_RenderDrawLine(ren, px, y0, px, y1);
         }
         char label[128];
-        if (c->gain_db != 0) snprintf(label, sizeof label, "%s%s  %+.1fdB", c->pattern ? "Notes: " : "", s->name, c->gain_db);
-        else snprintf(label, sizeof label, "%s%s", c->pattern ? "Notes: " : "", s->name);
+        const DrumPat *cdp = c->pattern < 0 ? drum_find_c(&P, -c->pattern) : NULL;
+        const char *cname = cdp ? cdp->name : s->name, *ckind = cdp ? "Drums: " : c->pattern ? "Notes: " : "";
+        if (c->gain_db != 0) snprintf(label, sizeof label, "%s%s  %+.1fdB", ckind, cname, c->gain_db);
+        else snprintf(label, sizeof label, "%s%s", ckind, cname);
         text_clip((SDL_Rect){r.x + 2, r.y, r.w - 4, font_h + 4}, r.x + 5, r.y + 2, label, DARK);
         SDL_Rect hin, hout;
         if (fade_handles(c, &hin, &hout)) {                /* fades as lines, handles on hover */
@@ -8149,6 +8220,10 @@ static void timeline(void)
             if (hit(clip_rect(&P.clips[i]))) { found = i; break; }
         if (lpress && ldouble && !(mods & (KMOD_CTRL | KMOD_SHIFT))) {   /* double-click: the piano roll */
             if (found >= 0 && P.clips[found].pattern > 0) roll_open(found);
+            else if (found >= 0 && P.clips[found].pattern < 0) {   /* a drum clip: its pattern in the Drums panel */
+                sel_track = P.clips[found].track;
+                drums_show(-P.clips[found].pattern);
+            }
             else if (found < 0) new_note_clip(lane_at(my), x_to_frame(mx));
             else editor_open(found);             /* an audio clip: its own editor window */
             lpress = 0;
@@ -8503,8 +8578,8 @@ static void end_drag(void)
     }
     SDL_Rect area = {L.tl_x, L.lanes_y, L.tl_w, lanes_h()};
     if (drag.kind == D_NMOVE || drag.kind == D_NLEN || drag.kind == D_NBAND || drag.kind == D_VEL) roll_drag_end();
-    if (drag.kind == D_LIB && pads_drop(drag.sample)) {
-        /* dropped onto a pad or the instrument slot */
+    if (drag.kind == D_LIB && (pads_drop(drag.sample) || drums_drop(drag.sample))) {
+        /* dropped onto a pad, the instrument slot or a drum pattern */
     } else if (drag.kind == D_LIB && hit(area)) {
         const Sample *s = &P.samples[drag.sample];
         int c = clip_add(drag.sample, lane_at(my), snap(x_to_frame(mx)), 0, s->frames);
@@ -8672,7 +8747,7 @@ static void key(SDL_Keysym k)
                 status(rev ? "Reversed %d clip%s" : "%d clip%s play forwards", sel_count(), sel_count() == 1 ? "" : "s");
             }
             return;
-        case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6:
+        case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6: case SDLK_7:
             open_panel(k.sym - SDLK_1);
             return;
         case SDLK_COMMA:
@@ -8820,7 +8895,7 @@ static void key(SDL_Keysym k)
     case SDLK_F11: show_toggle(); break;
     case SDLK_PAGEUP:
     case SDLK_PAGEDOWN: {               /* scroll the open pane, or the library */
-        int *sc = theory_open ? &th_scroll : pads_open ? &pads_scroll : mixer_open ? &mixer_scroll
+        int *sc = theory_open ? &th_scroll : pads_open ? &pads_scroll : drums_open ? &drums_scroll : mixer_open ? &mixer_scroll
                 : vis_open ? &vis_scroll : settings_open ? &settings_scroll : sounds_open && sounds_sub ? &sounds_scroll : NULL;
         int page = (H - L.top - L.status) * 9 / 10, dir = k.sym == SDLK_PAGEUP ? -1 : 1;
         if (sc) *sc += dir * page;          /* clamped when the pane is drawn */
@@ -11951,6 +12026,128 @@ static int selftest(void)
         make_demo();
     }
 
+
+    /* ---- the Drums panel: step patterns */
+    {
+        new_project();
+        frame();
+        history_check();
+        float *imp = calloc(2 * 400, sizeof(float));   /* a one-sample tick, easy to find in the output */
+        imp[0] = imp[1] = 1;
+        int smp = sample_add(&P, "tick", imp, 400), t = 1;
+        sel_track = t;
+        drum_cur = 0;
+        show_panel(RI_DRUMS);
+        frame();
+        SDL_Rect a = dr_add;
+        drag = (typeof(drag)){.kind = D_LIB, .sample = smp};
+        sim(a.x + 10, a.y + 5, 0, 1, 0, 0);
+        DrumPat *d = drum_find(&P, drum_cur);
+        check(d && d->nrows == 1 && d->sample[0] == smp && d->track == t && d->steps == 16,
+              "dropping a sound on the Drums panel starts a pattern on the track with it");
+        frame();
+        history_check();
+        int u0 = nundo;
+        SDL_Rect c0 = dr_cell[0][0], c4 = dr_cell[0][4];
+        sim(c0.x + 2, c0.y + c0.h / 2, 1, 0, 0, 0);
+        sim(c0.x + 2, c0.y + c0.h / 2, 0, 1, 0, 0);
+        sim(c4.x + 2, c4.y + c4.h / 2, 1, 0, 0, 0);
+        sim(c4.x + 2, c4.y + c4.h / 2, 0, 1, 0, 0);
+        d = drum_find(&P, drum_cur);
+        check(d && d->vel[0][0] == 100 && d->vel[0][4] == 100 && d->vel[0][1] == 0 && nundo == u0 + 2,
+              "clicking steps adds hits, each one an undo step");
+        SDL_Rect c8 = dr_cell[0][8], c11 = dr_cell[0][11];
+        sim_drag(c8.x + 2, c8.y + c8.h / 2, c11.x + 2, c11.y + c11.h / 2, 0);
+        d = drum_find(&P, drum_cur);
+        check(d && d->vel[0][8] && d->vel[0][9] && d->vel[0][10] && d->vel[0][11] && !d->vel[0][12],
+              "dragging along a row paints hits");
+        sim_drag(c8.x + 2, c8.y + c8.h / 2, c11.x + 2, c11.y + c11.h / 2, 0);
+        d = drum_find(&P, drum_cur);
+        check(d && !d->vel[0][8] && !d->vel[0][11] && d->vel[0][4], "and starting on a hit paints them away");
+        drum_mode = 1;                          /* velocity: low in the step = soft */
+        frame();
+        sim(c4.x + 2, c4.y + c4.h - 3, 1, 0, 0, 0);
+        sim(c4.x + 2, c4.y + c4.h - 3, 0, 1, 0, 0);
+        int soft = d->vel[0][4];
+        drum_mode = 2;                          /* chance: half way = half the time */
+        frame();
+        sim(c0.x + 2, c0.y + c0.h / 2, 1, 0, 0, 0);
+        sim(c0.x + 2, c0.y + c0.h / 2, 0, 1, 0, 0);
+        int half = d->prob[0][0];
+        drum_mode = 0;
+        check(soft > 0 && soft < 40 && half > 35 && half < 65 && d->vel[0][0] == 100,
+              "Velocity and Chance set a hit's strength and how often it plays");
+        int plays = 0, again = 1;
+        for (long k = 0; k < 1600; k += 16) {
+            int pl = drum_plays(d, 0, k, 12345);
+            plays += pl;
+            again &= pl == drum_plays(d, 0, k, 12345);
+        }
+        check(plays > 100 * (half - 20) / 100 && plays < 100 * (half + 20) / 100 && again,
+              "a step with a chance plays about that often, the same way every time");
+        LOCK();                                 /* playback: the hits land on their steps */
+        d->prob[0][0] = 100;
+        d->vel[0][4] = 127;
+        P.tracks[t].volume = 1;
+        P.playhead = 0;
+        UNLOCK();
+        int c = drum_place(d, 2);
+        Mixer *m = mixer_new();
+        long bar = meter_bar_frame(&P, 1), n = 2 * bar + SR / 10;
+        float *buf = calloc((size_t)n * 2, sizeof(float));
+        for (long f = 0; f < n; f += 512) mixer_run(m, &P, f, 1, buf + 2 * f, (int)(n - f < 512 ? n - f : 512), t, 0);
+        long s4 = meter_beats_frame(&P, 1.0), s2 = meter_beats_frame(&P, 0.5);
+        float e0 = fabsf(buf[0]) + fabsf(buf[2]), e4 = 0, e2 = 0, e4b = 0;
+        for (long f = s4 - 2; f <= s4 + 2; f++) e4 += fabsf(buf[2 * f]);
+        for (long f = s2 - 2; f <= s2 + 2; f++) e2 += fabsf(buf[2 * f]);
+        for (long f = bar + s4 - 2; f <= bar + s4 + 2; f++) e4b += fabsf(buf[2 * f]);
+        check(c >= 0 && P.clips[c].pattern == -d->id && P.clips[c].length == 2 * bar && e0 > 0.3f && e4 > 0.3f &&
+                  e2 < 0.01f && e4b > 0.3f,
+              "a drum clip plays its hits on their steps, and repeats the pattern");
+        free(buf);
+        mixer_free(m);
+        check(fabs(drum_step_beat(&(DrumPat){.swing = 0.5f, .steps = 16}, 1) - 0.375) < 1e-6,
+              "swing puts the off-beat 16ths later");
+        int nd = P.ndrums;
+        DrumPat *st = drum_from_style(t, 0);    /* House, from Theory */
+        check(st && P.ndrums == nd + 1 && st->nrows >= 3 && st->vel[0][0] > 0, "New from style makes the style's kit and beat");
+        char tp[1100], msg2[256];
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(tp, sizeof tp, "%s/tinydaw-drums-%u.tdaw", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        LOCK();
+        P.samples[smp].removed = 0;
+        UNLOCK();
+        int ok = project_save(&P, tp, msg2, sizeof msg2) == 0;
+        Project *q = malloc(sizeof *q);
+        ok = ok && project_load(q, tp, msg2, sizeof msg2) == 0;
+        if (ok) {
+            const DrumPat *qa = drum_find_c(q, st->id);
+            ok = q->ndrums == P.ndrums && qa && qa->nrows == st->nrows && qa->steps == st->steps &&
+                 !memcmp(qa->vel, st->vel, sizeof st->vel) && !strcmp(qa->name, st->name) && fabsf(qa->swing - st->swing) < 1e-5f;
+            int qc = 0;
+            for (int i = 0; i < q->nclips; i++) qc += q->clips[i].pattern < 0;
+            ok = ok && qc == 1;
+            project_free(q);
+        }
+        free(q);
+        remove(tp);
+        check(ok, "drum patterns and their clips save and open again");
+        frame();
+        history_check();
+        int id = st->id;
+        drum_delete(id);
+        frame();
+        history_check();
+        check(!drum_find(&P, id), "Delete pattern takes it away");
+        undo_redo(0);
+        check(drum_find(&P, id) != NULL, "and undo brings it back");
+        show_panel(RI_SOUNDS);
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
     /* ---- Export: choosing the folder and file name */
     {
         char keep_proj[1024];
@@ -12887,6 +13084,499 @@ static int hit_sample(const BeatSpec *b, int lane, const char *name)    /* one d
     return sample_generate_hit(&P, b, lane, name);
 }
 
+/* ---------------------------------------------------------------- the Drums panel
+ *
+ * Each track can have drum patterns: rows of sounds over 16 or 32 sixteenth-note steps. A step
+ * holds a velocity (how hard) and a chance (how often it plays). Drum clips on the timeline play
+ * a pattern over and over; editing the pattern changes every clip that plays it. */
+
+static int dr_paint;                    /* what a hits drag paints: 1 on, 0 off */
+static int drums_content_h, drum_bars = 4, drum_style;
+
+static void drums_show(int id)
+{
+    drum_cur = id;
+    show_panel(RI_DRUMS);
+}
+
+static DrumPat *drum_new(int track, const char *name)
+{
+    if (P.ndrums >= MAX_DRUMS) {
+        status("Drum pattern limit reached (%d)", MAX_DRUMS);
+        return NULL;
+    }
+    int id = 0;
+    for (int i = 0; i < P.ndrums; i++) id = P.drums[i].id > id ? P.drums[i].id : id;
+    DrumPat d;
+    memset(&d, 0, sizeof d);
+    d.id = id + 1;
+    d.track = track;
+    d.steps = 16;
+    if (name) snprintf(d.name, sizeof d.name, "%s", name);
+    else {
+        int n = 0;                              /* "Pattern A", "Pattern B"... on this track */
+        for (int i = 0; i < P.ndrums; i++) n += P.drums[i].track == track;
+        snprintf(d.name, sizeof d.name, "Pattern %c", 'A' + n % 26);
+    }
+    for (int r = 0; r < DRUM_ROWS; r++) {
+        d.sample[r] = -1;
+        d.row_vol[r] = 1;
+        memset(d.prob[r], 100, DRUM_STEPS);
+    }
+    LOCK();
+    P.drums[P.ndrums] = d;
+    UNLOCK();
+    return &P.drums[P.ndrums++];
+}
+
+/* A pattern from one of Theory's styles: its kit, a row per drum it uses, its groove. */
+static DrumPat *drum_from_style(int track, int g)
+{
+    BeatSpec b = genre_spec(g);
+    char nm[24];
+    snprintf(nm, sizeof nm, "%.23s", GENRES[g].name);
+    DrumPat *d = drum_new(track, nm);
+    if (!d) return NULL;
+    DrumPat t = *d;
+    t.steps = b.steps > 16 ? 32 : 16;
+    t.swing = b.swing8 ? 0 : (float)b.swing;
+    for (int l = 0; l < DRUM_LANES && t.nrows < DRUM_ROWS; l++) {
+        if (!lane_used(&b, l)) continue;
+        char hn[96];
+        snprintf(hn, sizeof hn, "%s %s", GENRES[g].name, DRUM_LANE_NAMES[l]);
+        int smp = hit_sample(&b, l, hn);
+        if (smp < 0) continue;
+        int r = t.nrows++;
+        t.sample[r] = smp;
+        for (int k = 0; k < t.steps; k++) {
+            char ch = k < b.steps ? b.lanes[l][k] : '.';
+            t.vel[r][k] = ch == 'X' ? 127 : ch == 'x' || ch == 'r' ? 100 : ch == 'o' ? 50 : 0;
+        }
+    }
+    LOCK();
+    *d = t;
+    UNLOCK();
+    return d;
+}
+
+static int drum_clip_sound(const DrumPat *d)    /* a library sound a drum clip can name */
+{
+    for (int r = 0; r < d->nrows; r++)
+        if (d->sample[r] >= 0 && d->sample[r] < P.nsamples) return d->sample[r];
+    return -1;
+}
+
+/* Puts a pattern on its track from the bar nearest the playhead, `bars` bars long. */
+static int drum_place(DrumPat *d, int bars)
+{
+    int smp = drum_clip_sound(d);
+    if (smp < 0) {
+        status("Give the pattern a sound first: drag one from the list onto a row");
+        return -1;
+    }
+    long at = bar_round(P.playhead);
+    double bar0 = round(meter_bars(&P, at));
+    long len = meter_bar_frame(&P, bar0 + bars) - at;
+    int t = d->track < P.ntracks ? d->track : 0;
+    int c = clip_add(smp, t, at, 0, len > 0 ? len : SR);
+    if (c < 0) return -1;
+    LOCK();
+    P.clips[c].pattern = -d->id;
+    UNLOCK();
+    sel_only(c);
+    status("\"%s\" on %s from bar %d, %d bar%s. Drag its right edge to repeat it longer", d->name, P.tracks[t].name,
+           (int)bar0 + 1, bars, bars == 1 ? "" : "s");
+    return c;
+}
+
+static void drum_delete(int id)                 /* the pattern and the clips that play it */
+{
+    LOCK();
+    for (int c = P.nclips - 1; c >= 0; c--)
+        if (P.clips[c].pattern == -id) {
+            memmove(&P.clips[c], &P.clips[c + 1], (size_t)(P.nclips - c - 1) * sizeof(Clip));
+            P.nclips--;
+        }
+    for (int i = 0; i < P.ndrums; i++)
+        if (P.drums[i].id == id) {
+            memmove(&P.drums[i], &P.drums[i + 1], (size_t)(P.ndrums - i - 1) * sizeof(DrumPat));
+            P.ndrums--;
+            break;
+        }
+    UNLOCK();
+    sel_clear();
+    if (drum_cur == id) drum_cur = 0;
+}
+
+static void drum_audition(int smp)
+{
+    if (smp < 0 || smp >= P.nsamples) return;
+    LOCK();
+    P.preview = smp;
+    P.preview_pos = 0;
+    UNLOCK();
+}
+
+/* A library sound dropped on the panel: onto a row's name (that row plays it), a step (a hit
+ * there, in the row with that sound, a new row if none has it) or the "new row" strip. */
+static int drums_drop(int smp)
+{
+    if (!drums_open) return 0;
+    DrumPat *d = drum_find(&P, drum_cur);
+    if (!d && hit(dr_add)) {                    /* no pattern yet: one, with this sound */
+        d = drum_new(sel_track, NULL);
+        if (!d) return 1;
+        drum_cur = d->id;
+    }
+    if (!d) return 0;
+    DrumPat t = *d;
+    int done = 0, row = -1, step = -1;
+    for (int r = 0; r < t.nrows && !done; r++) {
+        if (hit(dr_head[r])) {
+            t.sample[r] = smp;
+            row = r;
+            done = 1;
+        }
+        for (int k = 0; k < t.steps && !done; k++)
+            if (hit(dr_cell[r][k])) {
+                row = r;
+                step = k;
+                done = 1;
+            }
+    }
+    if (!done && hit(dr_add)) done = 1;
+    if (!done) return 0;
+    if (row >= 0 && t.sample[row] >= 0 && t.sample[row] != smp) {   /* a step in another sound's row */
+        row = -1;
+        for (int r = 0; r < t.nrows; r++)
+            if (t.sample[r] == smp) row = r;
+    }
+    if (row < 0) {
+        if (t.nrows >= DRUM_ROWS) {
+            status("A pattern has room for %d sounds", DRUM_ROWS);
+            return 1;
+        }
+        row = t.nrows++;
+        memset(t.vel[row], 0, DRUM_STEPS);
+        memset(t.prob[row], 100, DRUM_STEPS);
+        t.row_vol[row] = 1;
+    }
+    t.sample[row] = smp;
+    if (step >= 0) {
+        t.vel[row][step] = 100;
+        t.prob[row][step] = 100;
+    }
+    LOCK();
+    *d = t;
+    UNLOCK();
+    status("\"%s\" plays row %d of \"%s\"%s", P.samples[smp].name, row + 1, d->name, step >= 0 ? " (and a hit where you dropped it)" : "");
+    return 1;
+}
+
+/* the step under the playhead, for a pattern a clip is playing now; -1 when none is */
+static int drum_now(const DrumPat *d)
+{
+    for (int c = 0; c < P.nclips; c++) {
+        const Clip *cl = &P.clips[c];
+        if (cl->pattern != -d->id || P.playhead < cl->start || P.playhead >= cl->start + cl->length) continue;
+        double b = meter_beats(&P, P.playhead) - meter_beats(&P, cl->start - cl->offset);
+        long k = (long)floor(b * 4);
+        return k < 0 ? -1 : (int)(k % d->steps);
+    }
+    return -1;
+}
+
+static int drums_content(int x, int y, int w)
+{
+    char buf[200];
+    if (sel_track < 0 || sel_track >= P.ntracks) sel_track = 0;
+    text(x, y + 7, "Track", DIM);
+    int tw = text_w("Track") + 10;
+    int was_t = sel_track;
+    track_dropdown((SDL_Rect){x + tw, y, w - tw, 30}, "", &sel_track);
+    if (sel_track != was_t) drum_cur = 0;
+    y += 40;
+    DrumPat *d = drum_find(&P, drum_cur);
+    if (d && d->track != sel_track) d = NULL;
+    if (!d)                                     /* the track's first pattern */
+        for (int i = 0; i < P.ndrums && !d; i++)
+            if (P.drums[i].track == sel_track) d = &P.drums[i];
+    drum_cur = d ? d->id : 0;
+
+    /* the track's patterns */
+    {
+        int bx = x, n = 0;
+        for (int i = 0; i < P.ndrums; i++) {
+            DrumPat *o = &P.drums[i];
+            if (o->track != sel_track) continue;
+            int bw = text_w(o->name) + 20;
+            if (bx + bw > x + w - 70) break;
+            SDL_Rect b = {bx, y, bw, 26};
+            tip(b, "%s: %d steps, %d sound%s. Click to edit it", o->name, o->steps, o->nrows, o->nrows == 1 ? "" : "s");
+            if (button(b, o->name, o->id == drum_cur)) {
+                drum_cur = o->id;
+                d = o;
+            }
+            bx += bw + 4;
+            n++;
+        }
+        SDL_Rect nb = {x + w - 66, y, 66, 26};
+        tip(nb, "A new, empty pattern on this track");
+        if (button(nb, "+ New", 0)) {
+            DrumPat *o = drum_new(sel_track, NULL);
+            if (o) {
+                drum_cur = o->id;
+                d = o;
+                status("New pattern \"%s\": drag sounds from the list below onto it", o->name);
+            }
+        }
+        if (!n) text(x, y + 6, "No patterns on this track yet", DIM);
+        y += 36;
+    }
+
+    /* start from one of Theory's styles */
+    {
+        static const char *gnames[32];
+        genre_init();
+        int ng = NGENRES < 32 ? NGENRES : 32;
+        for (int g = 0; g < ng; g++) gnames[g] = GENRES[g].name;
+        if (drum_style >= ng) drum_style = 0;
+        int bw = 150;
+        dropdown((SDL_Rect){x, y, w - bw - 6, 28}, "Style: ", gnames, ng, &drum_style, 0);
+        SDL_Rect sb = {x + w - bw, y, bw, 28};
+        tip(sb, "A new pattern with this style's drums and groove (the beat as Theory > Beats has it)");
+        if (button(sb, "New from style", 0)) {
+            DrumPat *o = drum_from_style(sel_track, drum_style);
+            if (o) {
+                drum_cur = o->id;
+                d = o;
+                status("\"%s\": %d sounds from its kit. Click steps to change it", o->name, o->nrows);
+            }
+        }
+        y += 38;
+    }
+
+    if (d) {
+        DrumPat t = *d;                         /* edits go to a copy, then in under the lock */
+        /* steps, swing, editing mode */
+        if (button((SDL_Rect){x, y, 46, 26}, "16", t.steps == 16)) t.steps = 16;
+        if (button((SDL_Rect){x + 50, y, 46, 26}, "32", t.steps == 32)) {
+            if (t.steps == 16)                  /* the 16 again, so it still sounds the same */
+                for (int r = 0; r < t.nrows; r++) {
+                    memcpy(t.vel[r] + 16, t.vel[r], 16);
+                    memcpy(t.prob[r] + 16, t.prob[r], 16);
+                }
+            t.steps = 32;
+        }
+        static double sw;
+        if (!(drag.kind == D_NUM && drag.num == &sw) && !(numedit.active && numedit.v == &sw)) sw = t.swing * 200;
+        number((SDL_Rect){x + 102, y, w - 102, 26}, "Swing", &sw, 0, 100, 0.25, "%.0f%%");
+        t.swing = (float)(sw / 200);
+        y += 34;
+        static const char *const MODES[3] = {"Hits", "Velocity", "Chance"};
+        static const char *const MTIP[3] = {"Click steps to add or take away hits; drag along a row to paint",
+                                            "Drag up and down in a hit to set how hard it plays",
+                                            "Drag up and down in a hit to set how often it plays (100% = always)"};
+        int mw = (w - 8) / 3;
+        for (int m = 0; m < 3; m++) {
+            SDL_Rect mb = {x + m * (mw + 4), y, m == 2 ? w - 2 * (mw + 4) : mw, 26};
+            tip(mb, "%s", MTIP[m]);
+            if (button(mb, MODES[m], drum_mode == m)) drum_mode = m;
+        }
+        y += 34;
+
+        /* the grid */
+        int head = 96, cw = (w - head) / t.steps, ch = 24, now = P.playing ? drum_now(&t) : -1;
+        Col tc = TRACK_COL[t.track % MAX_TRACKS];
+        for (int r = 0; r < t.nrows; r++) {
+            SDL_Rect hr = {x, y, head - 6, ch};
+            dr_head[r] = hr;
+            int has = t.sample[r] >= 0 && t.sample[r] < P.nsamples;
+            int drop = drag.kind == D_LIB && hit(hr);
+            fill(hr, drop ? PANEL3 : PANEL2);
+            if (drop) outline(hr, HEAD);
+            text_clip(hr, x + 5, y + (ch - font_h) / 2, has ? P.samples[t.sample[r]].name : "drop a sound", has ? TEXT : DIM);
+            tip(hr, has ? "%s: click to hear it, right-click to take the row out, drop a sound here to swap it"
+                        : "Drop a sound from the list below here", has ? P.samples[t.sample[r]].name : "");
+            if (hit(hr) && drag.kind == D_NONE && lpress) {
+                lpress = 0;
+                if (has) drum_audition(t.sample[r]);
+            }
+            if (hit(hr) && drag.kind == D_NONE && rpress) {   /* take the row out */
+                rpress = 0;
+                for (int q = r; q < t.nrows - 1; q++) {
+                    t.sample[q] = t.sample[q + 1];
+                    t.row_vol[q] = t.row_vol[q + 1];
+                    memcpy(t.vel[q], t.vel[q + 1], DRUM_STEPS);
+                    memcpy(t.prob[q], t.prob[q + 1], DRUM_STEPS);
+                }
+                t.nrows--;
+                status("Took a row out of \"%s\"", t.name);
+                break;
+            }
+            for (int k = 0; k < t.steps; k++) {
+                SDL_Rect c = {x + head + k * cw, y, cw - 1, ch};
+                dr_cell[r][k] = c;
+                int v = t.vel[r][k], pr = t.prob[r][k], hov = hit(c);
+                Col bg = (k / 4) % 2 ? PANEL2 : tone(PANEL2, 1.25f);
+                if (k == now) bg = tone(bg, 1.5f);
+                fill(c, hov && drag.kind == D_NONE ? PANEL3 : bg);
+                if (drag.kind == D_LIB && hov) outline(c, HEAD);
+                if (v) {
+                    int hh = drum_mode == 2 ? (ch - 2) * pr / 100 : (ch - 2) * v / 127;
+                    if (hh < 2) hh = 2;
+                    Col hc = pr < 100 ? alpha(tc, (Uint8)(90 + pr)) : tc;
+                    if (drum_mode == 0) fill((SDL_Rect){c.x + 1, c.y + 1, c.w - 2, c.h - 2}, alpha(tc, (Uint8)(70 + v)));
+                    else fill((SDL_Rect){c.x + 1, c.y + c.h - 1 - hh, c.w - 2, hh}, hc);
+                    if (pr < 100 && drum_mode != 2 && c.w >= 6) fill((SDL_Rect){c.x + c.w / 2 - 1, c.y + 2, 2, 2}, TEXT);
+                }
+                if (hov && drag.kind == D_NONE) {
+                    tip(c, v ? "Step %d: velocity %d, plays %d%% of the time. Right-click takes it away"
+                             : "Step %d: click to add a hit", k + 1, v, pr);
+                }
+                if (hov && rpress && drag.kind == D_NONE) {
+                    rpress = 0;
+                    t.vel[r][k] = 0;
+                }
+                if (hov && lpress && drag.kind == D_NONE) {   /* start a stroke */
+                    lpress = 0;
+                    drag = (typeof(drag)){.kind = D_DRUM, .sx = mx, .sy = my};
+                    dr_paint = !v;
+                    if (drum_mode == 0 && !v && has) drum_audition(t.sample[r]);
+                }
+                if (hov && drag.kind == D_DRUM && ldown) {    /* the stroke goes over it */
+                    float fy = (float)(c.y + c.h - my) / c.h;
+                    fy = fy < 0.02f ? 0.02f : fy > 1 ? 1 : fy;
+                    if (drum_mode == 0) {
+                        t.vel[r][k] = dr_paint ? (v ? v : 100) : 0;
+                        if (dr_paint && !v) t.prob[r][k] = 100;
+                    } else if (v && drum_mode == 1) {
+                        t.vel[r][k] = (unsigned char)(1 + fy * 126);
+                    } else if (v && drum_mode == 2) {
+                        t.prob[r][k] = (unsigned char)(1 + fy * 99);
+                    }
+                }
+            }
+            y += ch + 3;
+        }
+        /* where a new row goes */
+        dr_add = (SDL_Rect){x, y, w, 28};
+        if (t.nrows < DRUM_ROWS) {
+            int drop = drag.kind == D_LIB && hit(dr_add);
+            fill(dr_add, drop ? PANEL3 : tone(PANEL, 1.15f));
+            outline(dr_add, drop ? HEAD : LINE);
+            text_center(dr_add, t.nrows ? "Drop a sound here for another row" : "Drop a sound here for the first row",
+                        drop ? HEAD : DIM);
+            y += 36;
+        } else {
+            dr_add = (SDL_Rect){0, 0, 0, 0};
+        }
+        if (memcmp(&t, d, sizeof t)) {
+            LOCK();
+            *d = t;
+            UNLOCK();
+        }
+
+        /* onto the timeline */
+        text(x, y + 6, "Bars", DIM);
+        static const int bar_opts[4] = {1, 2, 4, 8};
+        int bx = x + text_w("Bars") + 10;
+        for (int i = 0; i < 4; i++) {
+            snprintf(buf, sizeof buf, "%d", bar_opts[i]);
+            if (button((SDL_Rect){bx + i * 36, y, 32, 26}, buf, drum_bars == bar_opts[i])) drum_bars = bar_opts[i];
+        }
+        SDL_Rect pb = {bx + 4 * 36 + 4, y, x + w - (bx + 4 * 36 + 4), 26};
+        tip(pb, "A drum clip playing this pattern, on its track at the bar nearest the playhead");
+        if (button(pb, "Put on the timeline", 0)) drum_place(d, drum_bars);
+        y += 34;
+        int hw = (w - 8) / 3;
+        if (button((SDL_Rect){x, y, hw, 26}, "Copy as new", 0)) {
+            DrumPat cp = *d;
+            DrumPat *o = drum_new(sel_track, NULL);
+            if (o) {
+                int id = o->id;
+                char nm[24];
+                snprintf(nm, sizeof nm, "%s", o->name);
+                cp.id = id;
+                snprintf(cp.name, sizeof cp.name, "%s", nm);
+                LOCK();
+                *o = cp;
+                UNLOCK();
+                drum_cur = id;
+                status("\"%s\" is a copy to change: clips of the first one stay as they are", nm);
+            }
+        }
+        if (button((SDL_Rect){x + hw + 4, y, hw, 26}, "Clear steps", 0)) {
+            LOCK();
+            memset(d->vel, 0, sizeof d->vel);
+            UNLOCK();
+        }
+        if (button((SDL_Rect){x + 2 * (hw + 4), y, w - 2 * (hw + 4), 26}, "Delete pattern", 0)) {
+            int uses = 0;
+            for (int c = 0; c < P.nclips; c++) uses += P.clips[c].pattern == -d->id;
+            snprintf(buf, sizeof buf, "%s", d->name);
+            drum_delete(d->id);
+            status("Deleted \"%s\"%s. Ctrl+Z brings it back", buf, uses ? " and its clips" : "");
+            d = NULL;
+        }
+        y += 40;
+    } else {
+        dr_add = (SDL_Rect){x, y, w, 30};
+        int drop = drag.kind == D_LIB && hit(dr_add);
+        fill(dr_add, drop ? PANEL3 : tone(PANEL, 1.15f));
+        outline(dr_add, drop ? HEAD : LINE);
+        text_center(dr_add, "Or drop a sound here to start a pattern", drop ? HEAD : DIM);
+        y += 40;
+    }
+
+    /* sounds to drag in */
+    y = section(x, y, w, "SOUNDS: DRAG ONTO A ROW OR A STEP");
+    int shown = 0;
+    for (int i = 0; i < P.nsamples; i++) {
+        const Sample *sm = &P.samples[i];
+        if ((sm->pitched && !sm->listed) || sm->removed || sm->hidden) continue;
+        SDL_Rect rr = {x, y, w, 22};
+        int hov = hit(rr) && drag.kind == D_NONE;
+        fill(rr, hov ? PANEL3 : shown % 2 ? PANEL : tone(PANEL, 1.12f));
+        snprintf(buf, sizeof buf, "%.2fs", (double)sm->frames / SR);
+        text(x + w - 6 - text_w(buf), y + (22 - font_h) / 2, buf, DIM);
+        text_clip((SDL_Rect){x, y, w - text_w(buf) - 14, 22}, x + 6, y + (22 - font_h) / 2, sm->name, TEXT);
+        tip(rr, "%s: drag it onto a row or a step above; click to hear it", sm->name);
+        if (hov && lpress) {
+            lpress = 0;
+            drag = (typeof(drag)){.kind = D_LIBPEND, .sample = i, .sx = mx, .sy = my};
+        }
+        y += 22;
+        shown++;
+    }
+    if (!shown) {
+        text(x, y + 4, "No sounds yet: make some in Sounds, or start from a style above", DIM);
+        y += font_h + 10;
+    }
+    return y;
+}
+
+static void drums_pane(void)
+{
+    SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
+    fill(pane, PANEL);
+    line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
+    int inside = hit(pane), saved_press = lpress, saved_r = rpress;
+    if (!inside) lpress = rpress = 0;
+    int max_scroll = drums_content_h - pane.h > 0 ? drums_content_h - pane.h : 0;
+    drums_scroll = drums_scroll < 0 ? 0 : drums_scroll > max_scroll ? max_scroll : drums_scroll;
+    SDL_RenderSetClipRect(ren, &pane);
+    int y0 = pane.y + 12 - drums_scroll;
+    int y = drums_content(pane.x + 14, y0, pane.w - 28);
+    drums_content_h = y - y0 + 12;
+    scrollbar(pane, &drums_scroll, drums_content_h);
+    SDL_RenderSetClipRect(ren, NULL);
+    if (!inside) {
+        lpress = saved_press;
+        rpress = saved_r;
+    }
+}
+
 static void set_pad(int k, int sample, int mode, float vol, int pitch, int track)
 {
     if (sample < 0 || k < 0 || k >= NPADS) return;
@@ -13191,6 +13881,7 @@ static int tab_genres(int x, int y, int w)
         for (int st = 0; st < ge->steps; st++) {
             SDL_Rect r = {x + lab + st * cell, y, cell - 2, ch};
             gn_cell[l][st] = r;
+            tip(r, "Click to step through hit, accent, ghost%s and rest", l == 3 ? ", roll" : "");
             int hov = hit(r) && drag.kind == D_NONE;
             fill(r, hov ? PANEL3 : (st / 4) % 2 ? PANEL2 : tone(PANEL2, 1.25f));
             char c = gn_pat[gn_sel][l][st];
@@ -13214,7 +13905,32 @@ static int tab_genres(int x, int y, int w)
         for (int l = 0; l < DRUM_LANES; l++) snprintf(gn_pat[gn_sel][l], 33, "%s", ge->lanes[l]);
     if (button((SDL_Rect){x + 100, y, 96, 24}, "Clear", 0))
         for (int l = 0; l < DRUM_LANES; l++) memset(gn_pat[gn_sel][l], '.', (size_t)ge->steps);
-    text_clip((SDL_Rect){x + 206, y, w - 206, font_h + 8}, x + 206, y + 4, "hit, accent, ghost, roll", DIM);
+    {
+        SDL_Rect eb = {x + 200, y, w - 200, 24};
+        tip(eb, "This beat as a step pattern you can change fully: any sound on each row, 16 or 32 steps, "
+                "velocity and chance on every step");
+        if (button(eb, "Edit in Drums", 0)) {
+            int t = -1;                         /* an empty track, or a new one */
+            for (int i = 0; i < P.ntracks && t < 0; i++) {
+                int used = 0;
+                for (int c = 0; c < P.nclips; c++) used |= P.clips[c].track == i;
+                for (int k = 0; k < P.ndrums; k++) used |= P.drums[k].track == i;
+                if (!used) t = i;
+            }
+            if (t < 0) {
+                LOCK();
+                t = project_add_track(&P, "Drums");
+                UNLOCK();
+            }
+            if (t < 0) t = sel_track >= 0 ? sel_track : 0;
+            DrumPat *o = drum_from_style(t, gn_sel);
+            if (o) {
+                sel_track = t;
+                drums_show(o->id);
+                status("\"%s\" is a pattern on %s now: change it here, then Put on the timeline", o->name, P.tracks[t].name);
+            }
+        }
+    }
     y += 34;
 
     text(x, y + 5, "Bars", DIM);
@@ -14308,6 +15024,7 @@ static void frame(void)
         rail();
         if (theory_open) theory_pane();
         else if (pads_open) pads_pane();
+        else if (drums_open) drums_pane();
         else if (mixer_open) mixer_pane();
         else if (vis_open) vis_pane();
         else if (settings_open) settings_pane();
@@ -14315,7 +15032,7 @@ static void frame(void)
         if (wheel_y && drag.kind == D_NONE && L.pane_w && hit(panel_rect())) {
             /* a wheel that no box or list in the panel took scrolls the panel (the panel
              * takes it last, so number and note boxes can be stepped with the wheel) */
-            int *sc = theory_open ? &th_scroll : pads_open ? &pads_scroll : mixer_open ? &mixer_scroll
+            int *sc = theory_open ? &th_scroll : pads_open ? &pads_scroll : drums_open ? &drums_scroll : mixer_open ? &mixer_scroll
                     : vis_open ? &vis_scroll : settings_open ? &settings_scroll : sounds_open && sounds_sub ? &sounds_scroll : NULL;
             if (sc) *sc -= wheel_y * 48;           /* clamped when the pane is next drawn */
             wheel_y = 0;
@@ -14715,11 +15432,30 @@ int main(int argc, char **argv)
             sscanf(getenv("TINYDAW_SHOT_PANEL"), "%d:%d", &pn, &sub);
             for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
             if (pn >= 0 && pn < RI_COUNT) open_panel(pn);
-            int *subs[RI_COUNT] = {&sounds_sub, &theory_tab, &pads_sub, &mixer_sub, &vis_sub, &settings_sub};
+            int *subs[RI_COUNT] = {&sounds_sub, &theory_tab, &pads_sub, &drum_mode, &mixer_sub, &vis_sub, &settings_sub};
             if (pn >= 0 && pn < RI_COUNT) *subs[pn] = sub;
             if (pn == RI_THEORY) {                 /* show the badge as if three sounds were added */
                 lib_badge = 3;
                 lib_badge_at = 0;
+            }
+        }
+        if (getenv("TINYDAW_SHOT_DRUMS")) {      /* "style,steps,mode": a pattern from a style, on the timeline */
+            int g = 0, st = 16, md = 0;
+            sscanf(getenv("TINYDAW_SHOT_DRUMS"), "%d,%d,%d", &g, &st, &md);
+            sel_track = P.ntracks > 1 ? 1 : 0;
+            DrumPat *d = drum_from_style(sel_track, g);
+            if (d) {
+                if (st == 32 && d->steps == 16)
+                    for (int r = 0; r < d->nrows; r++) memcpy(d->vel[r] + 16, d->vel[r], 16);
+                d->steps = st == 32 ? 32 : d->steps;
+                d->prob[d->nrows - 1][2] = 50;
+                d->vel[0][6] = 60;
+                drums_show(d->id);
+                drum_mode = md;
+                LOCK();
+                P.playhead = 0;
+                UNLOCK();
+                drum_place(d, 2);
             }
         }
         if (getenv("TINYDAW_SHOT_TIP")) {        /* "x,y": the mouse held still there, its tooltip showing */

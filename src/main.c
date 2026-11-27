@@ -261,7 +261,7 @@ static void field_box(SDL_Rect r, int hov, int active)
 
 /* ---------------------------------------------------------------- text */
 
-typedef struct { char s[128]; Uint32 key; SDL_Texture *t; int w, h; unsigned used; } TextEntry;
+typedef struct { char s[128]; Uint32 key; SDL_Texture *t; SDL_Renderer *r; int w, h; unsigned used; } TextEntry;
 static TextEntry tcache[512];
 static unsigned tclock;
 
@@ -272,7 +272,7 @@ static TextEntry *text_get(const char *s, Col c)
     for (size_t i = 0; i < sizeof tcache / sizeof *tcache; i++) {
         TextEntry *e = &tcache[i];
         if (e->t) {
-            if (e->key == key && strncmp(e->s, s, sizeof e->s - 1) == 0) {
+            if (e->key == key && e->r == ren && strncmp(e->s, s, sizeof e->s - 1) == 0) {
                 e->used = ++tclock;
                 return e;
             }
@@ -288,12 +288,22 @@ static TextEntry *text_get(const char *s, Col c)
                                                (SDL_Color){c.r, c.g, c.b, 255});
     if (!surf) return NULL;
     victim->t = SDL_CreateTextureFromSurface(ren, surf);
+    victim->r = ren;                     /* textures belong to one window's renderer */
     victim->w = surf->w;
     victim->h = surf->h;
     SDL_FreeSurface(surf);
     victim->key = key;
     victim->used = ++tclock;
     return victim->t ? victim : NULL;
+}
+
+static void text_forget(SDL_Renderer *r)   /* a window is closing: its text goes with it */
+{
+    for (size_t i = 0; i < sizeof tcache / sizeof *tcache; i++)
+        if (tcache[i].t && tcache[i].r == r) {
+            SDL_DestroyTexture(tcache[i].t);
+            tcache[i].t = NULL;
+        }
 }
 
 static int text(int x, int y, const char *s, Col c)
@@ -348,8 +358,23 @@ static SDL_Keymod mods;
 static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h; }
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
-       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE };
+       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
+/* the clip editor window (further down) */
+static SDL_Window *ewin;
+static SDL_Renderer *eren;
+static Uint32 ewin_id;
+static int ed_clip = -1, ed_handle, drag_in_editor;
+static Clip ed_last, ed_orig;            /* the clip as last seen (to find it again), and at a drag's start */
+static int ed_nclips;
+static long ed_v0, ed_v1;                /* the part of the sound shown, in frames */
+static SDL_Rect ed_wave, ed_btn[8];
+static struct { int mx, my, ldown, lpress, lrel, rpress, wheel_x, wheel_y, ldouble; } ein;
+static void editor_drag(void);
+static void editor_open(int clip);
+static void editor_close(void);
+static void editor_frame(void);
+static int ed_frame_to_x(long f);
 static void place_beat(int genre, long start, int first_track);
 
 static struct {
@@ -677,6 +702,13 @@ static void group_remember(void)
         g_start[i] = P.clips[i].start;
         g_track[i] = P.clips[i].track;
     }
+}
+
+/* the library list is showing and the pointer is over it (a drop target for clips) */
+static int over_library(void)
+{
+    return sounds_open && sounds_sub == 0 && L.pane_w && mx >= L.pane_x && mx < L.pane_x + L.pane_w && my >= L.top &&
+           my < H - L.status;
 }
 
 static void group_place(long df, int dt)
@@ -2543,6 +2575,110 @@ static void rec_close(Held *h, long end)
     }
 }
 
+
+/* ---- takes: a recording from when it starts to when it stops lands on an open track (one with
+ * nothing on it from the take's start on), or on a new track when there's none */
+static struct {
+    int on, track, hits, number;
+    long start;                         /* where in the song it began */
+    Uint32 since;                       /* when (for the timer) */
+} take;
+
+static void disc_small(int cx, int cy, int r, Col c)
+{
+    for (int dy = -r; dy <= r; dy++) {
+        int dx = (int)sqrt((double)(r * r - dy * dy));
+        line(cx - dx, cy + dy, cx + dx, cy + dy, c);
+    }
+}
+
+static int take_track_for(int from_track)
+{
+    if (take.track >= 0) return take.track;
+    for (int t = 0; t < P.ntracks; t++) {
+        int busy = 0;
+        for (int c = 0; c < P.nclips && !busy; c++)
+            busy = P.clips[c].track == t && P.clips[c].start + P.clips[c].length > take.start;
+        if (!busy) {
+            int empty = 1;                      /* an unused track takes on the sound being played */
+            for (int c = 0; c < P.nclips && empty; c++) empty = P.clips[c].track != t;
+            if (empty && from_track >= 0 && from_track < P.ntracks && from_track != t) {
+                LOCK();
+                char name[32];
+                snprintf(name, sizeof name, "%s", P.tracks[t].name);
+                P.tracks[t] = P.tracks[from_track];
+                snprintf(P.tracks[t].name, sizeof P.tracks[t].name, "%s", name);
+                P.tracks[t].mute = P.tracks[t].solo = 0;
+                UNLOCK();
+            }
+            return take.track = t;
+        }
+    }
+    if (P.ntracks < MAX_TRACKS) {               /* none free: a new one, sounding the same */
+        LOCK();
+        int t = project_add_track(&P, NULL);
+        if (t >= 0 && from_track >= 0 && from_track < P.ntracks) {
+            P.tracks[t] = P.tracks[from_track];
+            P.tracks[t].mute = P.tracks[t].solo = 0;
+        }
+        if (t >= 0) snprintf(P.tracks[t].name, sizeof P.tracks[t].name, "Take %d", take.number);
+        UNLOCK();
+        if (t >= 0) return take.track = t;
+    }
+    return from_track >= 0 && from_track < P.ntracks ? from_track : 0;   /* full: where it was playing */
+}
+
+/* each frame: a take starts once play and Rec are both on (after any count-in), and ends when
+ * either stops */
+static void take_check(void)
+{
+    int now = pads_rec && P.playing && countin_left == 0;
+    if (now && !take.on) {
+        take.on = 1;
+        take.track = -1;
+        take.hits = 0;
+        take.number++;
+        take.start = P.playhead;
+        take.since = SDL_GetTicks();
+    } else if (!now && take.on) {
+        take.on = 0;
+        double secs = (SDL_GetTicks() - take.since) / 1000.0;
+        if (take.hits)
+            status("Recorded %d hit%s in %.1f s onto track %d (%s)", take.hits, take.hits == 1 ? "" : "s", secs,
+                   take.track + 1, P.tracks[take.track].name);
+        else
+            status("Recording stopped: nothing was played (%.1f s)", secs);
+    }
+}
+
+/* Rec: arms recording, and starts playing (after the count-in, if there is one) when stopped. */
+static void rec_toggle(void)
+{
+    pads_rec = !pads_rec;
+    if (pads_rec && !P.playing) toggle_play();
+    if (pads_rec)
+        status(countin_left > 0 ? "Recording after the count-in: play the pads or a MIDI keyboard"
+                                : "Recording: play the pads or a MIDI keyboard; Stop or Rec ends the take");
+    else if (!take.on)
+        status("Recording off");
+}
+
+/* the take's own clock beside the transport: red while recording */
+static void rec_timer(SDL_Rect r)
+{
+    char buf[32];
+    if (take.on) {
+        double t = (SDL_GetTicks() - take.since) / 1000.0;
+        snprintf(buf, sizeof buf, "REC %d:%04.1f", (int)(t / 60), fmod(t, 60));
+        fill(r, rgb(190, 45, 40));
+        if ((SDL_GetTicks() / 500) % 2 == 0) disc_small(r.x + 10, r.y + r.h / 2, 4, rgb(255, 255, 255));
+        text_center((SDL_Rect){r.x + 14, r.y, r.w - 14, r.h}, buf, rgb(255, 255, 255));
+    } else if (pads_rec) {
+        outline(r, rgb(200, 60, 55));
+        text_center(r, P.playing && countin_left > 0 ? "count-in..." : "REC armed", rgb(220, 70, 60));
+    }
+}
+
 static void rec_drain(void)
 {
     RecEv evs[512];
@@ -2566,7 +2702,8 @@ static void rec_drain(void)
             int s = sample_pitched(&P, pd->sample, pd->pitch);
             UNLOCK();
             if (s < 0) continue;
-            int track = pd->track < P.ntracks ? pd->track : P.ntracks - 1;
+            int track = take_track_for(pd->track < P.ntracks ? pd->track : P.ntracks - 1);
+            take.hits++;
             rec_close(h, e->frame);
             if (pd->mode == PAD_ONESHOT) clip_add(s, track, snap(e->frame), 0, P.samples[s].frames);
             else *h = (Held){1, snap(e->frame), s, track, pd->mode == PAD_LOOP};
@@ -2582,7 +2719,8 @@ static void rec_drain(void)
             UNLOCK();
             if (s < 0) continue;
             rec_close(h, e->frame);
-            *h = (Held){1, snap(e->frame), s, P.inst_track < P.ntracks ? P.inst_track : 0, 0};
+            take.hits++;
+            *h = (Held){1, snap(e->frame), s, take_track_for(P.inst_track < P.ntracks ? P.inst_track : 0), 0};
         }
     }
     if (!P.playing || !pads_rec) {          /* stopped: finish anything still held */
@@ -2699,7 +2837,7 @@ static int pads_content(int x, int y, int w)
     text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, DIM);
     y += font_h + 10;
     y += 6;
-    if (button((SDL_Rect){x, y, 76, 28}, pads_rec ? "● Rec" : "Rec", pads_rec)) pads_rec = !pads_rec;
+    if (button((SDL_Rect){x, y, 76, 28}, pads_rec ? "● Rec" : "Rec", pads_rec)) rec_toggle();
     snprintf(buf, sizeof buf, "record hits while playing (snap %s)", SNAP_NAMES[snap_i]);
     text_clip((SDL_Rect){x + 86, y, w - 86, 28}, x + 86, y + (28 - font_h) / 2, buf, pads_rec ? HEAD : DIM);
     y += 40;
@@ -6674,7 +6812,7 @@ static void timeline(void)
         if (lpress && ldouble && !(mods & (KMOD_CTRL | KMOD_SHIFT))) {   /* double-click: the piano roll */
             if (found >= 0 && P.clips[found].pattern > 0) roll_open(found);
             else if (found < 0) new_note_clip(lane_at(my), x_to_frame(mx));
-            else status("That's an audio clip. Double-click an empty spot on a track to make a note clip");
+            else editor_open(found);             /* an audio clip: its own editor window */
             lpress = 0;
         }
         if (found >= 0 && rpress) {             /* right-click: delete it, or the whole selection it's in */
@@ -6800,15 +6938,12 @@ static void status_bar(void)
     tx += bw + gap;
     if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_LOOP, P.loop, none)) toggle_loop();
     tx += bw + gap;
-    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_REC, pads_rec, rgb(220, 60, 55))) {
-        pads_rec = !pads_rec;
-        status(pads_rec ? "Recording: pads and the instrument go onto the timeline while it plays"
-                        : "Recording off");
-    }
+    if (transport_button((SDL_Rect){tx, by, bw, bh}, TI_REC, pads_rec, rgb(220, 60, 55))) rec_toggle();
+    rec_timer((SDL_Rect){tx + bw + 8, by, 110, bh});
     int left_w = transport_rect.x - 18;
     text_clip((SDL_Rect){8, y, left_w, L.status}, 10, y + (L.status - font_h) / 2, status_msg, TEXT);
     const char *hint = roll_clip >= 0 ? "Esc or Done returns to the timeline" : "Double-click a track for a note clip";
-    int hw = text_w(hint), right_x = transport_rect.x + transport_rect.w + 16;
+    int hw = text_w(hint), right_x = transport_rect.x + transport_rect.w + 16 + (pads_rec ? 118 : 0);
     if (W - hw - 12 > right_x) text(W - hw - 12, y + (L.status - font_h) / 2, hint, DIM);
 }
 
@@ -6823,6 +6958,10 @@ static void update_drag(void)
         if (abs(mx - drag.sx) + abs(my - drag.sy) > 4) drag.kind = D_LIB;
         break;
     case D_MOVE: {                      /* the clip under the mouse snaps; the rest keep their places */
+        if (over_library()) {           /* held over the library: it's going there, not moving */
+            group_place(0, 0);
+            break;
+        }
         long f = snap((long)x_to_frame_raw(mx) - drag.grab);
         group_place(f - drag.a, lane_at(my) - drag.track);
         break;
@@ -6903,6 +7042,9 @@ static void update_drag(void)
         *drag.num = v < drag.nmin ? drag.nmin : v > drag.nmax ? drag.nmax : v;
         break;
     }
+    case D_ED:                          /* a handle in the clip editor window */
+        editor_drag();
+        break;
     case D_SLIDE: {                     /* sx, sy: the slider's x and width */
         double v = (double)(mx - drag.sx) / (drag.sy > 1 ? drag.sy : 1);
         *drag.num = v < 0 ? 0 : v > 1 ? 1 : v;
@@ -6935,8 +7077,61 @@ static void update_drag(void)
     }
 }
 
+/* Clips dropped on the library: one new sound of them, with their tracks' effects, saved as a
+ * WAV file in Music/tinydaw/Sounds (so the project can find it again). */
+static void bounce_clips(const int *list, int n);
+
+static void bounce_to_library(void)
+{
+    int list[MAX_CLIPS], n = 0;
+    if (drag.clip >= 0 && drag.clip < P.nclips && csel[drag.clip]) {
+        for (int c = 0; c < P.nclips; c++)
+            if (csel[c]) list[n++] = c;
+    } else if (drag.clip >= 0 && drag.clip < P.nclips) {
+        list[n++] = drag.clip;
+    }
+    bounce_clips(list, n);
+}
+
+static void bounce_clips(const int *list, int n)
+{
+    if (!n) return;
+    char dir[900], name[96], file[96], path[1200], stamp[32], err[300];
+    user_dir("music", dir, sizeof dir);
+    snprintf(dir + strlen(dir), sizeof dir - strlen(dir), "/tinydaw/Sounds");
+    ensure_dir(dir);
+    const Clip *c0 = &P.clips[list[0]];
+    if (n == 1) snprintf(name, sizeof name, "%.80s fx", c0->pattern > 0 ? "Notes" : P.samples[c0->sample].name);
+    else snprintf(name, sizeof name, "%d clips together", n);
+    int k = 0;                                   /* a file name from it: letters, digits, - and _ */
+    for (const char *q = name; *q && k < 60; q++)
+        file[k++] = isalnum((unsigned char)*q) || *q == '-' ? *q : '_';
+    file[k] = 0;
+    time_t now = time(NULL);
+    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
+    snprintf(path, sizeof path, "%s/%s-%s.wav", dir, file, stamp);
+    for (int i = 2; file_exists(path) && i < 100; i++) snprintf(path, sizeof path, "%s/%s-%s-%d.wav", dir, file, stamp, i);
+    status("Rendering...");
+    int idx = sample_bounce(&P, list, n, path, name, err, sizeof err);
+    if (idx < 0) {
+        status("Couldn't make a sound of that: %s", err);
+        return;
+    }
+    lib_flash = idx;
+    lib_flash_at = SDL_GetTicks();
+    lib_scroll = P.nsamples;
+    status("Made \"%s\" (%.2f s) with its effects, saved as %s", P.samples[idx].name,
+           (double)P.samples[idx].frames / SR, path_base(path));
+}
+
 static void end_drag(void)
 {
+    if (drag.kind == D_MOVE && over_library()) {
+        group_place(0, 0);                      /* the clips stay where they were */
+        bounce_to_library();
+        drag.kind = D_NONE;
+        return;
+    }
     if (drag.kind == D_SLIDE) slide_done = drag.num;
     if (drag.kind == D_NOTE && abs(mx - drag.sx) + abs(my - drag.sy) < 3) {
         *drag.inum = drag.iorig;                /* a click, not a drag: type the note instead */
@@ -7413,6 +7608,8 @@ static void make_demo(void)
 static void frame(void);
 static void preview_notes(const int *notes, int n, double beats);
 static void place_progression(const Progression *pr);
+static int roll_put_chords(const int (*notes)[6], const int *counts, int nch, double beats, const char *what);
+static int roll_put_chord(const int *notes, int n, double beats, const char *name);
 static SDL_Rect tab_rect(int pos, int x, int y, int w);
 static BeatSpec genre_spec(int g);
 static int gn_sel, gn_bars, gn_split;
@@ -7440,6 +7637,26 @@ static void sim_drag(int x0, int y0, int x1, int y1, SDL_Keymod m)
     sim(x0, y0, 1, 0, 0, m);
     for (int i = 1; i <= 8; i++) sim(x0 + (x1 - x0) * i / 8, y0 + (y1 - y0) * i / 8, 0, 0, 0, m);
     sim(x1, y1, 0, 1, 0, m);
+}
+
+/* the clip editor's mouse, for the self-test: one editor frame */
+static void ed_sim(int x, int y, int press, int release)
+{
+    ein.mx = x;
+    ein.my = y;
+    ein.lpress = press;
+    ein.lrel = release;
+    if (press) ein.ldown = 1;
+    if (release) ein.ldown = 0;
+    if (release && drag.kind != D_NONE && drag_in_editor) {   /* the final position, as the main loop does */
+        int sx = mx, sy = my;
+        mx = x;
+        my = y;
+        update_drag();
+        mx = sx;
+        my = sy;
+    }
+    editor_frame();
 }
 
 static int failures;
@@ -7785,9 +8002,48 @@ static int selftest(void)
     UNLOCK();
     pads_rec = 0;
     frame();
-    check(P.nclips == c0 + 2 && P.clips[c0].start == 4 * beat_frames() && P.clips[c0].track == 2,
-          "recorded hits land on the pad's track, snapped to the grid");
+    {
+        int tt = P.nclips == c0 + 2 ? P.clips[c0].track : -1, open = tt >= 0 && P.clips[c0 + 1].track == tt;
+        for (int c = 0; c < c0 && open; c++)    /* nothing else on that track from the take on */
+            open = !(P.clips[c].track == tt && P.clips[c].start + P.clips[c].length > 4 * beat_frames());
+        check(open && P.clips[c0].start == 4 * beat_frames() && P.clips[c0 + 1].start == 6 * beat_frames(),
+              "a take lands on an open track, snapped to the grid");
+        check(!take.on && take.hits == 2 && strstr(status_msg, "Recorded 2 hits"), "stopping ends the take and says where it went");
+    }
     check(nundo == u0 + 1, "a recorded take is one undo step");
+    {
+        int nt = P.ntracks;
+        undo_redo(0);                           /* back to the demo as it was, for the tests after */
+        check(P.nclips == c0 && P.ntracks <= nt, "undo takes the take (and any track it added) away");
+    }
+    {                                           /* Rec while stopped: starts playing, the timer runs */
+        double keep_view = view_start;
+        long keep_ph = P.playhead;
+        LOCK();
+        P.playing = 0;
+        P.playhead = 0;
+        UNLOCK();
+        int keep = MET.countin;
+        MET.countin = 0;
+        rec_toggle();
+        frame();
+        int started = pads_rec && P.playing && take.on;
+        SDL_Delay(120);
+        frame();
+        double secs = (SDL_GetTicks() - take.since) / 1000.0;
+        rec_toggle();
+        LOCK();
+        P.playing = 0;
+        UNLOCK();
+        frame();
+        MET.countin = keep;
+        check(started && secs > 0.1 && !take.on && !pads_rec, "Rec starts playing, its timer runs, and Rec again stops the take");
+        LOCK();
+        P.playhead = keep_ph;                   /* as it was, for the tests after */
+        UNLOCK();
+        view_start = keep_view;
+        history_check();
+    }
 
     /* effects: each one measured on rendered audio, in a separate test project */
     {
@@ -8138,6 +8394,7 @@ static int selftest(void)
         MET.sub = 1;
         MET.countin = 1;
         MET.countin_rec_only = 0;
+        int was_paused = !dev || SDL_GetAudioDeviceStatus(dev) == SDL_AUDIO_PAUSED;
         if (dev) SDL_PauseAudioDevice(dev, 1);  /* only this test drives the audio, or it races */
         LOCK();
         P.playing = 0;
@@ -8155,7 +8412,7 @@ static int selftest(void)
         long ph_after = P.playhead;
         UNLOCK();
         free(cb);
-        if (dev) SDL_PauseAudioDevice(dev, 0);
+        if (dev && !was_paused) SDL_PauseAudioDevice(dev, 0);   /* as it was */
         check(ph_during == 0 && ph_after == bf2, "the song waits for the count-in, then plays from where it was");
         toggle_play();
         MET = saved_met;
@@ -8510,8 +8767,13 @@ static int selftest(void)
         P.loop = 0;
         sim(tr.x + 7 * bw + 15, cy, 1, 0, 0, 0);             /* record */
         sim(tr.x + 7 * bw + 15, cy, 0, 1, 0, 0);
-        check(pads_rec, "the record button arms recording");
+        check(pads_rec && P.playing, "the record button arms recording and starts playing");
         pads_rec = 0;
+        LOCK();
+        P.playing = 0;
+        UNLOCK();
+        countin_left = 0;
+        frame();
         sim(tr.x + 15, cy, 1, 0, 0, 0);                       /* to the start */
         sim(tr.x + 15, cy, 0, 1, 0, 0);
         check(P.playhead == 0, "the start button goes to the beginning");
@@ -9355,6 +9617,158 @@ static int selftest(void)
         sel_clear();
     }
 
+
+    /* ---- chords from Theory into the piano roll; clips dropped on the library */
+    {
+        new_project();
+        P.bpm = 120;
+        long bar = 4 * beat_frames();
+        int c = new_note_clip(0, 2 * bar);       /* opens the roll on an empty one-bar clip */
+        P.playhead = 0;                          /* outside the clip: chords go after the last note */
+        frame();
+        history_check();
+        int cmaj[3] = {48, 52, 55}, u0 = nundo;
+        roll_put_chord(cmaj, 3, 4, "C");
+        int first = 0, sel = 0;
+        for (int i = 0; i < P.nnotes; i++)
+            if (P.notes[i].pattern == roll_pattern) {
+                first += P.notes[i].start == P.clips[c].offset && P.notes[i].length == bar;
+                sel += nsel[i];
+            }
+        check(first == 3 && sel == 3 && P.playhead == P.clips[c].start + bar,
+              "Roll puts a chord at the start of an empty note clip, selected, with the playhead after it");
+        frame();
+        history_check();
+        const Progression *pr = &PROGRESSIONS[0];
+        int ns[8][6], cnt[8], m = pr->n < 8 ? pr->n : 8;
+        for (int k = 0; k < m; k++) cnt[k] = chord_notes(pr->root[k] % 12, pr->type[k], 48, ns[k]);
+        roll_put_chords((const int (*)[6])ns, cnt, m, 4, pr->numerals);
+        long last = 0;
+        for (int i = 0; i < P.nnotes; i++)
+            if (P.notes[i].pattern == roll_pattern && P.notes[i].start > last) last = P.notes[i].start;
+        check(last == P.clips[c].offset + (long)m * bar && P.clips[c].length == (long)(m + 1) * bar,
+              "a progression follows on, one chord a bar, and the clip grows to hold it");
+        frame();
+        history_check();
+        undo_redo(0);
+        undo_redo(0);
+        int left = 0;
+        for (int i = 0; i < P.nnotes; i++) left += P.notes[i].pattern == roll_pattern;
+        check(nundo == u0 && left == 0, "each Roll is one undo step");
+        roll_close();
+
+        /* a clip dropped on the library: a new sound, with its track's effects, saved as a file */
+        new_project();
+        long n = SR / 2;
+        float *saw = malloc((size_t)n * 2 * sizeof(float));
+        for (long i = 0; i < n; i++) saw[2 * i] = saw[2 * i + 1] = (float)(0.5 * (2 * fmod(i * 220.0 / SR, 1.0) - 1));
+        int raw = sample_add(&P, "buzz", saw, n);
+        int cl = clip_add(raw, 0, beat_frames(), 0, n);
+        P.tracks[0].filter = FILT_LOW;           /* an effect that's easy to measure */
+        P.tracks[0].cutoff = 300;
+        P.tracks[0].mute = 1;                    /* muted tracks still bounce */
+        show_panel(RI_SOUNDS);
+        sounds_sub = 0;
+        view_start = 0;
+        frame();
+        SDL_Rect r = clip_rect(&P.clips[cl]), pr2 = panel_rect();
+        long start0 = P.clips[cl].start;
+        int nsamp = P.nsamples;
+        sim_drag(r.x + r.w / 2, r.y + r.h / 2, pr2.x + pr2.w / 2, pr2.y + pr2.h / 2, 0);
+        int got = P.nsamples == nsamp + 1 ? nsamp : -1;
+        double hf_raw = 0, hf_new = 0, e_raw = 0, e_new = 0;   /* the share above 2 kHz */
+        if (got >= 0) {
+            const Sample *b = &P.samples[got], *o = &P.samples[raw];
+            double kk = exp(-2 * 3.14159265358979 * 2000.0 / SR), l1 = 0, l2 = 0;
+            for (long i = 0; i < n && i < b->frames; i++) {
+                double x1 = o->data[2 * i], x2 = b->data[2 * i];
+                l1 = x1 + (l1 - x1) * kk;
+                l2 = x2 + (l2 - x2) * kk;
+                hf_raw += (x1 - l1) * (x1 - l1);
+                e_raw += x1 * x1;
+                hf_new += (x2 - l2) * (x2 - l2);
+                e_new += x2 * x2;
+            }
+        }
+        check(got >= 0 && P.clips[cl].start == start0 && P.nclips == 1 && file_exists(P.samples[got].path) &&
+                  labs(P.samples[got].frames - n) < SR / 100 && e_new > 0 && hf_new / e_new < 0.2 * hf_raw / e_raw,
+              "dropping a clip on the library makes a new sound with its effects, saved as a file; the clip stays");
+        if (got >= 0) remove(P.samples[got].path);
+        new_project();
+        make_demo();                             /* the tests after this expect the demo song */
+        sounds_sub = 0;
+    }
+
+
+    /* ---- the clip editor window */
+    {
+        new_project();
+        long n = 2 * SR;
+        float *tone = malloc((size_t)n * 2 * sizeof(float));
+        for (long i = 0; i < n; i++) tone[2 * i] = tone[2 * i + 1] = (float)(0.25 * sin(2 * 3.14159265358979 * 330 * i / (double)SR));
+        int sm = sample_add(&P, "tone", tone, n);
+        long bar = 4 * beat_frames();
+        int c = clip_add(sm, 1, bar, 0, n);
+        view_start = 0;
+        frame();
+        history_check();
+        SDL_Rect r = clip_rect(&P.clips[c]);       /* double-click an audio clip: its editor opens */
+        ldouble = 1;
+        sim(r.x + r.w / 2, r.y + r.h / 2, 1, 1, 0, 0);
+        ldouble = 0;
+        check(ewin && ed_clip == c, "double-clicking an audio clip opens it in its own editor window");
+        if (ewin) {
+            ed_sim(-100, -100, 0, 0);
+            Clip o = P.clips[c];
+            int ex = ed_frame_to_x(o.offset + o.length), sx = ed_frame_to_x(o.offset), cy = ed_wave.y + ed_wave.h / 2;
+            ed_sim(ex, cy, 1, 0);                  /* drag the end in */
+            ed_sim(ex - 100, cy, 0, 0);
+            ed_sim(ex - 100, cy, 0, 1);
+            long len1 = P.clips[c].length;
+            check(len1 < o.length - SR / 10 && P.clips[c].start == o.start && drag.kind == D_NONE,
+                  "dragging the end trims the clip");
+            ed_sim(sx, cy, 1, 0);                  /* and the start: the end stays where it was */
+            ed_sim(sx + 60, cy, 0, 0);
+            ed_sim(sx + 60, cy, 0, 1);
+            Clip t = P.clips[c];
+            check(t.offset > 0 && t.start == o.start + t.offset && t.start + t.length == o.start + len1,
+                  "dragging the start trims it from the front, keeping the end");
+            int fx = ed_frame_to_x(t.offset);
+            ed_sim(fx, ed_wave.y, 1, 0);           /* the fade-in square */
+            ed_sim(fx + 40, ed_wave.y, 0, 0);
+            ed_sim(fx + 40, ed_wave.y, 0, 1);
+            check(P.clips[c].fade_in > SR / 20, "dragging the square on top fades it in");
+            SDL_Rect b = ed_btn[1];
+            ed_sim(b.x + 5, b.y + 5, 1, 1);        /* Normalize: the loudest moment at -1 dB */
+            check(fabs(P.clips[c].gain_db - (-1 - 20 * log10(0.25))) < 0.2, "Normalize sets the gain so the peak is -1 dB");
+            frame();
+            history_check();
+            undo_redo(0);
+            int undone = fabs(P.clips[c].gain_db) < 0.01;
+            undo_redo(1);
+            check(undone, "editor changes undo like any other");
+            LOCK();
+            P.playhead = P.clips[c].start + P.clips[c].length / 2;
+            UNLOCK();
+            Clip before = P.clips[c];
+            int nc = P.nclips;
+            ed_sim(-100, -100, 0, 0);
+            b = ed_btn[3];
+            ed_sim(b.x + 5, b.y + 5, 1, 1);        /* Split at the playhead */
+            check(P.nclips == nc + 1 && P.clips[c].length + P.clips[nc].length == before.length &&
+                      P.clips[nc].start == before.start + P.clips[c].length &&
+                      P.clips[nc].offset == before.offset + P.clips[c].length,
+                  "Split at the playhead makes two clips that play the same as one");
+            ed_sim(-100, -100, 0, 0);
+            b = ed_btn[5];
+            ed_sim(b.x + 5, b.y + 5, 1, 1);        /* Delete: the clip goes, and so does the window */
+            check(!ewin && P.nclips == nc, "Delete removes the clip and closes the editor");
+        }
+        editor_close();
+        new_project();
+        make_demo();
+    }
+
     /* ---- Export: choosing the folder and file name */
     {
         char keep_proj[1024];
@@ -9567,6 +9981,70 @@ static int add_to_library(const int *notes, int n, const char *label)
     return s;
 }
 
+
+/* ---- chords from the Theory pane into the open piano roll */
+
+/* where the next chord goes, in the pattern's own frames: the playhead when it's inside the
+ * clip, else straight after the last note (on the next beat) */
+static long roll_insert_at(void)
+{
+    const Clip *c = &P.clips[roll_clip];
+    long beat = beat_frames();
+    if (P.playhead >= c->start && P.playhead < c->start + c->length)
+        return c->offset + (snap(P.playhead) - c->start);
+    long end = pattern_end(&P, roll_pattern);
+    if (end <= c->offset) return c->offset;
+    return (end + beat - 1) / beat * beat;
+}
+
+/* Puts chords into the roll one after another, each `beats` long; the new notes are selected,
+ * so arrows move them, and the playhead moves on so the next chord follows. */
+static int roll_put_chords(const int (*notes)[6], const int *counts, int nch, double beats, const char *what)
+{
+    if (roll_clip < 0) return 0;
+    long at = roll_insert_at(), len = (long)llround(beats * beat_frames()), added = 0;
+    memset(nsel, 0, sizeof nsel);
+    for (int k = 0; k < nch; k++)
+        for (int i = 0; i < counts[k]; i++) {
+            int j = note_add(roll_pattern, notes[k][i], at + k * len, len, 0.8f);
+            if (j >= 0) {
+                nsel[j] = 1;
+                added++;
+            }
+        }
+    roll_fit_clip();
+    int hi = 0, lo = 127;                        /* scroll the keys to show them */
+    for (int k = 0; k < nch; k++)
+        for (int i = 0; i < counts[k]; i++) {
+            hi = notes[k][i] > hi ? notes[k][i] : hi;
+            lo = notes[k][i] < lo ? notes[k][i] : lo;
+        }
+    int rows = roll_kh > 0 && roll_grid.h > 0 ? roll_grid.h / roll_kh : 24;
+    if (hi > roll_top || lo < roll_top - rows + 1) roll_top = hi + 4;
+    const Clip *c = &P.clips[roll_clip];
+    LOCK();
+    P.playhead = c->start + (at + nch * len - c->offset);   /* the next one goes after these */
+    UNLOCK();
+    long bar = 4 * beat_frames();
+    status("Put %s in the roll at bar %ld (%ld notes): arrows move them, Ctrl+Z takes them out", what,
+           (c->start + at - c->offset) / bar + 1, added);
+    return (int)added;
+}
+
+static int roll_put_chord(const int *notes, int n, double beats, const char *name)
+{
+    int one[1][6], cnt[1] = {n};
+    memcpy(one[0], notes, sizeof(int) * (size_t)(n < 6 ? n : 6));
+    return roll_put_chords((const int (*)[6])one, cnt, 1, beats, name);
+}
+
+/* a small "Roll" button under a chord, shown while the piano roll is open */
+static int roll_button(SDL_Rect r)
+{
+    if (roll_clip < 0) return 0;
+    return button(r, "Roll", 0);
+}
+
 /* a small "+" button: adds something to the library */
 static int plus_button(SDL_Rect r)
 {
@@ -9753,8 +10231,10 @@ static int tab_keys(int x, int y, int w)
                 else preview_notes(notes, n, 2);
             }
             if (plus_button((SDL_Rect){x + d * (cw + 4), y + 2 * font_h + 16, cw, 20})) add_to_library(notes, n, buf);
+            if (roll_button((SDL_Rect){x + d * (cw + 4), y + 2 * font_h + 40, cw, 22}))
+                roll_put_chord(notes, n, TH_LENS[th_len], buf);
         }
-        y += 3 * font_h + 26;
+        y += 3 * font_h + 26 + (roll_clip >= 0 ? 26 : 0);
         if (button((SDL_Rect){x, y, w, 26}, "+ Add all 7 chords to the library", 0)) all = 1;
         if (all) {
             int added = 0;
@@ -9810,11 +10290,24 @@ static int tab_keys(int x, int y, int w)
             status("%s: %d new chord%s in the library", pr->numerals, added, added == 1 ? "" : "s");
         }
         if (button((SDL_Rect){x + w - 116, y + 4, 52, 26}, "Play", 0)) play_progression(pr);
-        if (button((SDL_Rect){x + w - 60, y + 4, 60, 26}, "Place", 0)) place_progression(pr);
+        if (button((SDL_Rect){x + w - 60, y + 4, 60, 26}, roll_clip >= 0 ? "Roll" : "Place", 0)) {
+            if (roll_clip >= 0) {                /* one chord a bar, into the open piano roll */
+                int ns[8][6], cnt[8], m = pr->n < 8 ? pr->n : 8;
+                for (int c = 0; c < m; c++) cnt[c] = chord_notes((th_root + pr->root[c]) % 12, pr->type[c], 48, ns[c]);
+                roll_put_chords((const int (*)[6])ns, cnt, m, 4, pr->numerals);
+            } else {
+                place_progression(pr);
+            }
+        }
         y += 2 * font_h + 14;
     }
-    text(x, y, "+ adds the chords to the library. Place puts one per", DIM);
-    text(x, y + font_h + 2, "bar on the timeline, from the bar nearest the playhead.", DIM);
+    if (roll_clip >= 0) {
+        text(x, y, "+ adds the chords to the library. Roll puts one per", DIM);
+        text(x, y + font_h + 2, "bar into the open piano roll.", DIM);
+    } else {
+        text(x, y, "+ adds the chords to the library. Place puts one per", DIM);
+        text(x, y + font_h + 2, "bar on the timeline, from the bar nearest the playhead.", DIM);
+    }
     return y + 2 * font_h + 8;
 }
 
@@ -9927,6 +10420,8 @@ static int tab_chords(int x, int y, int w)
         chord_name(th_root, t, flats, sym, sizeof sym);
         int notes[6], n = chord_notes(th_root, t, 48, notes);
         if (plus_button((SDL_Rect){x + w - 26, y - 2, 26, font_h + 6})) add_to_library(notes, n, sym);
+        if (roll_button((SDL_Rect){x + w - 80, y - 2, 50, font_h + 6})) roll_put_chord(notes, n, TH_LENS[th_len], sym);
+        if (roll_clip >= 0) r.w = w - 84;
         int clicked = row_hit(r);
         chord_tone_names(th_root, t, flats, buf, sizeof buf);
         text_clip((SDL_Rect){x, y, 156, font_h + 2}, x + 6, y, c->name, TEXT);
@@ -10611,6 +11106,13 @@ static void theory_pane(void)
         y = subtabs(x, y - 6, w, REF, 4, &rs);
         theory_tab = ref_tab = REF_ID[rs];
     }
+    if (roll_clip >= 0 && (theory_tab == 0 || theory_tab == 2)) {   /* say where chords can go */
+        SDL_Rect b = {x, y, w, font_h + 12};
+        fill(b, alpha(ACCENT, 50));
+        outline(b, ACCENT);
+        text(x + 8, y + 6, "The piano roll is open: Roll puts a chord into it", HEAD);
+        y += font_h + 20;
+    }
     if (theory_tab == 0 || theory_tab == 2 || theory_tab == 3 || theory_tab == 5) y = adds_as(x, y, w);
     switch (theory_tab) {
     case 0: y = tab_keys(x, y, w); break;
@@ -10782,6 +11284,444 @@ static void export_dialog(void)
 #undef ROW
 }
 
+
+/* ---------------------------------------------------------------- the clip editor window
+ *
+ * Double-clicking an audio clip opens it in a window of its own: a big waveform of the whole
+ * sound with the clip's part lit (drag its edges to trim, its top corners to fade, the wheel to
+ * zoom, click to hear from there), the clip settings from the Mixer, exact numbers, and actions.
+ * It's drawn by the same immediate-mode code as the main window: for its pass the renderer,
+ * size and mouse are swapped for the editor's. */
+
+
+static void editor_close(void)
+{
+    if (!ewin) return;
+    if (drag_in_editor) drag.kind = D_NONE;
+    drag_in_editor = 0;
+    text_forget(eren);
+    SDL_DestroyRenderer(eren);
+    SDL_DestroyWindow(ewin);
+    ewin = NULL;
+    eren = NULL;
+    ed_clip = -1;
+}
+
+static void editor_view_clip(void)
+{
+    const Clip *c = &P.clips[ed_clip];
+    long frames = P.samples[c->sample].frames, pad = c->length / 6 + SR / 20;
+    ed_v0 = c->offset - pad < 0 ? 0 : c->offset - pad;
+    ed_v1 = c->offset + c->length + pad > frames ? frames : c->offset + c->length + pad;
+    if (ed_v1 <= ed_v0) ed_v1 = ed_v0 + 1;
+}
+
+static void editor_open(int c)
+{
+    if (c < 0 || c >= P.nclips || P.clips[c].pattern > 0) return;
+    sel_only(c);
+    ed_clip = c;
+    ed_last = P.clips[c];
+    ed_nclips = P.nclips;
+    editor_view_clip();
+    char title[160];
+    snprintf(title, sizeof title, "%s - clip editor - tinydaw", P.samples[sample_base(&P, P.clips[c].sample)].name);
+    if (!ewin) {
+        ewin = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 840, 660, SDL_WINDOW_RESIZABLE);
+        if (!ewin) {
+            status("Couldn't open the editor window: %s", SDL_GetError());
+            return;
+        }
+        eren = SDL_CreateRenderer(ewin, -1, SDL_RENDERER_ACCELERATED);
+        if (!eren) eren = SDL_CreateRenderer(ewin, -1, SDL_RENDERER_SOFTWARE);
+        if (!eren) {
+            SDL_DestroyWindow(ewin);
+            ewin = NULL;
+            status("Couldn't open the editor window: %s", SDL_GetError());
+            return;
+        }
+        SDL_SetRenderDrawBlendMode(eren, SDL_BLENDMODE_BLEND);
+        SDL_SetWindowMinimumSize(ewin, 640, 560);
+        ewin_id = SDL_GetWindowID(ewin);
+        memset(&ein, 0, sizeof ein);
+        ein.mx = ein.my = -1000;
+    } else {
+        SDL_SetWindowTitle(ewin, title);
+        SDL_RaiseWindow(ewin);
+    }
+    status("Editing \"%s\" in its own window", P.samples[sample_base(&P, P.clips[c].sample)].name);
+}
+
+/* the clip the editor shows may have moved in the list (clips deleted, undo): find it again */
+static int editor_find(void)
+{
+    if (ed_clip >= 0 && ed_clip < P.nclips && P.nclips == ed_nclips && P.clips[ed_clip].pattern == 0) return 1;
+    for (int i = 0; i < P.nclips; i++)
+        if (P.clips[i].pattern == 0 && P.clips[i].start == ed_last.start && P.clips[i].track == ed_last.track &&
+            P.clips[i].sample == ed_last.sample) {
+            ed_clip = i;
+            ed_nclips = P.nclips;
+            return 1;
+        }
+    return 0;
+}
+
+static long ed_x_to_frame(int x)
+{
+    long f = ed_v0 + (long)((double)(x - ed_wave.x) * (ed_v1 - ed_v0) / (ed_wave.w > 1 ? ed_wave.w : 1));
+    long frames = P.samples[P.clips[ed_clip].sample].frames;
+    return f < 0 ? 0 : f > frames ? frames : f;
+}
+
+static int ed_frame_to_x(long f) { return ed_wave.x + (int)((double)(f - ed_v0) * ed_wave.w / (ed_v1 - ed_v0)); }
+
+static void editor_drag(void)            /* a handle on the waveform, following the mouse */
+{
+    if (ed_clip < 0 || ed_clip >= P.nclips) return;
+    Clip *c = &P.clips[ed_clip];
+    const Clip *o = &ed_orig;
+    long f = ed_x_to_frame(mx), frames = P.samples[c->sample].frames, min = SR / 100;
+    LOCK();
+    switch (ed_handle) {
+    case 1: {                            /* the start: the end stays put */
+        long off = f < 0 ? 0 : f > o->offset + o->length - min ? o->offset + o->length - min : f;
+        long d = off - o->offset;
+        if (o->start + d < 0) d = -o->start;
+        c->offset = o->offset + d;
+        c->start = o->start + d;
+        c->length = o->length - d;
+        break;
+    }
+    case 2: {                            /* the end */
+        long len = f - o->offset;
+        c->length = len < min ? min : len > frames - o->offset ? frames - o->offset : len;
+        break;
+    }
+    case 3: {
+        long v = f - c->offset;
+        c->fade_in = v < 0 ? 0 : v > c->length - c->fade_out ? c->length - c->fade_out : v;
+        break;
+    }
+    case 4: {
+        long v = c->offset + c->length - f;
+        c->fade_out = v < 0 ? 0 : v > c->length - c->fade_in ? c->length - c->fade_in : v;
+        break;
+    }
+    }
+    if (c->fade_in + c->fade_out > c->length) c->fade_in = c->fade_out = 0;
+    UNLOCK();
+}
+
+static void editor_play_region(long from)  /* hear the clip from `from` (a frame in its sound) */
+{
+    const Clip *c = &P.clips[ed_clip];
+    const Sample *s = &P.samples[c->sample];
+    if (from < c->offset || from >= c->offset + c->length) from = c->offset;
+    long n = c->offset + c->length - from;
+    float *b = malloc((size_t)n * 2 * sizeof(float));
+    if (!b) return;
+    float g = powf(10, c->gain_db / 20);
+    for (long i = 0; i < n; i++) {
+        long k = from - c->offset + i;          /* where in the clip, for its fades */
+        float e = 1;
+        if (c->fade_in > 0 && k < c->fade_in) e = (float)k / c->fade_in;
+        if (c->fade_out > 0 && c->length - k < c->fade_out) e = fminf(e, (float)(c->length - k) / c->fade_out);
+        b[2 * i] = s->data[2 * (from + i)] * g * e;
+        b[2 * i + 1] = s->data[2 * (from + i) + 1] * g * e;
+    }
+    play_scratch(b, n);
+}
+
+static void editor_draw(void)
+{
+    char buf[200];
+    Clip *c = &P.clips[ed_clip];
+    const Sample *s = &P.samples[c->sample];
+    int x = 16, w = W - 32, y = 12, hw, tw;
+    fill((SDL_Rect){0, 0, W, H}, PANEL);
+    snprintf(buf, sizeof buf, "%s", P.samples[sample_base(&P, c->sample)].name);
+    text(x, y + 4, buf, HEAD);
+    snprintf(buf, sizeof buf, "track %d (%s)   %.2f s of a %.2f s sound", c->track + 1, P.tracks[c->track].name,
+             (double)c->length / SR, (double)s->frames / SR);
+    text(x + text_w(P.samples[sample_base(&P, c->sample)].name) + 16, y + 4, buf, DIM);
+    if (button((SDL_Rect){W - 16 - 90, y, 90, 28}, "Close", 0)) {
+        editor_close();
+        return;
+    }
+    y += 40;
+
+    /* the waveform: the whole sound, the clip's part lit */
+    int wh = H - y - 350;
+    ed_wave = (SDL_Rect){x, y, w, wh < 120 ? 120 : wh};
+    fill(ed_wave, PANEL2);
+    int mid = ed_wave.y + ed_wave.h / 2, half = ed_wave.h / 2 - 6;
+    for (int px = 0; px < ed_wave.w; px++) {
+        long f0 = ed_v0 + (long)((double)px * (ed_v1 - ed_v0) / ed_wave.w);
+        long f1 = ed_v0 + (long)((double)(px + 1) * (ed_v1 - ed_v0) / ed_wave.w);
+        if (f1 <= f0) f1 = f0 + 1;
+        float lo, hi;
+        sample_minmax(s, f0, f1, &lo, &hi);
+        int in = f0 >= c->offset && f0 < c->offset + c->length;
+        float e = 1;                              /* the fades, drawn into the shape */
+        long k = f0 - c->offset;
+        if (in && c->fade_in > 0 && k < c->fade_in) e = (float)k / c->fade_in;
+        if (in && c->fade_out > 0 && c->length - k < c->fade_out) e = fminf(e, (float)(c->length - k) / c->fade_out);
+        float g = in ? powf(10, c->gain_db / 20) * e : 1;
+        int y0 = mid - (int)(fminf(hi * g, 1) * half), y1 = mid - (int)(fmaxf(lo * g, -1) * half);
+        line(ed_wave.x + px, y0, ed_wave.x + px, y1 < y0 + 1 ? y0 + 1 : y1, in ? TRACK_COL[c->track % MAX_TRACKS] : tone(DIM, 0.6f));
+    }
+    int rx0 = ed_frame_to_x(c->offset), rx1 = ed_frame_to_x(c->offset + c->length);
+    int fx0 = ed_frame_to_x(c->offset + c->fade_in), fx1 = ed_frame_to_x(c->offset + c->length - c->fade_out);
+    line(rx0, ed_wave.y + 4, fx0, ed_wave.y + 4, ACCENT);
+    line(fx1, ed_wave.y + 4, rx1, ed_wave.y + 4, ACCENT);
+    SDL_Rect hs = {rx0 - 3, ed_wave.y, 6, ed_wave.h}, he = {rx1 - 3, ed_wave.y, 6, ed_wave.h};
+    SDL_Rect hfi = {fx0 - 6, ed_wave.y - 6, 12, 12}, hfo = {fx1 - 6, ed_wave.y - 6, 12, 12};
+    fill(hs, ed_handle == 1 && drag.kind == D_ED ? HEAD : ACCENT);
+    fill(he, ed_handle == 2 && drag.kind == D_ED ? HEAD : ACCENT);
+    fill(hfi, ACCENT);
+    fill(hfo, ACCENT);
+    outline(hfi, DARK);
+    outline(hfo, DARK);
+    if (P.playing && P.playhead >= c->start && P.playhead < c->start + c->length) {   /* where the song is */
+        int px = ed_frame_to_x(c->offset + P.playhead - c->start);
+        line(px, ed_wave.y, px, ed_wave.y + ed_wave.h, HEAD);
+    }
+    outline(ed_wave, LINE);
+    int ry = ed_wave.y + ed_wave.h + 4;           /* seconds into the sound */
+    double span = (double)(ed_v1 - ed_v0) / SR, step = span > 20 ? 5 : span > 8 ? 2 : span > 3 ? 0.5 : span > 1 ? 0.25 : 0.05;
+    for (double t = ceil(ed_v0 / (double)SR / step) * step; t * SR < ed_v1; t += step) {
+        int px = ed_frame_to_x((long)(t * SR));
+        line(px, ry, px, ry + 4, DIM);
+        snprintf(buf, sizeof buf, "%.2fs", t);
+        text(px + 2, ry + 2, buf, DIM);
+    }
+    if (drag.kind == D_NONE) {                    /* the waveform's mouse */
+        int which = hit(hfi) ? 3 : hit(hfo) ? 4 : hit((SDL_Rect){hs.x - 4, hs.y, hs.w + 8, hs.h}) ? 1
+                  : hit((SDL_Rect){he.x - 4, he.y, he.w + 8, he.h}) ? 2 : 0;
+        if (lpress && which) {
+            lpress = 0;
+            ed_handle = which;
+            ed_orig = *c;
+            drag = (typeof(drag)){.kind = D_ED, .clip = ed_clip, .sx = mx, .sy = my};
+        } else if (lpress && hit(ed_wave)) {
+            lpress = 0;
+            editor_play_region(ed_x_to_frame(mx));
+        }
+        if (hit(ed_wave) && wheel_y) {           /* zoom about the mouse; Shift+wheel scrolls */
+            long frames = s->frames, span_f = ed_v1 - ed_v0, at = ed_x_to_frame(mx);
+            if (mods & KMOD_SHIFT) {
+                long d = -wheel_y * span_f / 8;
+                ed_v0 += d;
+                ed_v1 += d;
+            } else {
+                double k = wheel_y > 0 ? 0.8 : 1.25;
+                long nspan = (long)(span_f * k);
+                if (nspan < SR / 50) nspan = SR / 50;
+                ed_v0 = at - (long)((double)(at - ed_v0) * nspan / span_f);
+                ed_v1 = ed_v0 + nspan;
+            }
+            if (ed_v0 < 0) ed_v1 -= ed_v0, ed_v0 = 0;
+            if (ed_v1 > frames) ed_v0 -= ed_v1 - frames, ed_v1 = frames;
+            if (ed_v0 < 0) ed_v0 = 0;
+            if (ed_v1 <= ed_v0) ed_v1 = ed_v0 + 1;
+            wheel_y = 0;
+        }
+    }
+    y = ry + font_h + 12;
+
+    /* the numbers */
+    hw = (w - 16) / 3;
+    tw = hw;
+    y = section(x, y, w, "WHERE IT PLAYS");
+    double bf = beat_frames();
+    static double st_b, len_b, off_ms;
+    if (!(drag.kind == D_NUM && drag.num == &st_b) && !(numedit.active && numedit.v == &st_b)) st_b = c->start / bf + 1;
+    if (!(drag.kind == D_NUM && drag.num == &len_b) && !(numedit.active && numedit.v == &len_b)) len_b = c->length / bf;
+    if (!(drag.kind == D_NUM && drag.num == &off_ms) && !(numedit.active && numedit.v == &off_ms)) off_ms = c->offset * 1000.0 / SR;
+    number((SDL_Rect){x, y, tw, 26}, "Starts at beat", &st_b, 1, 100000, 0.05, "%.2f");
+    number((SDL_Rect){x + tw + 8, y, tw, 26}, "Length", &len_b, 0.01, (s->frames - c->offset) / bf, 0.02, "%.2f beats");
+    number((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Into the sound", &off_ms, 0, s->frames * 1000.0 / SR, 2, "%.0f ms");
+    {
+        long ns = (long)llround((st_b - 1) * bf), nl = (long)llround(len_b * bf), no = (long)llround(off_ms * SR / 1000);
+        if (no > s->frames - SR / 100) no = s->frames - SR / 100;
+        if (no < 0) no = 0;
+        if (nl > s->frames - no) nl = s->frames - no;
+        if (ns != c->start || nl != c->length || no != c->offset) {
+            LOCK();
+            c->start = ns < 0 ? 0 : ns;
+            c->length = nl < SR / 100 ? SR / 100 : nl;
+            c->offset = no;
+            if (c->fade_in + c->fade_out > c->length) c->fade_in = c->fade_out = 0;
+            UNLOCK();
+        }
+    }
+    y += 34;
+    snprintf(buf, sizeof buf, "Track %d: %s", c->track + 1, P.tracks[c->track].name);
+    text(x, y + 6, buf, TEXT);
+    if (button((SDL_Rect){x + tw - 60, y, 28, 26}, "<", 0) && c->track > 0) c->track--;
+    if (button((SDL_Rect){x + tw - 28, y, 28, 26}, ">", 0) && c->track < P.ntracks - 1) c->track++;
+    y += 40;
+
+    y = section(x, y, w, "HOW IT SOUNDS");
+    fnumber((SDL_Rect){x, y, tw, 26}, "Gain", &c->gain_db, -36, 12, 0.05, "%+.1f dB");
+    static double semis;
+    if (!(drag.kind == D_NUM && drag.num == &semis) && !(numedit.active && numedit.v == &semis)) semis = clip_semis(c);
+    number((SDL_Rect){x + tw + 8, y, tw, 26}, "Pitch", &semis, -24, 24, 0.08, "%+.0f st");
+    if (drag.kind != D_NUM && (int)lround(semis) != clip_semis(c)) clip_variant(ed_clip, (int)lround(semis), clip_rev(c));
+    c = &P.clips[ed_clip];
+    if (button((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Reverse", clip_rev(c))) clip_variant(ed_clip, clip_semis(c), !clip_rev(c));
+    c = &P.clips[ed_clip];
+    y += 34;
+    static double fin, fout;
+    if (!(drag.kind == D_NUM && drag.num == &fin) && !(numedit.active && numedit.v == &fin)) fin = c->fade_in * 1000.0 / SR;
+    if (!(drag.kind == D_NUM && drag.num == &fout) && !(numedit.active && numedit.v == &fout)) fout = c->fade_out * 1000.0 / SR;
+    double maxms = c->length * 1000.0 / SR;
+    number((SDL_Rect){x, y, tw, 26}, "Fade in", &fin, 0, maxms, 2, "%.0f ms");
+    number((SDL_Rect){x + tw + 8, y, tw, 26}, "Fade out", &fout, 0, maxms, 2, "%.0f ms");
+    {
+        long a = (long)llround(fin * SR / 1000), b = (long)llround(fout * SR / 1000);
+        if (a > c->length) a = c->length;
+        if (a + b > c->length) b = c->length - a;
+        if (a != c->fade_in || b != c->fade_out) {
+            LOCK();
+            c->fade_in = a;
+            c->fade_out = b < 0 ? 0 : b;
+            UNLOCK();
+        }
+    }
+    y += 42;
+
+    /* actions */
+    static const char *const ACT[6] = {"Play the clip", "Normalize (peak -1 dB)", "Fit to whole bars",
+                                       "Split at the playhead", "New sound with its effects", "Delete the clip"};
+    int bw = (w - 2 * 6) / 3, act = -1;
+    for (int i = 0; i < 6; i++) {
+        ed_btn[i] = (SDL_Rect){x + (i % 3) * (bw + 6), y + (i / 3) * 36, i % 3 == 2 ? w - 2 * (bw + 6) : bw, 30};
+        if (button(ed_btn[i], ACT[i], 0)) act = i;
+    }
+    y += 36;
+    switch (act) {
+    case 0: editor_play_region(c->offset); break;
+    case 1: {                                    /* the loudest moment to -1 dB */
+        float lo, hi;
+        sample_minmax(s, c->offset, c->offset + c->length, &lo, &hi);
+        float pk = fmaxf(fabsf(lo), fabsf(hi));
+        if (pk > 1e-6f) {
+            LOCK();
+            c->gain_db = fmaxf(-36, fminf(12, -1 - 20 * log10f(pk)));
+            UNLOCK();
+            status("Normalized: gain %+.1f dB brings its peak to -1 dB", c->gain_db);
+        }
+        break;
+    }
+    case 2: {
+        long bar = 4 * beat_frames(), n = (c->length + bar / 2) / bar;
+        if (n < 1) n = 1;
+        long len = n * bar;
+        if (len > s->frames - c->offset) len = s->frames - c->offset;
+        LOCK();
+        c->length = len;
+        if (c->fade_in + c->fade_out > c->length) c->fade_in = c->fade_out = 0;
+        UNLOCK();
+        status("Length: %ld bar%s%s", n, n == 1 ? "" : "s", len < n * bar ? " (as much as the sound has)" : "");
+        break;
+    }
+    case 3:
+        if (P.playhead > c->start && P.playhead < c->start + c->length) {
+            long cut = P.playhead - c->start;
+            Clip right = *c;
+            right.start = P.playhead;
+            right.offset = c->offset + cut;
+            right.length = c->length - cut;
+            right.fade_in = 0;
+            if (right.fade_out > right.length) right.fade_out = 0;
+            LOCK();
+            c->length = cut;
+            c->fade_out = 0;
+            if (c->fade_in > c->length) c->fade_in = 0;
+            UNLOCK();
+            int k = clip_add(right.sample, right.track, right.start, right.offset, right.length);
+            if (k >= 0) {
+                LOCK();
+                P.clips[k].gain_db = right.gain_db;
+                P.clips[k].fade_out = right.fade_out;
+                UNLOCK();
+            }
+            ed_nclips = P.nclips;
+            status("Split at the playhead: this is the left part; the right part is its own clip");
+        } else {
+            status("Put the playhead inside this clip to split it there");
+        }
+        break;
+    case 4: {
+        int one = ed_clip;
+        bounce_clips(&one, 1);
+        break;
+    }
+    case 5:
+        clip_delete(ed_clip);
+        editor_close();
+        status("Deleted the clip");
+        return;
+    }
+    y += 40;
+    text(x, y, "Drag the edges to trim, the squares on top to fade, the wheel to zoom (Shift to scroll).", DIM);
+    text(x, y + font_h + 3, "Click the waveform to hear it from there. Ctrl+Z undoes, Esc closes.", DIM);
+}
+
+/* The editor's pass: its renderer, size and mouse in place of the main window's. */
+static void editor_frame(void)
+{
+    if (!ewin) return;
+    if (!editor_find()) {
+        editor_close();
+        return;
+    }
+    SDL_Renderer *m_ren = ren;
+    int mW = W, mH = H, smx = mx, smy = my, sld = ldown, slp = lpress, slr = lrel, srp = rpress, swx = wheel_x,
+        swy = wheel_y, sdb = ldouble;
+    ren = eren;
+    SDL_GetWindowSize(ewin, &W, &H);
+    mx = ein.mx;
+    my = ein.my;
+    ldown = ein.ldown;
+    lpress = ein.lpress;
+    lrel = ein.lrel;
+    rpress = ein.rpress;
+    wheel_x = ein.wheel_x;
+    wheel_y = ein.wheel_y;
+    ldouble = ein.ldouble;
+    int had = drag.kind != D_NONE;
+    if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
+    SDL_SetRenderDrawColor(ren, BG.r, BG.g, BG.b, 255);
+    SDL_RenderClear(ren);
+    editor_draw();
+    if (ewin) {
+        if (drag_in_editor && drag.kind != D_NONE && ldown) update_drag();
+        if (drag_in_editor && lrel && drag.kind != D_NONE) end_drag();
+        if (!had && drag.kind != D_NONE) drag_in_editor = 1;
+        if (drag.kind == D_NONE) drag_in_editor = 0;
+        if (ed_clip >= 0 && ed_clip < P.nclips) {
+            ed_last = P.clips[ed_clip];
+            ed_nclips = P.nclips;
+        }
+        SDL_RenderPresent(ren);
+    }
+    ren = m_ren;
+    W = mW;
+    H = mH;
+    mx = smx;
+    my = smy;
+    ldown = sld;
+    lpress = slp;
+    lrel = slr;
+    rpress = srp;
+    wheel_x = swx;
+    wheel_y = swy;
+    ldouble = sdb;
+    ein.lpress = ein.lrel = ein.rpress = ein.wheel_x = ein.wheel_y = 0;
+}
+
 static void frame(void)
 {
     static int min_for = -1;            /* the pane needs a wider window */
@@ -10843,6 +11783,17 @@ static void frame(void)
             if (sc) *sc -= wheel_y * 48;           /* clamped when the pane is next drawn */
             wheel_y = 0;
         }
+        if (drag.kind == D_MOVE && over_library()) {   /* say what a drop here does */
+            SDL_Rect pr = panel_rect();
+            fill(pr, alpha(ACCENT, 60));
+            outline(pr, ACCENT);
+            SDL_Rect b = {pr.x + 12, pr.y + pr.h / 2 - 30, pr.w - 24, 2 * font_h + 24};
+            fill(b, PANEL);
+            outline(b, ACCENT);
+            text_center((SDL_Rect){b.x, b.y + 6, b.w, font_h + 4}, sel_count() > 1 && csel[drag.clip]
+                        ? "Drop: one new sound of the selected clips" : "Drop: a new sound of this clip", HEAD);
+            text_center((SDL_Rect){b.x, b.y + 12 + font_h, b.w, font_h + 4}, "with its track's effects", TEXT);
+        }
         status_bar();
     }
     if (modal) {
@@ -10867,8 +11818,8 @@ static void frame(void)
         waiting_overlay("Choose a file in the file dialog...");
     }
 
-    if (drag.kind != D_NONE && ldown) update_drag();
-    if (lrel && drag.kind != D_NONE) end_drag();
+    if (drag.kind != D_NONE && ldown && !drag_in_editor) update_drag();   /* the editor runs its own */
+    if (lrel && drag.kind != D_NONE && !drag_in_editor) end_drag();
     if (lrel) roll_quiet();
     if (lrel && mouse_pad >= 0) {       /* a clicked pad is let go */
         input_event(SRC_MOUSE, mouse_pad, 0, 0, -1);
@@ -10900,6 +11851,7 @@ static void frame(void)
         dd.changed_for = NULL;
         if (example_pick >= 0 && example_pick < nexamples) request(ACT_OPEN_EXAMPLE, example_path[example_pick]);
     }
+    take_check();
     rec_drain();
     if (drag.kind == D_NONE && !(pads_rec && P.playing) && !tempo_from)   /* a take, or a tempo change */
         history_check();                                                    /* with its clips: one step */
@@ -11299,6 +12251,29 @@ int main(int argc, char **argv)
             mx = cx + 40;                        /* hover inside the list */
             my = cy + 60;
         }
+        if (getenv("TINYDAW_SHOT_EDITOR")) {     /* the clip editor window, for clip N */
+            editor_open(atoi(getenv("TINYDAW_SHOT_EDITOR")));
+            if (ewin) {
+                for (int i = 0; i < 2; i++) editor_frame();
+                SDL_Renderer *m = ren;           /* draw it once more and keep the pixels */
+                int ew, eh;
+                SDL_GetWindowSize(ewin, &ew, &eh);
+                ren = eren;
+                int sw = W, sh = H;
+                W = ew;
+                H = eh;
+                editor_draw();
+                SDL_Surface *es = SDL_CreateRGBSurfaceWithFormat(0, ew, eh, 32, SDL_PIXELFORMAT_ARGB8888);
+                SDL_RenderReadPixels(eren, NULL, SDL_PIXELFORMAT_ARGB8888, es->pixels, es->pitch);
+                int ok = SDL_SaveBMP(es, shot) == 0;
+                SDL_FreeSurface(es);
+                ren = m;
+                W = sw;
+                H = sh;
+                SDL_Quit();
+                return ok ? 0 : 1;
+            }
+        }
         for (int i = 0; i < 2; i++) frame();
         SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
         SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, s->pixels, s->pitch);
@@ -11317,8 +12292,25 @@ int main(int argc, char **argv)
             case SDL_QUIT:
                 if (SDL_AtomicGet(&fd_state) == 0) request(ACT_QUIT, NULL);
                 break;
-            case SDL_MOUSEMOTION: mx = e.motion.x; my = e.motion.y; break;
+            case SDL_MOUSEMOTION:
+                if (ewin && e.motion.windowID == ewin_id) {
+                    ein.mx = e.motion.x;
+                    ein.my = e.motion.y;
+                } else {
+                    mx = e.motion.x;
+                    my = e.motion.y;
+                }
+                break;
             case SDL_MOUSEBUTTONDOWN:
+                if (ewin && e.button.windowID == ewin_id) {   /* the editor window has its own mouse */
+                    ein.mx = e.button.x;
+                    ein.my = e.button.y;
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        ein.lpress = ein.ldown = 1;
+                        ein.ldouble = e.button.clicks >= 2;
+                    } else if (e.button.button == SDL_BUTTON_RIGHT) ein.rpress = 1;
+                    break;
+                }
                 mx = e.button.x;
                 my = e.button.y;
                 if (e.button.button == SDL_BUTTON_LEFT) {
@@ -11328,12 +12320,23 @@ int main(int argc, char **argv)
                 else if (e.button.button == SDL_BUTTON_RIGHT) rpress = 1;
                 break;
             case SDL_MOUSEBUTTONUP:
-                if (e.button.button == SDL_BUTTON_LEFT) {
-                    lrel = 1;
-                    ldown = 0;
+                if (e.button.button == SDL_BUTTON_LEFT) {   /* to the window that owns the drag, else the one under it */
+                    int to_editor = drag.kind != D_NONE ? drag_in_editor : ewin && e.button.windowID == ewin_id;
+                    if (to_editor) {
+                        ein.lrel = 1;
+                        ein.ldown = 0;
+                    } else {
+                        lrel = 1;
+                        ldown = 0;
+                    }
                 }
                 break;
             case SDL_MOUSEWHEEL:
+                if (ewin && e.wheel.windowID == ewin_id) {
+                    ein.wheel_y += e.wheel.y;
+                    ein.wheel_x += e.wheel.x;
+                    break;
+                }
                 wheel_y += e.wheel.y;
                 wheel_x += e.wheel.x;
                 break;
@@ -11351,6 +12354,14 @@ int main(int argc, char **argv)
             case SDL_KEYDOWN:
                 if (numedit_key(e.key.keysym)) break;      /* typing a value */
                 if (tf_key(e.key.keysym)) break;           /* typing a name */
+                if (ewin && e.key.windowID == ewin_id) {    /* the editor: Esc closes it, the rest as usual */
+                    if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        editor_close();
+                        break;
+                    }
+                    key(e.key.keysym);
+                    break;
+                }
                 if (pads_take_key(e.key.keysym) && e.key.keysym.sym != SDLK_ESCAPE) {
                     int sc = e.key.keysym.scancode, bound = 0;
                     for (int i = 0; i < NPADS; i++) bound |= binds[i].key == sc;
@@ -11365,6 +12376,13 @@ int main(int argc, char **argv)
                 if (pads_take_key(e.key.keysym)) input_event(SRC_KEY, e.key.keysym.scancode, 0, 0, -1);
                 break;
             case SDL_WINDOWEVENT:               /* the desktop theme may have changed meanwhile */
+                if (e.window.event == SDL_WINDOWEVENT_CLOSE) {   /* with two windows, there's no SDL_QUIT */
+                    if (ewin && e.window.windowID == ewin_id) editor_close();
+                    else if (SDL_AtomicGet(&fd_state) == 0) request(ACT_QUIT, NULL);
+                    break;
+                }
+                if (e.window.event == SDL_WINDOWEVENT_LEAVE && ewin && e.window.windowID == ewin_id)
+                    ein.mx = ein.my = -1000;
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) theme_follow();
                 break;
             case SDL_JOYDEVICEADDED: joy_added(e.jdevice.which); break;
@@ -11378,9 +12396,18 @@ int main(int argc, char **argv)
             }
         }
         mods = SDL_GetModState();
-        if (lrel && drag.kind != D_NONE) update_drag();     /* final position */
+        if (lrel && drag.kind != D_NONE && !drag_in_editor) update_drag();   /* final position */
+        if (ein.lrel && drag.kind != D_NONE && drag_in_editor) {             /* the editor's, likewise */
+            int sx = mx, sy = my;
+            mx = ein.mx;
+            my = ein.my;
+            update_drag();
+            mx = sx;
+            my = sy;
+        }
         frame();
         SDL_RenderPresent(ren);
+        editor_frame();
         if (quit_now) running = 0;
         if (!(flags & SDL_RENDERER_PRESENTVSYNC)) SDL_Delay(8);
     }

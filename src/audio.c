@@ -6,6 +6,7 @@
 #include <math.h>
 #include <samplerate.h>
 #include <sndfile.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -998,6 +999,55 @@ static float *render_range(const Project *p, long a, long b, int only_track, lon
     }
     *len = end;
     return buf;
+}
+
+int sample_bounce(Project *p, const int *clips, int n, const char *path, const char *name, char *err, size_t errlen)
+{
+    if (n <= 0) {
+        snprintf(err, errlen, "no clips");
+        return -1;
+    }
+    Project *t = malloc(sizeof *t);              /* a copy with only these clips (sounds shared, read only) */
+    if (!t) {
+        snprintf(err, errlen, "out of memory");
+        return -1;
+    }
+    memcpy(t, p, sizeof *t);
+    long a = LONG_MAX, b = 0;
+    t->nclips = 0;
+    for (int i = 0; i < n; i++) {
+        if (clips[i] < 0 || clips[i] >= p->nclips) continue;
+        const Clip *c = &p->clips[clips[i]];
+        t->clips[t->nclips++] = *c;
+        if (c->start < a) a = c->start;
+        if (c->start + c->length > b) b = c->start + c->length;
+    }
+    for (int k = 0; k < t->ntracks; k++) {       /* heard even if muted, and whatever is soloed */
+        t->tracks[k].mute = 0;
+        t->tracks[k].solo = 0;
+    }
+    t->fx.sc_source = -1;                        /* nothing else is playing to duck it */
+    t->playing = 0;
+    long len = 0;
+    float *buf = t->nclips && b > a ? render_range(t, a, b, -1, project_has_tails(t) ? 6L * SR : 0, &len) : NULL;
+    free(t);
+    if (!buf) {
+        snprintf(err, errlen, "nothing to render");
+        return -1;
+    }
+    SF_INFO info = {.samplerate = SR, .channels = 2, .format = SF_FORMAT_WAV | SF_FORMAT_FLOAT};
+    SNDFILE *f = sf_open(path, SFM_WRITE, &info);
+    if (!f) {
+        snprintf(err, errlen, "can't write %s: %s", path, sf_strerror(NULL));
+        free(buf);
+        return -1;
+    }
+    sf_writef_float(f, buf, len);
+    sf_close(f);
+    free(buf);
+    int idx = sample_import(p, path, err, errlen);
+    if (idx >= 0) snprintf(p->samples[idx].name, sizeof p->samples[idx].name, "%s", name);
+    return idx;
 }
 
 static float tpdf(void)                           /* triangular noise, +-1 LSB at 16-bit */

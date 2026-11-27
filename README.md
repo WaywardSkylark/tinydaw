@@ -12,11 +12,11 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
   bass, supersaws, pads, keys, drum hits, risers), shaped with five plain controls like
   *brightness* and *grit*. Also plain tones, and WAV, FLAC, OGG and MP3 files.
 - **A real mixer:** per-track filter, EQ, drive, pan and sidechain ducking, plus delay and reverb.
-- **Sings your words:** type a line, pick a tune and a voice (four clear singers, or robot,
-  talkbox, choir and whisper), and it sings it, in 12 languages. Uses the free eSpeak NG speech program.
+- **Sings your words:** type a line, pick a tune and a voice, and it sings it, in 12 languages.
 - **Piano roll and automation:** write melodies note by note, and draw volume, pan, filter and
   send changes over time.
-- **Live play:** 16 pads and a MIDI instrument, with recording onto the timeline.
+- **Live play:** 16 pads and a MIDI instrument, played from the keyboard, a controller or MIDI, and
+  recorded onto the timeline.
 - **Exports** to WAV, AIFF, FLAC, OGG, Opus or MP3, as a full mix or as one file per track.
 - **Looks how you like:** Dark, Light, follow-your-desktop, Windows XP, Frutiger Aero and Blender themes.
 
@@ -80,10 +80,11 @@ Settings > **Keys** lists every shortcut.
 | Put a sound in the song | Drag it from the library onto a track |
 | Hear a sound first | Click it in the library (click again to stop) |
 | Remove a sound | The **×** on its row in the library, or right-click it > **Remove from the library**. Its clips go too; Ctrl+Z brings both back |
-| Copy a sound | Right-click a library sound, a pad or the instrument slot > **Copy**, then right-click another > **Paste** (or Ctrl+C / Ctrl+V with the pointer over them). Pad to pad copies the pad's settings too; a pitched pad pasted into the library becomes a library sound at that pitch |
+| Copy a sound | Right-click a library sound, pad or the instrument slot > **Copy**, then right-click another > **Paste** (or Ctrl+C / Ctrl+V over them). Pad to pad copies its settings too |
+| Make a sound of clips | Drag clips onto the library: they become one new sound with their tracks' effects, saved as a WAV in `Music/tinydaw/Sounds` |
 | Move a clip | Drag it, in time and between tracks. Arrow keys nudge it |
-| Trim a clip | Drag its left or right edge |
-| Fade a clip | Drag the small squares on its top corners |
+| Trim / fade a clip | Drag its edges, or the small squares on its top corners |
+| Edit a clip in detail | Double-click it: a window opens with a large waveform (trim, fade, zoom, click to hear), exact start, length and offset, gain, pitch, reverse, fades, and Normalize, Fit to whole bars, Split at the playhead, New sound with its effects and Delete |
 | Make a clip louder or quieter | Alt + mouse wheel over it |
 | Transpose / reverse a clip | `[` and `]` move it a semitone, Ctrl+R plays it backwards |
 | Select several | Drag a box over empty timeline, Shift+click to add or remove, Ctrl+A for all, Esc for none. Moves, deletes, copies, transposes and gain changes then apply to all of them |
@@ -94,9 +95,8 @@ Settings > **Keys** lists every shortcut.
 | Snap to the grid | **Snap** steps through off, bar, 1/2 … 1/16; its arrow opens the list. Hold Shift while dragging to ignore it |
 | Jump around | Ctrl+←/→ a bar, Ctrl+Shift+←/→ a beat, Alt+←/→ to the next clip edge, F shows the playhead, Z zooms to fit the song |
 | Zoom / scroll | Ctrl + wheel to zoom, wheel to scroll, + and - also zoom |
-| Change any number | Click it and type, or drag it, or use the wheel (Shift for fine steps) |
-| Change a number | Drag it sideways, use the mouse wheel over it, or click it and type. Note boxes (like New sound's **Note**) take names such as `C4`, `F#3` or `Bb2`, or a MIDI number |
-| Tempo | Click **BPM** and type, or use the metronome menu (±1, half, double, tap tempo with T). Clips keep their times, except the selected ones: they keep their place in bars and beats and play at the new speed. Beat loops, chords, tones and sung lines are made again at the new tempo, audio is time-stretched (same pitch), note clips' notes move, and one-shots just move. One Ctrl+Z puts it all back |
+| Change a number | Click it and type, drag it, or use the wheel (Shift for fine steps). Note boxes take names like `C4`, `F#3` or `Bb2` |
+| Tempo | Click **BPM** and type, or use the metronome menu (±1, half, double, tap tempo with T). Selected clips follow the new tempo (audio is time-stretched, recipes are remade); the rest keep their times |
 | Tuning | **A4** beside BPM (415–466 Hz, e.g. 432). New sounds use it |
 | Metronome | **Click** in the top bar, or M. Its arrow sets the sound, 8th/16th ticks, accent and a 1-2 bar count-in |
 | Add a track | **+** next to TRACKS (up to 16). Each track has mute, solo and volume |
@@ -120,7 +120,8 @@ press Enter) to open it. The roll takes over the timeline until you press **Done
 | Hear a note | Click a key on the keyboard |
 
 The bar along the top picks the clip's sound, the note it plays unpitched at (**Root**) and its
-length in bars; a note past the end makes the clip grow. Copies of a note clip share their notes, so
+length in bars; a note past the end makes the clip grow. While the roll is open, **Roll** buttons in
+Theory > Keys and Chords put a chord (or a whole progression, a bar each) into it. Copies of a note clip share their notes, so
 editing one edits all of them; **Make unique** gives a copy its own. `[` and `]` and the Mixer's
 Pitch still transpose a whole note clip.
 
@@ -177,17 +178,12 @@ Generator sounds are saved as recipes, like everything else that tinydaw makes.
    clip** when singing a note clip's melody, so it lines up underneath).
 
 The words are spoken by [eSpeak NG](https://github.com/espeak-ng/espeak-ng), a free speech
-program that tinydaw runs when it needs it. The Clear singers keep eSpeak's own voice: it speaks
-each syllable on one steady pitch, and tinydaw moves that to the note and holds the vowel
-(pitch-synchronous overlap-add, so the vowel keeps its sound), gliding between joined notes. The
-other voices play the words through a vocoder, for a robotic character. The Windows download includes it (in the `espeak-ng` folder); on
-Linux, install it with your package manager. The Singer says so if it can't find it. Sung lines are saved as
-their words and notes, so a project opened where eSpeak NG isn't installed keeps them, silent,
-until it is.
+program: the Windows download includes it, and on Linux it's the `espeak-ng` package. Sung lines are
+saved as words and notes, so they stay in a project (silent) where eSpeak NG is missing.
 
 **Sounds > New sound** builds a plain tone instead: choose sine, square, saw, triangle, noise, kick,
 snare or hat. Then set the note, length, volume and envelope (attack, release), and the tuning (A4,
-415–466 Hz). **Play** lets you hear it before adding it to the library. Pitched and reversed copies made for clips stay out of the library list.
+415–466 Hz). **Play** lets you hear it before adding it to the library.
 
 **Theory** has four tabs. Everything you can hear in them has a **+** that adds it to the library.
 The strip at the top of each tab sets which wave and length those sounds use. Adding the same thing
@@ -209,7 +205,7 @@ twice doesn't make a copy, and the Sounds button counts what you've added.
 | Clip | Gain, pitch, fades and reverse for the selected clips |
 | Track | Volume, pan, a filter (low-, high- or band-pass with cutoff and resonance), 3-band EQ, drive, how much it ducks, and how much it sends to the delay and reverb |
 | Effects | The delay (in time with the tempo, 1/16 to 1/2 including dotted and triplet, feedback, tone, ping-pong), the reverb (size, damping) and the sidechain: which track makes the others duck, and how fast they recover |
-| Live | How far the MIDI pitch wheel bends; the mod wheel opens the filter on the instrument's track |
+| Live | How far pitch bend goes; the mod wheel opens the filter on the instrument's track |
 
 Tracks with effects show `fx` under their name, and every track has a level meter. What you export
 sounds exactly like what you hear, including the delay and reverb dying away after the last note.
@@ -239,8 +235,9 @@ sounds exactly like what you hear, including the delay and reverb dying away aft
   Live sets how far it bends.
 - **Instrument:** a MIDI keyboard plays a chosen sound at every pitch. On a piano keyboard, press
   **Stop MIDI notes triggering pads** in Settings > Input so every key plays the instrument.
-- **Recording:** turn on **Rec**, play the song and play along. Hits become clips, snapped to the
-  grid, and a count-in can play first.
+- **Recording:** press **Rec** (it starts the song, after a count-in if one is set) and play along.
+  A timer runs beside the transport; when you stop, the take is on an open track (a new one if
+  none is free), snapped to the grid. One Ctrl+Z undoes a take.
 
 Controllers and MIDI devices are picked up when they're plugged in, even while tinydaw is running.
 Pads play through their track's effects.
@@ -307,7 +304,7 @@ Each sets up the pads with its own sounds too. `examples/make_examples.py` write
 - **Look:** Dark, Light, System (follows your desktop's dark/light setting), Windows XP, Frutiger
   Aero or Blender.
 - **Audio:** output device, the project's sample rate (44.1 to 192 kHz) and master volume.
-- **Input:** connected controllers and MIDI devices, and MIDI options.
+- **Input:** connected controllers and MIDI devices, MIDI options, and which stick bends pitch.
 - **Keys:** every shortcut.
 - **About:** the version, and where projects, pad bindings and autosaves are kept.
 
@@ -330,8 +327,8 @@ Linux and `%APPDATA%\tinydaw` on Windows.
 
 ## Limits
 
-tinydaw has no MIDI output, no recording from a microphone, and no time-stretching. Its drum patterns are approximations of each
-style, meant as a starting point.
+tinydaw has no MIDI output and no recording from a microphone. Its drum patterns are
+approximations of each style, meant as a starting point, and the Singer sounds synthetic.
 
 ## For developers
 
@@ -362,18 +359,19 @@ style, meant as a starting point.
 **Tests:**
 
 ```sh
-./tinydaw --selftest                      # 150+ checks, driving the real interface with simulated input
+./tinydaw --selftest                      # 280 checks, driving the real interface with simulated input
 ./tinydaw --demo --screenshot ui.bmp      # draw the window off-screen
 TINYDAW_DEBUG_INPUT=1 ./tinydaw           # print every key, controller and MIDI input
 ```
 
 The self-test covers editing, undo, saving and reopening sound for sound, pads, MIDI and controller
-input, every effect measured on rendered audio, the analyzer, the metronome, the themes and the
-example songs.
+input, every effect measured on rendered audio, the Generator and Singer (pitch included), tempo
+changes, the clip editor window, the themes and the example songs.
 
 **Windows builds** are cross-compiled on Linux with llvm-mingw against MSYS2's libraries:
 `make dist-windows`, see [win/README.md](win/README.md). The version lives in `VERSION`, and the
 program, saved projects, the Windows file properties and the zip name all use it.
 
 **Built with** SDL2 and SDL2_ttf (zlib licence), libsndfile and alsa-lib (LGPL-2.1), libsamplerate
-(BSD-2) and the DejaVu fonts. The Windows zip includes their licences.
+(BSD-2) and the DejaVu fonts. The Windows zip includes their licences, and eSpeak NG (GPL-3) as a
+separate program in its own folder.

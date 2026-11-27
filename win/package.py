@@ -27,6 +27,40 @@ def imports(path):
     return [line.split(":", 1)[1].strip() for line in out.splitlines() if "DLL Name:" in line]
 
 
+def bundle_espeak():
+    """eSpeak NG, the speech program the Singer runs, in espeak-ng/ with its own DLLs and voice data.
+
+    It's a separate program (GPL-3), shipped alongside tinydaw rather than built into it."""
+    exe = os.path.join(BIN, "espeak-ng.exe")
+    if not os.path.exists(exe):
+        print("espeak-ng not in the sysroot (run win/fetch-deps.py): the Singer will ask for it")
+        return
+    local = {f.lower(): f for f in os.listdir(BIN) if f.lower().endswith(".dll")}
+    dest = os.path.join(OUT, "espeak-ng", "bin")
+    os.makedirs(dest)
+    shutil.copy2(exe, dest)
+    need, todo = set(), [exe]
+    while todo:
+        for dll in imports(todo.pop()):
+            real = local.get(dll.lower())
+            if real and real not in need:
+                need.add(real)
+                todo.append(os.path.join(BIN, real))
+    for dll in sorted(need):
+        shutil.copy2(os.path.join(BIN, dll), dest)
+    shutil.copytree(os.path.join(BIN, "..", "share", "espeak-ng-data"),
+                    os.path.join(OUT, "espeak-ng", "share", "espeak-ng-data"))
+    with open(os.path.join(OUT, "espeak-ng", "README.txt"), "w", newline="\r\n") as f:
+        f.write("eSpeak NG, the free speech synthesizer that tinydaw's Singer uses to say the words.\n\n"
+                "It is a separate program, distributed here unchanged under the GNU General Public\n"
+                "License version 3 (see licenses/espeak-ng and licenses/pcaudiolib next to tinydaw.exe).\n"
+                "Its source code: https://github.com/espeak-ng/espeak-ng\n"
+                "This build comes from MSYS2: https://packages.msys2.org/base/mingw-w64-espeak-ng\n\n"
+                "To use a different copy, delete this folder and install eSpeak NG, or point the\n"
+                "TINYDAW_ESPEAK environment variable at its espeak-ng.exe.\n")
+    print(f"eSpeak NG bundled with {len(need)} DLLs")
+
+
 def main():
     local = {f.lower(): f for f in os.listdir(BIN) if f.lower().endswith(".dll")}
     exe = os.path.join(HERE, "build", "tinydaw.exe")
@@ -60,6 +94,7 @@ def main():
     for f in sorted(os.listdir(os.path.join(ROOT, "examples"))):
         if f.endswith(".tdaw"):
             shutil.copy2(os.path.join(ROOT, "examples", f), os.path.join(OUT, "examples"))
+    bundle_espeak()
     shutil.copy2(os.path.join(ROOT, "README.md"), OUT)
     shutil.copy2(os.path.join(HERE, "README-windows.txt"), OUT)
     zpath = os.path.join(HERE, "dist", NAME + ".zip")

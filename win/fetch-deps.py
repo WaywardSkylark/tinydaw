@@ -14,7 +14,7 @@ import urllib.request
 
 REPO = "https://repo.msys2.org/mingw/clang64/"
 PREFIX = "mingw-w64-clang-x86_64-"
-ROOTS = ["SDL2", "SDL2_ttf", "libsndfile", "libsamplerate"]
+ROOTS = ["SDL2", "SDL2_ttf", "libsndfile", "libsamplerate", "espeak-ng"]   # espeak-ng: bundled for the Singer
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, "cache")
 SYSROOT = os.path.join(HERE, "sysroot")

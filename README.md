@@ -180,8 +180,8 @@ The words are spoken by [eSpeak NG](https://github.com/espeak-ng/espeak-ng), a f
 program that tinydaw runs when it needs it. The Clear singers keep eSpeak's own voice: it speaks
 each syllable on one steady pitch, and tinydaw moves that to the note and holds the vowel
 (pitch-synchronous overlap-add, so the vowel keeps its sound), gliding between joined notes. The
-other voices play the words through a vocoder, for a robotic character. Install it with your package manager on Linux, or the `.msi`
-from its Releases page on Windows; the Singer says so if it can't find it. Sung lines are saved as
+other voices play the words through a vocoder, for a robotic character. The Windows download includes it (in the `espeak-ng` folder); on
+Linux, install it with your package manager. The Singer says so if it can't find it. Sung lines are saved as
 their words and notes, so a project opened where eSpeak NG isn't installed keeps them, silent,
 until it is.
 

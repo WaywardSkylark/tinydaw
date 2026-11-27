@@ -4976,8 +4976,8 @@ static int singer(int x, int y, int w)
         text(x + 12, ty, "Singing needs eSpeak NG, a free speech program.", HEAD);
         ty += font_h + 8;
 #ifdef _WIN32
-        text(x + 12, ty, "Get it from github.com/espeak-ng/espeak-ng: under", TEXT);
-        text(x + 12, ty + font_h + 4, "Releases, download the .msi and install it.", TEXT);
+        text(x + 12, ty, "It comes in the espeak-ng folder next to tinydaw.exe:", TEXT);
+        text(x + 12, ty + font_h + 4, "unzip tinydaw again to get it back.", TEXT);
 #else
         text(x + 12, ty, "Install the espeak-ng package, for example:", TEXT);
         text(x + 12, ty + font_h + 4, "sudo pacman -S espeak-ng   or   sudo apt install espeak-ng", TEXT);
@@ -8138,6 +8138,7 @@ static int selftest(void)
         MET.sub = 1;
         MET.countin = 1;
         MET.countin_rec_only = 0;
+        if (dev) SDL_PauseAudioDevice(dev, 1);  /* only this test drives the audio, or it races */
         LOCK();
         P.playing = 0;
         P.loop = 0;
@@ -8154,6 +8155,7 @@ static int selftest(void)
         long ph_after = P.playhead;
         UNLOCK();
         free(cb);
+        if (dev) SDL_PauseAudioDevice(dev, 0);
         check(ph_during == 0 && ph_after == bf2, "the song waits for the count-in, then plays from where it was");
         toggle_play();
         MET = saved_met;

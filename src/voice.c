@@ -70,6 +70,8 @@ static int find_espeak(void)
     if (n > 0 && n < 1000) {
         wchar_t *slash = wcsrchr(buf, L'\\');
         if (slash) {
+            wcscpy(slash + 1, L"espeak-ng\\bin\\espeak-ng.exe");   /* the copy that comes with tinydaw */
+            if (try_exe(buf)) return 1;
             wcscpy(slash + 1, L"espeak-ng\\espeak-ng.exe");
             if (try_exe(buf)) return 1;
         }

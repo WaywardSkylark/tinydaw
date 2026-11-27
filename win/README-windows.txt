@@ -13,6 +13,9 @@ MIDI devices are found when they're plugged in (tinydaw checks every two seconds
 lets only one program use a MIDI device at a time: close other music software first if a
 keyboard doesn't show up in the Pads pane.
 
+The Singer (Sounds > Singer) uses eSpeak NG, a free speech program that comes in the
+espeak-ng folder. Keep that folder next to tinydaw.exe; nothing else needs installing.
+
 To open .tdaw files by double-clicking, choose "Open with" > tinydaw.exe once and tick
 "Always use this app".
 

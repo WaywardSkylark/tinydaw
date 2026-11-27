@@ -584,7 +584,58 @@ int sample_import(Project *p, const char *path, char *err, size_t errlen)
 /* The audio of `src` shifted `semis` semitones and/or reversed, at the project rate.
  * Plain synthesized tones and chords are made again at the new pitch (exact); anything else is
  * resampled with libsamplerate. */
-static float *variant_render(const Sample *s, int semis, int reverse, long *frames)
+/* WSOLA: the sound cut into overlapping 46 ms frames, each taken from where it lines up best
+ * with the one before (within 12 ms of where time alone would put it), and laid down at the new
+ * spacing. Rhythm stretches, pitch stays. */
+float *time_stretch(const float *in, long n, double factor, long *out_n)
+{
+    long on = (long)(n * factor);
+    if (on < 16) on = 16;
+    float *out = calloc((size_t)on * 2, sizeof(float));
+    if (!out) return NULL;
+    int N = (int)(SR * 0.046) & ~1, Ho = N / 2, D = (int)(SR * 0.012);
+    double *win = malloc((size_t)N * sizeof(double));
+    if (!win) {
+        free(out);
+        return NULL;
+    }
+    for (int i = 0; i < N; i++) win[i] = 0.5 - 0.5 * cos(2 * PI * i / N);
+    long prev = 0;                               /* where the last frame came from */
+    for (long k = 0; k * Ho < on; k++) {
+        long nominal = (long)(k * Ho / factor), best = nominal;
+        if (k > 0) {                             /* line it up with the natural continuation */
+            long want = prev + Ho;
+            double bc = -1e30;
+            for (long d = -D; d <= D; d += 2) {
+                long cand = nominal + d;
+                if (cand < 0 || cand + N / 2 >= n) continue;
+                double c = 0;
+                for (int i = 0; i < N / 2; i += 4) {
+                    long a = want + i, b = cand + i;
+                    if (a >= n) break;
+                    c += (in[2 * a] + in[2 * a + 1]) * (in[2 * b] + in[2 * b + 1]);
+                }
+                if (c > bc) {
+                    bc = c;
+                    best = cand;
+                }
+            }
+        }
+        prev = best;
+        long o = k * Ho;
+        for (int i = 0; i < N && o + i < on; i++) {
+            long si = best + i;
+            if (si < 0 || si >= n) continue;
+            out[2 * (o + i)] += (float)(in[2 * si] * win[i]);
+            out[2 * (o + i) + 1] += (float)(in[2 * si + 1] * win[i]);
+        }
+    }
+    free(win);
+    *out_n = on;
+    return out;
+}
+
+static float *variant_render(const Sample *s, int semis, int reverse, double stretch, long *frames)
 {
     float *d = NULL;
     long n = 0;
@@ -609,6 +660,13 @@ static float *variant_render(const Sample *s, int semis, int reverse, long *fram
     } else {
         d = resample(s->data, s->frames, 2, pow(2.0, -semis / 12.0), &n, SRC_SINC_MEDIUM_QUALITY);
     }
+    if (d && stretch > 0 && fabs(stretch - 1) > 1e-6) {
+        long sn;
+        float *st = time_stretch(d, n, stretch, &sn);
+        free(d);
+        d = st;
+        n = sn;
+    }
     if (d && reverse) {
         for (long i = 0, j = n - 1; i < j; i++, j--) {
             float l = d[2 * i], r = d[2 * i + 1];
@@ -628,20 +686,32 @@ int sample_base(const Project *p, int s)
     return s;
 }
 
+static double stretch_of(const Sample *s) { return s->stretch > 0 ? s->stretch : 1; }
+
 int sample_variant(Project *p, int src, int semis, int reverse)
+{
+    double st = src >= 0 && src < p->nsamples && p->samples[src].pitched ? stretch_of(&p->samples[src]) : 1;
+    return sample_variant_ex(p, src, semis, reverse, st);
+}
+
+int sample_variant_ex(Project *p, int src, int semis, int reverse, double stretch)
 {
     src = sample_base(p, src);
     if (src < 0 || src >= p->nsamples) return -1;
-    if (semis == 0 && !reverse) return src;
+    if (fabs(stretch - 1) < 1e-6) stretch = 1;
+    if (semis == 0 && !reverse && stretch == 1) return src;
     for (int i = 0; i < p->nsamples; i++) {
         const Sample *o = &p->samples[i];
-        if (o->pitched && o->src == src && o->semis == semis && o->reversed == !!reverse) return i;
+        if (o->pitched && o->src == src && o->semis == semis && o->reversed == !!reverse &&
+            fabs(stretch_of(o) - stretch) < 1e-6)
+            return i;
     }
     char name[96];
     snprintf(name, sizeof name, "%.70s%s%s", p->samples[src].name, reverse ? " rev" : "", "");
     if (semis) snprintf(name + strlen(name), sizeof name - strlen(name), " %+d", semis);
+    if (stretch != 1) snprintf(name + strlen(name), sizeof name - strlen(name), " x%.2f", stretch);
     long n;
-    float *d = variant_render(&p->samples[src], semis, reverse, &n);
+    float *d = variant_render(&p->samples[src], semis, reverse, stretch, &n);
     if (!d) return -1;
     int idx = sample_add(p, name, d, n);
     if (idx >= 0) {
@@ -650,8 +720,84 @@ int sample_variant(Project *p, int src, int semis, int reverse)
         t->src = src;
         t->semis = semis;
         t->reversed = !!reverse;
+        t->stretch = stretch;
     }
     return idx;
+}
+
+/* A recipe sound made again at `bpm` (beat loops, chords, tones and sung lines are made in beats),
+ * reusing one made before. -1 when `s` isn't made at a tempo. */
+static int remake_at_bpm(Project *p, int s, double bpm)
+{
+    const Sample *b = &p->samples[s];
+    int kind = b->vocal ? 3 : b->is_beat == 1 ? 1 : b->generated && !b->is_beat && b->gen.wave < WAVE_KICK ? 2 : 0;
+    if (!kind) return -1;
+    for (int i = 0; i < p->nsamples; i++) {      /* made at this tempo already? */
+        const Sample *o = &p->samples[i];
+        if (o->removed || o->pitched) continue;
+        if (kind == 3 && o->vocal && fabs(o->voc.bpm - bpm) < 1e-6) {
+            VocalSpec a = o->voc, c = b->voc;
+            a.bpm = c.bpm = 0;
+            if (!memcmp(&a, &c, sizeof a)) return i;
+        } else if (kind == 1 && o->is_beat == 1 && fabs(o->gen_bpm - bpm) < 1e-6 && o->beat_mask == b->beat_mask &&
+                   !memcmp(&o->beat, &b->beat, sizeof o->beat)) {
+            return i;
+        } else if (kind == 2 && o->generated && !o->is_beat && fabs(o->gen_bpm - bpm) < 1e-6 &&
+                   !memcmp(&o->gen, &b->gen, sizeof o->gen) && o->nchord == b->nchord &&
+                   !memcmp(o->chord, b->chord, sizeof o->chord)) {
+            return i;
+        }
+    }
+    char name[96];
+    snprintf(name, sizeof name, "%s", b->name);
+    double keep = p->bpm;
+    int idx = -1;
+    if (kind == 3) {
+        VocalSpec v = b->voc;
+        v.bpm = bpm;
+        char err[200];
+        idx = sample_generate_vocal(p, &v, name, err, sizeof err);
+    } else {
+        p->bpm = bpm;
+        if (kind == 1) {
+            BeatSpec spec = b->beat;
+            idx = sample_generate_beat(p, &spec, b->beat_mask, name);
+        } else if (b->nchord) {
+            GenParams g = b->gen;
+            int chord[6];
+            memcpy(chord, b->chord, sizeof chord);
+            idx = sample_generate_notes(p, &g, chord, b->nchord, name);
+        } else {
+            GenParams g = b->gen;
+            idx = sample_generate(p, &g);
+        }
+        p->bpm = keep;
+    }
+    if (idx >= 0) {
+        snprintf(p->samples[idx].name, sizeof p->samples[idx].name, "%s", name);
+        p->samples[idx].hidden = 1;              /* a copy for clips, not a new library sound */
+    }
+    return idx;
+}
+
+int sample_at_tempo(Project *p, int s, double ratio)
+{
+    if (s < 0 || s >= p->nsamples || ratio <= 0) return -1;
+    const Sample *cur = &p->samples[s];
+    int base = sample_base(p, s);
+    int semis = cur->pitched ? cur->semis : 0, rev = cur->pitched ? cur->reversed : 0;
+    double st = cur->pitched ? stretch_of(cur) : 1;
+    const Sample *b = &p->samples[base];
+    if (b->vocal) {
+        int nb = remake_at_bpm(p, base, b->voc.bpm / ratio);
+        return nb < 0 ? -1 : sample_variant_ex(p, nb, semis, rev, st);
+    }
+    if (b->is_beat == 1 || (b->generated && !b->is_beat && b->gen.wave < WAVE_KICK)) {
+        int nb = remake_at_bpm(p, base, b->gen_bpm / ratio);
+        return nb < 0 ? -1 : sample_variant_ex(p, nb, semis, rev, st);
+    }
+    if (b->synth || b->is_beat == 2 || b->generated) return -1;   /* one-shots keep their length */
+    return sample_variant_ex(p, base, semis, rev, st * ratio);     /* audio: stretched */
 }
 
 int sample_pitched(Project *p, int src, int semis)
@@ -687,7 +833,7 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         else if (s->generated) nd = render_gen(&s->gen, s->gen_bpm, &nf);
         else if (s->path[0]) nd = load_file(s->path, &nf, err, sizeof err);
         else if (s->pitched && s->src >= 0 && s->src < i)
-            nd = variant_render(&p->samples[s->src], s->semis, s->reversed, &nf);
+            nd = variant_render(&p->samples[s->src], s->semis, s->reversed, s->stretch, &nf);
         if (nd) {
             rebuilt++;
         } else {

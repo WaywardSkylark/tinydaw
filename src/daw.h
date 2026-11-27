@@ -148,6 +148,9 @@ typedef struct {
     int pitched;            /* a variant of sample `src`: shifted `semis` semitones and/or reversed.
                              * Made for clip pitch/reverse and pad recording; hidden in the library */
     int src, semis, reversed;
+    int listed;             /* a pitched copy shown in the library anyway (pasted there from a pad) */
+    double stretch;         /* a variant time-stretched this many times longer (0 or 1 = not) */
+    int hidden;             /* a copy remade at another tempo for clips: kept out of the library list */
     int synth;              /* made in the Generator: rebuilt from syn */
     SynthSound syn;
     int vocal;              /* made in the Singer: rebuilt from voc (needs eSpeak NG) */
@@ -344,6 +347,13 @@ void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);
 /* A copy of sample `src` shifted by `semis` semitones and/or reversed; reuses an existing one.
  * Returns src itself for (0, 0). */
 int sample_variant(Project *p, int src, int semis, int reverse);
+int sample_variant_ex(Project *p, int src, int semis, int reverse, double stretch);
+/* Longer by `factor`, at the same pitch (WSOLA). Stereo in and out. */
+float *time_stretch(const float *in, long frames, double factor, long *out_frames);
+/* The sound `s` remade to last `ratio` times as long, as a tempo change needs: recipes made at a
+ * tempo are made again at the new one, audio is time-stretched. -1 for one-shots (a drum hit, a
+ * Generator sound), which keep their length. */
+int sample_at_tempo(Project *p, int s, double ratio);
 int sample_pitched(Project *p, int src, int semis);
 int sample_base(const Project *p, int s);       /* the original a variant was made from */
 

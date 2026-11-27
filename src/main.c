@@ -9,6 +9,7 @@
 #include "scenes.h"
 #include "compat.h"
 
+#include <ctype.h>
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <math.h>
@@ -407,6 +408,16 @@ static double pps = 110;                /* pixels per second */
 static int selected = -1;              /* the clip clicked last (the Mixer pane edits it) */
 static unsigned char csel[MAX_CLIPS];   /* every selected clip; selected is always one of them */
 static int lib_scroll = 0;
+/* A tempo edit by hand (BPM box, its menu, tap tempo): the tempo it started from, and when it
+ * last moved. Once it settles, the selected clips are matched to the new tempo (tempo_apply). */
+static double tempo_from;
+static Uint32 tempo_at;
+static void tempo_touch(double before)
+{
+    if (P.bpm == before) return;
+    if (tempo_from == 0) tempo_from = before;
+    tempo_at = SDL_GetTicks();
+}
 static SDL_Rect lib_rects[MAX_SAMPLES];  /* where each library row was drawn (used by --selftest) */
 static GenParams G = {WAVE_SAW, 45, 1.0, 0.6, 5, 60, 440};
 
@@ -812,8 +823,11 @@ static void tap_tempo(void)             /* tap along: the average gap sets the t
     if (ntaps >= 2) {
         double bpm = 60000.0 * (ntaps - 1) / (taps[ntaps - 1] - taps[0]);
         if (bpm >= 40 && bpm <= 300) {
+            double before = P.bpm;
             P.bpm = round(bpm);
-            status("Tempo %.0f BPM from %d taps (clips keep their times)", P.bpm, ntaps);
+            tempo_touch(before);
+            status("Tempo %.0f BPM from %d taps (%s)", P.bpm, ntaps,
+                   sel_count() ? "the selected clips follow it" : "clips keep their times; select some to have them follow");
         }
     } else {
         status("Tap: keep tapping on the beat");
@@ -1280,6 +1294,7 @@ static struct {
     double *v, lo, hi, value;
     char buf[24];
     SDL_Rect r;
+    int *iv;                            /* typing a note (note_number) instead of a number */
 } numedit;
 
 static void numedit_begin(double *v, double lo, double hi)
@@ -1287,6 +1302,7 @@ static void numedit_begin(double *v, double lo, double hi)
     numedit.active = 1;
     numedit.pending = 0;
     numedit.v = v;
+    numedit.iv = NULL;
     numedit.lo = lo;
     numedit.hi = hi;
     numedit.buf[0] = 0;                  /* start empty: just type the new value */
@@ -1294,10 +1310,45 @@ static void numedit_begin(double *v, double lo, double hi)
     status("Type a value (%g to %g), Enter to set it, Esc to cancel", lo, hi);
 }
 
+/* A typed note: a name like C4, F#3, Bb2 or Eb (octave 4 when left out), or a MIDI number.
+ * Returns -1 when it isn't one. */
+static int parse_note(const char *s)
+{
+    while (*s == ' ') s++;
+    char *end;
+    if (isdigit((unsigned char)*s)) {
+        long v = strtol(s, &end, 10);
+        return *end ? -1 : (int)v;
+    }
+    static const int PC[7] = {9, 11, 0, 2, 4, 5, 7};    /* A B C D E F G */
+    char c = (char)toupper((unsigned char)*s);
+    if (c < 'A' || c > 'G') return -1;
+    int pc = PC[c - 'A'];
+    s++;
+    while (*s == '#' || *s == 'b' || *s == 's') pc += *s++ == 'b' ? -1 : 1;
+    int oct = 4;
+    if (*s) {
+        long o = strtol(s, &end, 10);
+        if (*end || end == s) return -1;
+        oct = (int)o;
+    }
+    return (oct + 1) * 12 + pc;
+}
+
 static void numedit_end(int commit)
 {
     if (!numedit.active) return;
     numedit.active = 0;
+    if (numedit.iv) {                   /* a note */
+        int v = parse_note(numedit.buf);
+        if (commit && numedit.buf[0] && v >= 0) {
+            numedit.value = v < numedit.lo ? numedit.lo : v > numedit.hi ? numedit.hi : v;
+            numedit.pending = 1;
+        } else if (commit && numedit.buf[0]) {
+            status("\"%s\" isn't a note: try C4, F#3 or Bb2", numedit.buf);
+        }
+        return;
+    }
     char *end;
     double v = strtod(numedit.buf, &end);
     if (commit && numedit.buf[0] && end != numedit.buf) {
@@ -1311,7 +1362,8 @@ static void numedit_text(const char *t)
     if (!numedit.active) return;
     for (; *t; t++) {
         size_t n = strlen(numedit.buf);
-        if (strchr("0123456789.-", *t) && n + 1 < sizeof numedit.buf) {
+        const char *ok = numedit.iv ? "0123456789-ABCDEFGabcdefg#" : "0123456789.-";
+        if (*t && strchr(ok, *t) && n + 1 < sizeof numedit.buf) {
             numedit.buf[n] = *t;
             numedit.buf[n + 1] = 0;
         }
@@ -1436,6 +1488,22 @@ static void number(SDL_Rect r, const char *label, double *v, double lo, double h
 static void note_number(SDL_Rect r, const char *label, int *v)
 {
     char buf[16];
+    if (numedit.pending && numedit.iv == v) {
+        *v = (int)numedit.value;
+        numedit.pending = 0;
+        numedit.iv = NULL;
+    }
+    if (numedit.active && numedit.iv == v) {     /* being typed into */
+        numedit.r = r;
+        fill(r, PANEL);
+        outline(r, ACCENT);
+        outline((SDL_Rect){r.x + 1, r.y + 1, r.w - 2, r.h - 2}, ACCENT);
+        text(r.x + 8, r.y + (r.h - font_h) / 2, label, DIM);
+        int tw = text_w(numedit.buf), tx = r.x + r.w - 10 - tw;
+        text(tx, r.y + (r.h - font_h) / 2, numedit.buf, TEXT);
+        if ((SDL_GetTicks() / 500) % 2 == 0) fill((SDL_Rect){tx + tw + 1, r.y + 6, 2, r.h - 12}, ACCENT);
+        return;
+    }
     note_name(*v, buf, sizeof buf);
     number_box(r, label, buf, drag.kind == D_NOTE);
     if (drag.kind == D_NONE && hit(r)) {
@@ -1526,14 +1594,15 @@ static void state_capture(State *s)
     s->inst_root = P.inst_root;
     s->inst_track = P.inst_track;
     s->fx = P.fx;
-    for (int i = 0; i < MAX_SAMPLES; i++) s->removed[i] = i < P.nsamples && P.samples[i].removed;
+    for (int i = 0; i < MAX_SAMPLES; i++)   /* bit 1: removed, bit 2: listed */
+        s->removed[i] = i < P.nsamples ? (P.samples[i].removed != 0) | (P.samples[i].listed != 0) << 1 : 0;
     s->label[0] = 0;
 }
 
 static int removed_same(const State *s)
 {
     for (int i = 0; i < P.nsamples; i++)
-        if (s->removed[i] != (P.samples[i].removed != 0)) return 0;
+        if (s->removed[i] != ((P.samples[i].removed != 0) | (P.samples[i].listed != 0) << 1)) return 0;
     return 1;
 }
 
@@ -1569,14 +1638,22 @@ static void state_restore(const State *s)
     P.inst_root = s->inst_root;
     P.inst_track = s->inst_track;
     P.fx = s->fx;
-    for (int i = 0; i < P.nsamples; i++) P.samples[i].removed = s->removed[i];
+    for (int i = 0; i < P.nsamples; i++) {
+        P.samples[i].removed = s->removed[i] & 1;
+        P.samples[i].listed = s->removed[i] >> 1 & 1;
+    }
     UNLOCK();
 }
 
 /* What changed between a snapshot and the project now, in a few words. */
 static void describe(const State *s, char *buf, size_t n)
 {
-    if (!removed_same(s)) snprintf(buf, n, "remove a sound");
+    if (!removed_same(s)) {
+        int back = 0;                       /* a sound came (back) into the library, or went */
+        for (int i = 0; i < P.nsamples; i++)
+            back |= ((s->removed[i] & 1) && !P.samples[i].removed) || (!(s->removed[i] & 2) && P.samples[i].listed);
+        snprintf(buf, n, back ? "paste a sound" : "remove a sound");
+    }
     else if (s->nnotes != P.nnotes || memcmp(s->notes, P.notes, (size_t)P.nnotes * sizeof(Note)))
         snprintf(buf, n, "%s", P.nnotes > s->nnotes ? "add notes" : P.nnotes < s->nnotes ? "delete notes" : "note edit");
     else if (s->nautos != P.nautos || memcmp(s->autos, P.autos, (size_t)P.nautos * sizeof(AutoPoint)))
@@ -1625,6 +1702,7 @@ static void history_reset(void)
 
 static void undo_redo(int redo)
 {
+    tempo_from = 0;                         /* a tempo edit in progress is overtaken */
     State *from = redo ? redo_stack : undo_stack, *to = redo ? undo_stack : redo_stack;
     int *nfrom = redo ? &nredo : &nundo, *nto = redo ? &nundo : &nredo;
     if (drag.kind != D_NONE) return;
@@ -1784,6 +1862,7 @@ static void replace_project(Project *np)
     free(old);
     free(np);
     sel_clear();
+    tempo_from = 0;
     view_start = 0;
     lib_scroll = 0;
     drag.kind = D_NONE;
@@ -2133,6 +2212,14 @@ static SDL_Joystick *joys[MAX_JOYS];
 static int njoys, joy_gc[MAX_JOYS];
 static Sint16 axis_rest[MAX_JOYS][16];
 static Uint8 axis_on[MAX_JOYS][16], hat_bits[MAX_JOYS][4];
+/* A stick can bend pitch like a MIDI pitch wheel: which one (JB_*), and each controller's raw
+ * axis numbers for left x, left y, right x, right y (from SDL's controller mapping). */
+enum { JB_OFF, JB_LEFT_Y, JB_RIGHT_Y, JB_LEFT_X, JB_RIGHT_X, JB_COUNT };
+static const char *const JB_NAMES[JB_COUNT] = {"Off", "Left stick up/down", "Right stick up/down",
+                                               "Left stick left/right", "Right stick left/right"};
+static int joy_bend = JB_RIGHT_Y;
+static int stick_axis[MAX_JOYS][4];
+static SDL_GameController *joy_ctl[MAX_JOYS];
 
 /* hits waiting to be written onto the timeline (filled under the audio lock, from any thread) */
 typedef struct { int pad, note, down; long frame; } RecEv;
@@ -2172,6 +2259,8 @@ static void binds_load(void)
         int i, k, j, m, v;
         if (sscanf(line, "pad %d key %d joy %d midi %d", &i, &k, &j, &m) == 4 && i >= 0 && i < NPADS)
             binds[i] = (Bind){k, j, m};
+        else if (sscanf(line, "joy_bend %d", &v) == 1 && v >= 0 && v < JB_COUNT)
+            joy_bend = v;
         else if (sscanf(line, "instrument_midi %d", &v) == 1)
             inst_midi = v != 0;
     }
@@ -2186,6 +2275,7 @@ static void binds_save(void)
     for (int i = 0; i < NPADS; i++)
         fprintf(f, "pad %d key %d joy %d midi %d\n", i, binds[i].key, binds[i].joy, binds[i].midi);
     fprintf(f, "instrument_midi %d\n", inst_midi);
+    fprintf(f, "joy_bend %d\n", joy_bend);
     fclose(f);
 }
 
@@ -2344,6 +2434,17 @@ static void joy_added(int device_index)
     joy_gc[k] = SDL_IsGameController(device_index);
     memset(axis_on[k], 0, sizeof axis_on[k]);
     memset(hat_bits[k], 0, sizeof hat_bits[k]);
+    static const int GUESS[4] = {0, 1, 2, 3};   /* the usual layout when SDL has no mapping */
+    static const SDL_GameControllerAxis GC[4] = {SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_AXIS_LEFTY,
+                                                 SDL_CONTROLLER_AXIS_RIGHTX, SDL_CONTROLLER_AXIS_RIGHTY};
+    joy_ctl[k] = joy_gc[k] ? SDL_GameControllerOpen(device_index) : NULL;
+    for (int i = 0; i < 4; i++) {
+        stick_axis[k][i] = GUESS[i];
+        if (joy_ctl[k]) {
+            SDL_GameControllerButtonBind b = SDL_GameControllerGetBindForAxis(joy_ctl[k], GC[i]);
+            if (b.bindType == SDL_CONTROLLER_BINDTYPE_AXIS) stick_axis[k][i] = b.value.axis;
+        }
+    }
     for (int a = 0; a < 16 && a < SDL_JoystickNumAxes(j); a++) {
         Sint16 rest = 0;
         if (!SDL_JoystickGetAxisInitialState(j, a, &rest)) rest = 0;
@@ -2357,9 +2458,12 @@ static void joy_removed(SDL_JoystickID id)
     int k = joy_index(id);
     if (k < 0) return;
     status("Controller disconnected: %s", SDL_JoystickName(joys[k]));
+    if (joy_ctl[k]) SDL_GameControllerClose(joy_ctl[k]);
     SDL_JoystickClose(joys[k]);
     for (int i = k; i < njoys - 1; i++) {
         joys[i] = joys[i + 1];
+        joy_ctl[i] = joy_ctl[i + 1];
+        memcpy(stick_axis[i], stick_axis[i + 1], sizeof stick_axis[i]);
         joy_gc[i] = joy_gc[i + 1];
         memcpy(axis_rest[i], axis_rest[i + 1], sizeof axis_rest[i]);
         memcpy(axis_on[i], axis_on[i + 1], sizeof axis_on[i]);
@@ -2393,6 +2497,18 @@ static void joy_event(const SDL_Event *e)
     case SDL_JOYAXISMOTION: {                /* sticks and triggers act as buttons past 60% */
         int k = joy_index(e->jaxis.which), a = e->jaxis.axis;
         if (k < 0 || a >= 16) break;
+        if (joy_bend != JB_OFF && a == stick_axis[k][(joy_bend == JB_LEFT_Y ? 1 : joy_bend == JB_RIGHT_Y ? 3
+                                                     : joy_bend == JB_LEFT_X ? 0 : 2)]) {
+            /* the bend stick: up (or right) bends up, with a small dead zone, back to centre on release */
+            double v = e->jaxis.value / 32767.0;
+            if (joy_bend == JB_LEFT_Y || joy_bend == JB_RIGHT_Y) v = -v;
+            double m = fabs(v) < 0.12 ? 0 : (fabs(v) - 0.12) / 0.88;
+            float b = (float)(v < 0 ? -m : m);
+            LOCK();
+            P.bend = b < -1 ? -1 : b > 1 ? 1 : b;
+            UNLOCK();
+            break;
+        }
         int d = e->jaxis.value - axis_rest[k][a];
         int range = axis_rest[k][a] < -16000 || axis_rest[k][a] > 16000 ? 65535 : 32767;
         int on_pos = d > range * 0.6, on_neg = d < -range * 0.6;
@@ -2479,6 +2595,8 @@ static void rec_drain(void)
 
 static int pad_sel, pads_scroll, pads_content_h;
 static SDL_Rect pad_rects[NPADS], inst_drop;
+enum { CM_LIB, CM_PAD, CM_INST };       /* what a right-click menu is for */
+static void cm_open(int kind, int idx);
 
 static const char *MODE_NAMES[PAD_MODES] = {"One-shot", "Hold", "Loop"};
 
@@ -2605,7 +2723,7 @@ static int pads_content(int x, int y, int w)
         LOCK();
         for (int i = 0; i < NPADS && s < P.nsamples; i++)
             if (P.pads[i].sample < 0) {
-                while (s < P.nsamples && (P.samples[s].pitched || P.samples[s].removed)) s++;   /* skip clip variants */
+                while (s < P.nsamples && (P.samples[s].pitched || P.samples[s].removed || P.samples[s].hidden)) s++;   /* skip clip variants */
                 if (s >= P.nsamples) break;
                 P.pads[i].sample = s++;
                 filled++;
@@ -2650,6 +2768,11 @@ static int pads_content(int x, int y, int w)
             mouse_pad = i;
             input_event(SRC_MOUSE, i, 110, 1, -1);
             lpress = 0;
+        }
+        if (hov && rpress) {                /* right-click: copy, paste, clear */
+            rpress = 0;
+            pad_sel = i;
+            cm_open(CM_PAD, i);
         }
     }
     y += 4 * (ph + gap) + 8;
@@ -2721,6 +2844,10 @@ static int pads_content(int x, int y, int w)
     text(x, y, "MIDI notes that aren't on a pad play this sound, pitched", DIM);
     y += font_h + 8;
     inst_drop = (SDL_Rect){x, y, w, 30};
+    if (hit(inst_drop) && rpress && drag.kind == D_NONE) {
+        rpress = 0;
+        cm_open(CM_INST, 0);
+    }
     int idrop = drag.kind == D_LIB && hit(inst_drop);
     fill(inst_drop, idrop ? PANEL3 : PANEL2);
     outline(inst_drop, idrop ? HEAD : LINE);
@@ -2771,10 +2898,6 @@ static void pads_pane(void)
     line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;
-    if (inside && wheel_y && drag.kind == D_NONE) {
-        pads_scroll -= wheel_y * 48;
-        wheel_y = 0;
-    }
     int max_scroll = pads_content_h - pane.h > 0 ? pads_content_h - pane.h : 0;
     pads_scroll = pads_scroll < 0 ? 0 : pads_scroll > max_scroll ? max_scroll : pads_scroll;
     SDL_RenderSetClipRect(ren, &pane);
@@ -2964,6 +3087,7 @@ static void metronome_menu(void)
     y += 42;
     text(x, y, "TEMPO", DIM);
     y += font_h + 8;
+    double tempo_before = P.bpm;
     number((SDL_Rect){x, y, 120, 28}, "BPM", &P.bpm, 40, 300, 0.25, "%.1f");
     static const char *const TB[] = {"-1", "+1", "/2", "x2"};
     for (int i = 0; i < 4; i++)
@@ -2971,6 +3095,7 @@ static void metronome_menu(void)
             double v = i == 0 ? P.bpm - 1 : i == 1 ? P.bpm + 1 : i == 2 ? P.bpm / 2 : P.bpm * 2;
             P.bpm = v < 40 ? 40 : v > 300 ? 300 : round(v * 4) / 4;
         }
+    tempo_touch(tempo_before);
     y += 36;
     if (button((SDL_Rect){x, y, 150, 28}, "Tap tempo (T)", 0)) tap_tempo();
     snprintf(buf, sizeof buf, "beat %.0f ms, bar %.2f s", 60000.0 / P.bpm, 240.0 / P.bpm);
@@ -3302,7 +3427,9 @@ static int mixer_content(int x, int y, int w)
     snprintf(buf, sizeof buf, "opens track %d's filter", P.inst_track + 1);
     text(x, y + 6, buf, DIM);
     y += rh;
-    text(x, y, "The pitch wheel bends pads and the instrument live.", DIM);
+    text(x, y, "The pitch wheel (or a controller stick: Settings > Input)", DIM);
+    text(x, y + font_h + 2, "bends pads and the instrument live.", DIM);
+    y += font_h + 2;
     text(x, y + font_h + 2, "Set the instrument's track (Pads pane) to a filter,", DIM);
     text(x, y + 2 * font_h + 4, "then push the mod wheel up to open it.", DIM);
     y += 3 * font_h + 12;
@@ -3317,10 +3444,6 @@ static void mixer_pane(void)
     line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;
-    if (inside && wheel_y && drag.kind == D_NONE) {
-        mixer_scroll -= wheel_y * 48;
-        wheel_y = 0;
-    }
     int max_scroll = mixer_content_h - pane.h > 0 ? mixer_content_h - pane.h : 0;
     mixer_scroll = mixer_scroll < 0 ? 0 : mixer_scroll > max_scroll ? max_scroll : mixer_scroll;
     SDL_RenderSetClipRect(ren, &pane);
@@ -3605,10 +3728,6 @@ static void vis_pane(void)
     line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;
-    if (inside && wheel_y && drag.kind == D_NONE) {
-        vis_scroll -= wheel_y * 48;
-        wheel_y = 0;
-    }
     int max_scroll = vis_content_h - pane.h > 0 ? vis_content_h - pane.h : 0;
     vis_scroll = vis_scroll < 0 ? 0 : vis_scroll > max_scroll ? max_scroll : vis_scroll;
     SDL_RenderSetClipRect(ren, &pane);
@@ -4008,10 +4127,6 @@ static int panel_begin(SDL_Rect pane, int *scroll, int content_h, int *saved_pre
     int inside = hit(pane);
     *saved_press = lpress;
     if (!inside) lpress = 0;
-    if (inside && wheel_y && drag.kind == D_NONE) {
-        *scroll -= wheel_y * 48;
-        wheel_y = 0;
-    }
     int max_scroll = content_h - pane.h > 0 ? content_h - pane.h : 0;
     *scroll = *scroll < 0 ? 0 : *scroll > max_scroll ? max_scroll : *scroll;
     SDL_RenderSetClipRect(ren, &pane);
@@ -4054,13 +4169,209 @@ static void remove_sound(int i)
     else status("Removed \"%s\". Ctrl+Z brings it back.", P.samples[i].name);
 }
 
+
+/* ---- copying sounds between the library, the pads and the instrument (right-click, or Ctrl+C
+ * and Ctrl+V with the pointer over one) */
+
+static struct {
+    int has, sample, from_pad;
+    Pad pad;                            /* a pad's settings, when copied from a pad */
+} sclip;
+enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR };
+static struct {
+    int open, kind, idx, n;
+    int act[4], enabled[4];
+    char label[4][80];
+    SDL_Rect box;
+} cm;
+static int lib_flash = -1;              /* a sound just pasted into the library: lit for a moment */
+static Uint32 lib_flash_at;
+
+static void sound_copy(int kind, int idx)
+{
+    int s = kind == CM_LIB ? idx : kind == CM_PAD ? P.pads[idx].sample : P.inst_sample;
+    if (s < 0 || s >= P.nsamples) return;
+    sclip.has = 1;
+    sclip.sample = s;
+    sclip.from_pad = kind == CM_PAD;
+    if (kind == CM_PAD) sclip.pad = P.pads[idx];
+    status("Copied \"%s\": right-click a pad, the instrument or the library and Paste", P.samples[s].name);
+}
+
+/* the sound the clipboard would put in the library: with a pad's pitch, a pitched copy */
+static int sclip_library_sound(void)
+{
+    if (!sclip.has || sclip.sample < 0 || sclip.sample >= P.nsamples) return -1;
+    if (sclip.from_pad && sclip.pad.pitch) return sample_pitched(&P, sclip.sample, sclip.pad.pitch);
+    return sclip.sample;
+}
+
+static void sound_paste(int kind, int idx)
+{
+    if (!sclip.has || sclip.sample < 0 || sclip.sample >= P.nsamples) return;
+    if (P.samples[sclip.sample].removed) P.samples[sclip.sample].removed = 0;   /* removed since: back it comes */
+    if (kind == CM_PAD) {
+        LOCK();
+        voice_stop(&P, idx, -1);
+        if (sclip.from_pad) {                   /* pad to pad: the settings come too */
+            P.pads[idx] = sclip.pad;
+        } else {
+            P.pads[idx].sample = sclip.sample;
+        }
+        UNLOCK();
+        pad_sel = idx;
+        status("Pad %d plays \"%s\"", idx + 1, P.samples[sclip.sample].name);
+    } else if (kind == CM_INST) {
+        LOCK();
+        P.inst_sample = sclip.sample;
+        UNLOCK();
+        status("MIDI keys and new note clips play \"%s\"", P.samples[sclip.sample].name);
+    } else {                                    /* into the library */
+        int s = sclip_library_sound();
+        if (s < 0) {
+            status("Couldn't make that sound");
+            return;
+        }
+        Sample *sm = &P.samples[s];
+        int shown = (!sm->pitched || sm->listed) && !sm->removed;
+        if (shown && !(sclip.from_pad && sclip.pad.pitch)) {
+            status("\"%s\" is already in the library", sm->name);
+        } else {
+            sm->removed = 0;
+            if (sm->pitched) sm->listed = 1;
+            status("Pasted \"%s\" into the library. Ctrl+Z takes it out again", sm->name);
+        }
+        P.preview = -1;
+        for (int row = 0, k = 0; k < P.nsamples; k++) {   /* scroll to it */
+            if ((P.samples[k].pitched && !P.samples[k].listed) || P.samples[k].removed) continue;
+            if (k == s) {
+                if (row < lib_scroll || row > lib_scroll + 8) lib_scroll = row > 3 ? row - 3 : 0;
+                break;
+            }
+            row++;
+        }
+        lib_flash = s;
+        lib_flash_at = SDL_GetTicks();
+    }
+}
+
+static void remove_sound(int i);
+
+/* The library row, pad or instrument slot under the pointer, if any (for Ctrl+C / Ctrl+V). */
+static int sound_under_mouse(int *kind, int *idx)
+{
+    if (pads_open) {
+        for (int i = 0; i < NPADS; i++)
+            if (hit(pad_rects[i])) {
+                *kind = CM_PAD;
+                *idx = i;
+                return 1;
+            }
+        if (hit(inst_drop)) {
+            *kind = CM_INST;
+            *idx = 0;
+            return 1;
+        }
+    }
+    if (sounds_open && sounds_sub == 0) {
+        for (int i = 0; i < P.nsamples; i++)
+            if (lib_rects[i].w && hit(lib_rects[i]) && !P.samples[i].removed &&
+                (!P.samples[i].pitched || P.samples[i].listed)) {
+                *kind = CM_LIB;
+                *idx = i;
+                return 1;
+            }
+        SDL_Rect pr = panel_rect();             /* anywhere else in the library: paste into it */
+        if (hit(pr)) {
+            *kind = CM_LIB;
+            *idx = -1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Opens the right-click menu for a library sound, a pad or the instrument slot. */
+static void cm_open(int kind, int idx)
+{
+    int s = kind == CM_LIB ? idx : kind == CM_PAD ? P.pads[idx].sample : P.inst_sample;
+    int has = s >= 0 && s < P.nsamples;
+    memset(&cm, 0, sizeof cm);
+    cm.open = 1;
+    cm.kind = kind;
+    cm.idx = idx;
+    snprintf(cm.label[0], sizeof cm.label[0], "Copy");
+    cm.act[0] = CMA_COPY;
+    cm.enabled[0] = has;
+    if (sclip.has && sclip.sample < P.nsamples)
+        snprintf(cm.label[1], sizeof cm.label[1], "Paste \"%.50s\"", P.samples[sclip.sample].name);
+    else
+        snprintf(cm.label[1], sizeof cm.label[1], "Paste");
+    cm.act[1] = CMA_PASTE;
+    cm.enabled[1] = sclip.has && sclip.sample < P.nsamples;
+    if (kind == CM_LIB) {
+        snprintf(cm.label[2], sizeof cm.label[2], "Remove from the library");
+        cm.act[2] = CMA_REMOVE;
+    } else {
+        snprintf(cm.label[2], sizeof cm.label[2], kind == CM_PAD ? "Clear the pad" : "Clear the instrument");
+        cm.act[2] = CMA_CLEAR;
+    }
+    cm.enabled[2] = has;
+    cm.n = 3;
+    int w = 0;
+    for (int i = 0; i < cm.n; i++) w = text_w(cm.label[i]) > w ? text_w(cm.label[i]) : w;
+    w += 28;
+    int h = cm.n * (font_h + 12) + 8;
+    cm.box = (SDL_Rect){mx + 2, my + 2, w, h};
+    if (cm.box.x + w > W - 4) cm.box.x = W - 4 - w;
+    if (cm.box.y + h > H - 4) cm.box.y = H - 4 - h;
+}
+
+/* Drawn last, over everything; takes the next click. */
+static void cm_draw(void)
+{
+    if (!cm.open) return;
+    fill((SDL_Rect){cm.box.x + 3, cm.box.y + 3, cm.box.w, cm.box.h}, alpha(DARK, 90));
+    fill(cm.box, PANEL);
+    outline(cm.box, LINE);
+    int chosen = -1;
+    for (int i = 0; i < cm.n; i++) {
+        SDL_Rect r = {cm.box.x + 4, cm.box.y + 4 + i * (font_h + 12), cm.box.w - 8, font_h + 12};
+        int hov = hit(r) && cm.enabled[i];
+        if (hov) fill(r, tone(ACCENT, 0.5f));
+        text(r.x + 10, r.y + 6, cm.label[i], cm.enabled[i] ? TEXT : tone(DIM, 0.7f));
+        if (hov && lpress) chosen = i;
+    }
+    if (chosen >= 0) {
+        switch (cm.act[chosen]) {
+        case CMA_COPY: sound_copy(cm.kind, cm.idx); break;
+        case CMA_PASTE: sound_paste(cm.kind, cm.idx); break;
+        case CMA_REMOVE: remove_sound(cm.idx); break;
+        case CMA_CLEAR:
+            LOCK();
+            if (cm.kind == CM_PAD) {
+                voice_stop(&P, cm.idx, -1);
+                P.pads[cm.idx].sample = -1;
+            } else {
+                P.inst_sample = -1;
+            }
+            UNLOCK();
+            status(cm.kind == CM_PAD ? "Cleared pad %d" : "Cleared the instrument", cm.idx + 1);
+            break;
+        }
+    }
+    if (lpress || rpress) cm.open = 0;          /* any click closes it */
+    lpress = rpress = 0;
+}
+
 static void library_list(int x, int y, int w, int bottom)
 {
     char buf[64];
+    memset(lib_rects, 0, sizeof lib_rects);   /* only the rows drawn now can be hit */
     static int vis[MAX_SAMPLES];              /* pitched/reversed copies made for clips are hidden */
     int nvis = 0;
     for (int i = 0; i < P.nsamples; i++)
-        if (!P.samples[i].pitched && !P.samples[i].removed) vis[nvis++] = i;
+        if ((!P.samples[i].pitched || P.samples[i].listed) && !P.samples[i].removed && !P.samples[i].hidden) vis[nvis++] = i;
     snprintf(buf, sizeof buf, "%d sound%s", nvis, nvis == 1 ? "" : "s");
     text(x, y, buf, DIM);
     y += font_h + 10;
@@ -4086,6 +4397,7 @@ static void library_list(int x, int y, int w, int bottom)
         lib_rects[i] = r;
         int hov = hit(r) && drag.kind == D_NONE;
         fill(r, P.preview == i ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
+        if (lib_flash == i && SDL_GetTicks() - lib_flash_at < 1500) outline(r, ACCENT);   /* just pasted */
         snprintf(buf, sizeof buf, "%.2fs", (double)P.samples[i].frames / SR);
         int dw = text_w(buf);
         SDL_Rect xr = {r.x + r.w - 24, r.y + 2, 20, r.h - 4};     /* remove: shown on the row under the mouse */
@@ -4106,10 +4418,9 @@ static void library_list(int x, int y, int w, int bottom)
                 continue;
             }
         }
-        if (hov && rpress) {                     /* right-click removes too */
+        if (hov && rpress) {                     /* right-click: copy, paste, remove */
             rpress = 0;
-            remove_sound(i);
-            continue;
+            cm_open(CM_LIB, i);
         }
         if (hov && lpress) {
             drag = (typeof(drag)){.kind = D_LIBPEND, .sample = i, .sx = mx, .sy = my};
@@ -4128,6 +4439,7 @@ static void library_list(int x, int y, int w, int bottom)
 }
 
 static float *heard_buf;                /* what the New sound Play button started */
+static SDL_Rect ns_note_r;              /* where New sound's Note box is, for the self-test */
 
 static int new_sound(int x, int y, int w)
 {
@@ -4141,7 +4453,8 @@ static int new_sound(int x, int y, int w)
     }
     y += 70;
     int drum = G.wave >= WAVE_KICK;
-    if (!drum) note_number((SDL_Rect){x, y, hw, 26}, "Note", &G.note);
+    ns_note_r = (SDL_Rect){x, y, hw, 26};
+    if (!drum) note_number(ns_note_r, "Note", &G.note);
     number((SDL_Rect){drum ? x : x + hw + 8, y, drum ? w : hw, 26}, "Length", &G.beats, 0.0625, 32, 0.01, "%.2f b");
     y += 34;
     number((SDL_Rect){x, y, hw, 26}, "Volume", &G.volume, 0, 1, 0.005, "%.2f");
@@ -4958,7 +5271,18 @@ static int settings_content(int x, int y, int w)
         y += 38;
         text(x, y, "Pad bindings belong to your hardware, so they're kept", DIM);
         text(x, y + font_h + 2, "for every project. Change them in Pads > Learn input.", DIM);
-        y += 2 * font_h + 12;
+        y += 2 * font_h + 16;
+        y = section(x, y, w, "CONTROLLER");
+        text(x, y + 6, "Pitch bend", TEXT);
+        {
+            int lw = text_w("Pitch bend") + 14;
+            if (dropdown((SDL_Rect){x + lw, y, w - lw, 28}, "", JB_NAMES, JB_COUNT, &joy_bend, 0)) binds_changed = 1;
+        }
+        y += 36;
+        text(x, y, "Push the stick to bend pads and the instrument like a", DIM);
+        text(x, y + font_h + 2, "pitch wheel; it springs back when you let go. Set how", DIM);
+        text(x, y + 2 * (font_h + 2), "far it bends with Bend range in Mixer > Live.", DIM);
+        y += 3 * (font_h + 2) + 12;
         break;
     case 3: {
         static const char *const KEYS[][2] = {
@@ -5181,7 +5505,11 @@ static void top_bar(void)
     x += 72;
     line(x - 6, y + 4, x - 6, y + h - 4, sep);
     bpm_rect = (SDL_Rect){x, y, 100, h};
-    number(bpm_rect, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
+    {
+        double before = P.bpm;
+        number(bpm_rect, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
+        tempo_touch(before);
+    }
     x += 104;
     a4_rect = (SDL_Rect){x, y, 116, h};
     number(a4_rect, "A4", &P.a4, 415, 466, 0.05, "%.1f Hz");   /* tuning for new sounds */
@@ -5782,7 +6110,7 @@ static void piano_roll(void)
     static const char *snames[MAX_SAMPLES];
     int ns = 0, cur = 0, base = sample_base(&P, c->sample);
     for (int i = 0; i < P.nsamples && ns < DD_MAX; i++)
-        if (!P.samples[i].pitched && !P.samples[i].removed) {
+        if (!P.samples[i].pitched && !P.samples[i].removed && !P.samples[i].hidden) {
             if (i == base) cur = ns;
             smap[ns] = i;
             snames[ns++] = P.samples[i].name;
@@ -6610,6 +6938,18 @@ static void update_drag(void)
 static void end_drag(void)
 {
     if (drag.kind == D_SLIDE) slide_done = drag.num;
+    if (drag.kind == D_NOTE && abs(mx - drag.sx) + abs(my - drag.sy) < 3) {
+        *drag.inum = drag.iorig;                /* a click, not a drag: type the note instead */
+        numedit.active = 1;
+        numedit.pending = 0;
+        numedit.v = NULL;
+        numedit.iv = drag.inum;
+        numedit.lo = drag.imin;
+        numedit.hi = drag.imax;
+        numedit.buf[0] = 0;
+        SDL_StartTextInput();
+        status("Type a note like C4, F#3 or Bb2 (or a number), Enter to set it, Esc to cancel");
+    }
     if (drag.kind == D_NUM && abs(mx - drag.sx) + abs(my - drag.sy) < 3) {
         *drag.num = drag.norig;                 /* a click, not a drag: type the value instead */
         numedit_begin(drag.num, drag.nmin, drag.nmax);
@@ -6639,11 +6979,91 @@ static void end_drag(void)
     drag.kind = D_NONE;
 }
 
+
+/* The tempo went from `from` to P.bpm: the selected clips keep their place in bars and beats
+ * and play at the new speed. Recipes made at a tempo (beats, chords, tones, sung lines) are made
+ * again at it, audio is time-stretched (same pitch), note clips' notes move with them, and
+ * one-shots (drum hits, Generator sounds) just move. Clips not selected keep their times. */
+static void tempo_apply(double from)
+{
+    double r = from / P.bpm;                     /* how much longer everything gets */
+    int n = 0, stretched = 0, remade = 0;
+    if (fabs(r - 1) < 1e-9) return;
+    for (int c = 0; c < P.nclips; c++) {
+        if (!csel[c]) continue;
+        Clip cl = P.clips[c];
+        n++;
+        cl.start = (long)llround(cl.start * r);
+        if (cl.pattern > 0) {                    /* note clips: the notes move with it */
+            int shared = 0;
+            for (int o = 0; o < P.nclips; o++) shared |= o != c && P.clips[o].pattern == cl.pattern && !csel[o];
+            int pat = cl.pattern;
+            if (shared) {                        /* copies not selected keep their timing */
+                int id = pattern_new_id(&P), nn = P.nnotes;
+                for (int i = 0; i < nn; i++)
+                    if (P.notes[i].pattern == pat) note_add(id, P.notes[i].note, P.notes[i].start, P.notes[i].length, P.notes[i].vel);
+                pat = id;
+            }
+            int done = 0;                        /* a pattern several selected clips share: once */
+            for (int o = 0; o < c && !done; o++) done = csel[o] && P.clips[o].pattern == pat && !shared;
+            LOCK();
+            if (!done)
+                for (int i = 0; i < P.nnotes; i++)
+                    if (P.notes[i].pattern == pat) {
+                        P.notes[i].start = (long)llround(P.notes[i].start * r);
+                        P.notes[i].length = (long)llround(P.notes[i].length * r);
+                    }
+            cl.pattern = pat;
+            cl.offset = (long)llround(cl.offset * r);
+            cl.length = (long)llround(cl.length * r);
+            cl.fade_in = (long)llround(cl.fade_in * r);
+            cl.fade_out = (long)llround(cl.fade_out * r);
+            P.clips[c] = cl;
+            UNLOCK();
+            continue;
+        }
+        int ns = sample_at_tempo(&P, cl.sample, r);
+        if (ns >= 0) {
+            const Sample *sm = &P.samples[ns];
+            if (sm->pitched && sm->stretch > 0 && fabs(sm->stretch - 1) > 1e-6) stretched++;
+            else remade++;
+            cl.sample = ns;
+            cl.offset = (long)llround(cl.offset * r);
+            cl.length = (long)llround(cl.length * r);
+            cl.fade_in = (long)llround(cl.fade_in * r);
+            cl.fade_out = (long)llround(cl.fade_out * r);
+        } else {                                 /* a one-shot: same sound, its musical length */
+            cl.length = (long)llround(cl.length * r);
+        }
+        long room = P.samples[cl.sample].frames - cl.offset;
+        if (cl.length > room) cl.length = room;
+        if (cl.length < 1) cl.length = 1;
+        if (cl.fade_in + cl.fade_out > cl.length) cl.fade_in = cl.fade_out = 0;
+        LOCK();
+        P.clips[c] = cl;
+        UNLOCK();
+    }
+    if (n)
+        status("Tempo %.1f BPM: %d selected clip%s now follow%s it (%d remade, %d time-stretched)", P.bpm, n,
+               n == 1 ? "" : "s", n == 1 ? "s" : "", remade, stretched);
+}
+
+/* in each frame: a tempo edit that has settled applies to the selection */
+static void tempo_check(void)
+{
+    if (!tempo_from) return;
+    if ((drag.kind == D_NUM && drag.num == &P.bpm) || (numedit.active && numedit.v == &P.bpm)) return;
+    if (SDL_GetTicks() - tempo_at < 350) return;
+    double from = tempo_from;
+    tempo_from = 0;
+    if (sel_count()) tempo_apply(from);
+}
+
 /* ---------------------------------------------------------------- keyboard */
 
 static void key(SDL_Keysym k)
 {
-    int ctrl = k.mod & KMOD_CTRL;
+    int ctrl = k.mod & KMOD_CTRL, hk = 0, hi = 0;
     long nudge = snap_frames() ? snap_frames() : SR / 100;
     if (export_open) {                  /* the dialog takes the keyboard */
         if (SDL_AtomicGet(&fd_state) != 0) return;          /* the system file dialog is up */
@@ -6730,6 +7150,10 @@ static void key(SDL_Keysym k)
             status("All %d clips selected", P.nclips);
             return;
         case SDLK_c:
+            if (sound_under_mouse(&hk, &hi) && !(hk == CM_LIB && hi < 0)) {   /* over a sound or pad: copy it */
+                sound_copy(hk, hi);
+                return;
+            }
             if (sel_count()) {
                 copy_selection();
                 status("Copied %d clip%s: Ctrl+V pastes them at the playhead", nclipboard, nclipboard == 1 ? "" : "s");
@@ -6742,6 +7166,10 @@ static void key(SDL_Keysym k)
             }
             return;
         case SDLK_v:
+            if (sclip.has && sound_under_mouse(&hk, &hi)) {
+                sound_paste(hk, hi);
+                return;
+            }
             if (nclipboard) status("Pasted %d clip%s", paste_at(snap(P.playhead)), nclipboard == 1 ? "" : "s");
             return;
         }
@@ -8711,6 +9139,220 @@ static int selftest(void)
         check(1, "(eSpeak NG isn't installed here: the singing tests were skipped)");
     }
 
+
+    /* New sound's Note box: drag it, scroll it, or click and type a note */
+    {
+        show_panel(RI_SOUNDS);
+        sounds_sub = 3;
+        sounds_scroll = 0;
+        G.wave = WAVE_SAW;
+        G.note = 60;
+        frame();
+        SDL_Rect r = ns_note_r;
+        sim_drag(r.x + 20, r.y + 10, r.x + 20 + 40, r.y + 10, 0);
+        check(G.note == 65, "dragging New sound's Note box changes the note");
+        sim(r.x + 20, r.y + 10, 1, 0, 0, 0);
+        sim(r.x + 20, r.y + 10, 0, 1, 0, 0);
+        check(numedit.active && numedit.iv == &G.note && G.note == 65, "clicking the Note box opens it for typing");
+        numedit_text("F#3");
+        numedit_key((SDL_Keysym){.sym = SDLK_RETURN});
+        frame();
+        check(G.note == 54 && !numedit.active, "typing F#3 sets the note");
+        sim(r.x + 20, r.y + 10, 1, 0, 0, 0);
+        sim(r.x + 20, r.y + 10, 0, 1, 0, 0);
+        numedit_text("bb2");
+        numedit_key((SDL_Keysym){.sym = SDLK_RETURN});
+        frame();
+        int flat = G.note == 46;
+        sim(r.x + 20, r.y + 10, 1, 0, 0, 0);
+        sim(r.x + 20, r.y + 10, 0, 1, 0, 0);
+        numedit_text("72");
+        numedit_key((SDL_Keysym){.sym = SDLK_RETURN});
+        frame();
+        int num = G.note == 72;
+        sim(r.x + 20, r.y + 10, 1, 0, 0, 0);
+        sim(r.x + 20, r.y + 10, 0, 1, 0, 0);
+        numedit_text("#5");
+        numedit_key((SDL_Keysym){.sym = SDLK_RETURN});
+        frame();
+        check(flat && num && G.note == 72, "Bb2 and 72 work too, and something that isn't a note changes nothing");
+        mx = r.x + 20;
+        my = r.y + 10;
+        wheel_y = 2;
+        lpress = lrel = rpress = 0;
+        frame();
+        check(G.note == 74, "the mouse wheel steps the note");
+        G.note = 45;
+        sounds_sub = 0;
+    }
+
+
+    /* ---- copying sounds between the library, pads and the instrument */
+    {
+        show_panel(RI_PADS);
+        frame();
+        int a = -1, b = -1;
+        for (int i = 0; i < P.nsamples; i++)
+            if (!P.samples[i].pitched && !P.samples[i].removed) {
+                if (a < 0) a = i;
+                else if (b < 0) b = i;
+            }
+        LOCK();
+        for (int i = 0; i < NPADS; i++) P.pads[i] = (Pad){-1, PAD_ONESHOT, 0.8f, 0, 0, 0};
+        UNLOCK();
+        history_check();
+        sound_copy(CM_LIB, a);                  /* library to pad, by the right-click menu */
+        SDL_Rect r = pad_rects[5];
+        sim(r.x + 10, r.y + 10, 0, 0, 1, 0);
+        int opened = cm.open && cm.kind == CM_PAD && cm.idx == 5 && cm.enabled[1];
+        sim(cm.box.x + 14, cm.box.y + 4 + 1 * (font_h + 12) + 6, 1, 1, 0, 0);
+        check(opened && !cm.open && P.pads[5].sample == a, "right-click a pad, Paste: it plays the copied library sound");
+        LOCK();
+        P.pads[5].pitch = 7;
+        P.pads[5].mode = PAD_LOOP;
+        UNLOCK();
+        frame();
+        mx = pad_rects[5].x + 10;               /* pad to pad with Ctrl+C / Ctrl+V: its settings too */
+        my = pad_rects[5].y + 10;
+        key((SDL_Keysym){.sym = SDLK_c, .mod = KMOD_CTRL});
+        mx = pad_rects[9].x + 10;
+        my = pad_rects[9].y + 10;
+        key((SDL_Keysym){.sym = SDLK_v, .mod = KMOD_CTRL});
+        check(P.pads[9].sample == a && P.pads[9].pitch == 7 && P.pads[9].mode == PAD_LOOP,
+              "Ctrl+C on a pad and Ctrl+V on another copies the sound and the pad's settings");
+        frame();
+        history_check();
+        show_panel(RI_SOUNDS);                  /* a pitched pad into the library: its own sound */
+        sounds_sub = 0;
+        frame();
+        int ns = P.nsamples, nvis0 = 0, nvis1 = 0;
+        for (int i = 0; i < P.nsamples; i++) nvis0 += (!P.samples[i].pitched || P.samples[i].listed) && !P.samples[i].removed;
+        SDL_Rect pr = panel_rect();
+        mx = pr.x + pr.w / 2;
+        my = pr.y + pr.h - 80;
+        key((SDL_Keysym){.sym = SDLK_v, .mod = KMOD_CTRL});
+        int pasted = -1;
+        for (int i = 0; i < P.nsamples; i++) {
+            nvis1 += (!P.samples[i].pitched || P.samples[i].listed) && !P.samples[i].removed;
+            if (P.samples[i].listed) pasted = i;
+        }
+        check(pasted >= 0 && P.samples[pasted].src == a && P.samples[pasted].semis == 7 && nvis1 == nvis0 + 1 &&
+                  P.nsamples <= ns + 1,
+              "pasting a pitched pad into the library adds that pitched sound to it");
+        frame();
+        history_check();
+        undo_redo(0);
+        int gone = !P.samples[pasted].listed;
+        undo_redo(1);
+        check(gone && P.samples[pasted].listed, "undo takes the pasted sound out of the library, redo puts it back");
+        remove_sound(b);                        /* a removed sound comes back when pasted */
+        frame();
+        history_check();
+        sclip = (typeof(sclip)){1, b, 0, {0}};
+        sound_paste(CM_LIB, -1);
+        check(!P.samples[b].removed, "pasting a removed sound brings it back into the library");
+        lib_scroll = 0;
+        frame();
+        r = lib_rects[a];                       /* right-click a library sound: the menu */
+        sim(r.x + 10, r.y + 5, 0, 0, 1, 0);
+        int lib_menu = cm.open && cm.kind == CM_LIB && cm.idx == a && cm.act[2] == CMA_REMOVE;
+        sim(cm.box.x - 50, cm.box.y - 50, 1, 1, 0, 0);    /* a click elsewhere closes it, doing nothing */
+        check(lib_menu && !cm.open && !P.samples[a].removed, "right-clicking a library sound opens Copy, Paste, Remove");
+        history_check();
+    }
+
+
+    /* ---- a tempo change: selected clips follow it */
+    {
+        double sr = SR;
+        int ok_len = 0, ok_pitch = 0;
+        long n = SR;                             /* time-stretch keeps the pitch */
+        float *sine = malloc((size_t)n * 2 * sizeof(float));
+        for (long i = 0; i < n; i++) sine[2 * i] = sine[2 * i + 1] = (float)(0.5 * sin(2 * 3.14159265358979 * 440 * i / sr));
+        long sn;
+        float *st = time_stretch(sine, n, 1.5, &sn);
+        if (st) {
+            ok_len = labs(sn - (long)(1.5 * n)) < 4;
+            int zc = 0;
+            double e = 0, emin = 1e9;
+            for (long i = 1; i < sn; i++) zc += (st[2 * i] >= 0) != (st[2 * i - 2] >= 0);
+            for (long b = SR / 10; b + SR / 50 < sn - SR / 10; b += SR / 50) {   /* no dips between frames */
+                e = 0;
+                for (long i = b; i < b + SR / 50; i++) e += st[2 * i] * st[2 * i];
+                emin = fmin(emin, e / (SR / 50));
+            }
+            ok_pitch = fabs(zc / (sn / sr) / 2 - 440) < 6 && emin > 0.08;
+        }
+        free(st);
+        check(ok_len && ok_pitch, "time-stretching makes it longer at the same pitch, without dips");
+
+        new_project();
+        P.bpm = 120;
+        long beat = beat_frames();
+        int raw = sample_add(&P, "recorded", sine, n);   /* audio with no recipe: stretched */
+        sine = NULL;
+        BeatSpec bs = genre_spec(0);
+        int loop = sample_generate_beat(&P, &bs, 0x3F, "house beat");
+        SynthSound y;
+        synth_from_preset(&y, 0);
+        int shot = sample_generate_synth(&P, &y, "Deep bass");
+        int c_raw = clip_add(raw, 0, 4 * beat, 0, n);
+        int c_loop = clip_add(loop, 1, 8 * beat, 0, P.samples[loop].frames);
+        int c_shot = clip_add(shot, 2, 2 * beat, 0, beat);
+        int c_keep = clip_add(shot, 3, 6 * beat, 0, beat);
+        int c_note = clip_add(shot, 4, 4 * beat, 0, 4 * beat);
+        int pat = pattern_new_id(&P);
+        P.clips[c_note].pattern = pat;
+        P.clips[c_note].root = 36;
+        note_add(pat, 40, beat, beat, 0.8f);
+        frame();
+        history_check();
+        sel_clear();
+        csel[c_raw] = csel[c_loop] = csel[c_shot] = csel[c_note] = 1;
+        sel_fix_primary();
+        int u0 = nundo;
+        double before = P.bpm;
+        P.bpm = 100;                             /* as if typed into the BPM box */
+        tempo_touch(before);
+        tempo_at = SDL_GetTicks() - 1000;
+        frame();
+        if (drag.kind == D_NONE) history_check();
+        double r = 1.2;
+        const Sample *rs = &P.samples[P.clips[c_raw].sample], *ls = &P.samples[P.clips[c_loop].sample];
+        check(P.clips[c_raw].start == (long)llround(4 * beat * r) && rs->pitched && fabs(rs->stretch - r) < 1e-9 &&
+                  labs(rs->frames - (long)(n * r)) < 4 && labs(P.clips[c_raw].length - (long)llround(n * r)) <= 1,
+              "selected audio keeps its bar and is time-stretched to the new tempo");
+        check(P.clips[c_loop].start == (long)llround(8 * beat * r) && ls->is_beat == 1 && ls->gen_bpm == 100 && ls->hidden &&
+                  labs(ls->frames - (long)llround(P.samples[loop].frames * r)) < 8,
+              "a selected beat loop is made again at the new tempo");
+        int ni = -1;
+        for (int i = 0; i < P.nnotes; i++)
+            if (P.notes[i].pattern == P.clips[c_note].pattern) ni = i;
+        check(ni >= 0 && P.notes[ni].start == (long)llround(beat * r) && P.notes[ni].length == (long)llround(beat * r) &&
+                  P.clips[c_note].length == (long)llround(4 * beat * r),
+              "a selected note clip's notes move to the new tempo");
+        check(P.clips[c_shot].sample == shot && P.clips[c_shot].start == (long)llround(2 * beat * r) &&
+                  P.clips[c_keep].start == 6 * beat,
+              "one-shots just move, and clips not selected keep their times");
+        undo_redo(0);
+        check(nundo == u0 && P.bpm == 120 && P.clips[c_raw].sample == raw && P.clips[c_loop].start == 8 * beat &&
+                  P.notes[ni].start == beat,
+              "one undo puts the tempo and the clips back");
+        undo_redo(1);
+        char msg[1200];
+        int saved = project_save(&P, tpath, msg, sizeof msg) == 0;
+        Project *U = malloc(sizeof *U);
+        int loaded = saved && project_load(U, tpath, msg, sizeof msg) == 0;
+        int si = P.clips[c_raw].sample, li = P.clips[c_loop].sample;
+        check(loaded && fabs(U->samples[si].stretch - r) < 1e-9 && U->samples[si].frames == P.samples[si].frames &&
+                  U->samples[li].hidden && U->samples[li].gen_bpm == 100,
+              "stretched and remade sounds save as recipes and open the same");
+        if (loaded) project_free(U);
+        free(U);
+        remove(tpath);
+        sel_clear();
+    }
+
     /* ---- Export: choosing the folder and file name */
     {
         char keep_proj[1024];
@@ -8788,6 +9430,25 @@ static int selftest(void)
         check(got_added && njoys > 0, "a plugged-in controller is picked up");
         check(got_hit, "a controller button plays its pad");
         check(voice_playing(&P, 12), "a d-pad direction plays its pad");
+        {                                       /* the right stick bends pitch */
+            int k = joy_index(SDL_JoystickInstanceID(vh));
+            int keep = joy_bend;
+            float b[3];
+            joy_bend = JB_RIGHT_Y;
+            for (int step = 0; step < 3; step++) {
+                SDL_JoystickSetVirtualAxis(vh, k >= 0 ? stick_axis[k][3] : 3, step == 0 ? -32767 : step == 1 ? 0 : -32767);
+                if (step == 2) joy_bend = JB_OFF;
+                SDL_JoystickUpdate();
+                SDL_Event e;
+                while (SDL_PollEvent(&e))
+                    if (e.type != SDL_JOYDEVICEADDED) joy_event(&e);
+                b[step] = P.bend;
+            }
+            joy_bend = keep;
+            check(b[0] > 0.99f && b[1] == 0, "pushing the right stick up bends the pitch up, and it springs back");
+            check(b[2] == 0, "with pitch bend off the stick doesn't bend");
+            P.bend = 0;
+        }
         SDL_JoystickClose(vh);
         SDL_JoystickDetachVirtual(vj);
     } else {
@@ -9926,10 +10587,6 @@ static void theory_pane(void)
     line(pane.x + pane.w - 1, pane.y, pane.x + pane.w - 1, pane.y + pane.h, LINE);
     int inside = hit(pane), saved_press = lpress;
     if (!inside) lpress = 0;                    /* nothing scrolled out of view takes clicks */
-    if (inside && wheel_y && drag.kind == D_NONE) {
-        th_scroll -= wheel_y * 48;
-        wheel_y = 0;
-    }
     int max_scroll = th_content_h - pane.h > 0 ? th_content_h - pane.h : 0;
     th_scroll = th_scroll < 0 ? 0 : th_scroll > max_scroll ? max_scroll : th_scroll;
 
@@ -10143,6 +10800,7 @@ static void frame(void)
     SDL_SetRenderDrawColor(ren, BG.r, BG.g, BG.b, 255);
     SDL_RenderClear(ren);
     vis_update();
+    tempo_check();
     dd_input();
     if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
     if (tf.buf && (((lpress || rpress) && !hit(tf.r)) || !tf_drawn)) tf_end(1);   /* clicked away, or it's gone */
@@ -10151,7 +10809,7 @@ static void frame(void)
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
     int picking = SDL_AtomicGet(&fd_state) != 0;
-    int modal = export_open || export_pending || menu_open || met_open || confirm_act || picking;
+    int modal = export_open || export_pending || menu_open || met_open || confirm_act || picking || cm.open;
     if (modal) {
         mx = my = -10000;
         lpress = rpress = wheel_x = wheel_y = 0;
@@ -10175,6 +10833,14 @@ static void frame(void)
         else if (vis_open) vis_pane();
         else if (settings_open) settings_pane();
         else if (sounds_open) sounds_pane();
+        if (wheel_y && drag.kind == D_NONE && L.pane_w && hit(panel_rect())) {
+            /* a wheel that no box or list in the panel took scrolls the panel (the panel
+             * takes it last, so number and note boxes can be stepped with the wheel) */
+            int *sc = theory_open ? &th_scroll : pads_open ? &pads_scroll : mixer_open ? &mixer_scroll
+                    : vis_open ? &vis_scroll : settings_open ? &settings_scroll : sounds_open && sounds_sub ? &sounds_scroll : NULL;
+            if (sc) *sc -= wheel_y * 48;           /* clamped when the pane is next drawn */
+            wheel_y = 0;
+        }
         status_bar();
     }
     if (modal) {
@@ -10189,6 +10855,7 @@ static void frame(void)
         if (picking) lpress = rpress = 0;  /* the system file dialog has the mouse */
         export_dialog();
     }
+    if (cm.open && !picking) cm_draw();
     if (menu_open && !picking) file_menu();
     if (met_open && !picking) metronome_menu();
     dd_draw();
@@ -10232,7 +10899,8 @@ static void frame(void)
         if (example_pick >= 0 && example_pick < nexamples) request(ACT_OPEN_EXAMPLE, example_path[example_pick]);
     }
     rec_drain();
-    if (drag.kind == D_NONE && !(pads_rec && P.playing)) history_check();   /* a take is one undo step */
+    if (drag.kind == D_NONE && !(pads_rec && P.playing) && !tempo_from)   /* a take, or a tempo change */
+        history_check();                                                    /* with its clips: one step */
     file_dialog_poll();
     if (learned >= 0) {
         status("Pad %d: input learned", learned + 1);

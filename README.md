@@ -79,7 +79,8 @@ Settings > **Keys** lists every shortcut.
 | Transport | The buttons at the bottom centre: to the start, back a bar, play/pause, stop (back to where play began; again for the start), forward a bar, to the end, loop and record |
 | Put a sound in the song | Drag it from the library onto a track |
 | Hear a sound first | Click it in the library (click again to stop) |
-| Remove a sound | The **×** on its row in the library, or right-click it. Its clips go too; Ctrl+Z brings both back |
+| Remove a sound | The **×** on its row in the library, or right-click it > **Remove from the library**. Its clips go too; Ctrl+Z brings both back |
+| Copy a sound | Right-click a library sound, a pad or the instrument slot > **Copy**, then right-click another > **Paste** (or Ctrl+C / Ctrl+V with the pointer over them). Pad to pad copies the pad's settings too; a pitched pad pasted into the library becomes a library sound at that pitch |
 | Move a clip | Drag it, in time and between tracks. Arrow keys nudge it |
 | Trim a clip | Drag its left or right edge |
 | Fade a clip | Drag the small squares on its top corners |
@@ -94,7 +95,8 @@ Settings > **Keys** lists every shortcut.
 | Jump around | Ctrl+←/→ a bar, Ctrl+Shift+←/→ a beat, Alt+←/→ to the next clip edge, F shows the playhead, Z zooms to fit the song |
 | Zoom / scroll | Ctrl + wheel to zoom, wheel to scroll, + and - also zoom |
 | Change any number | Click it and type, or drag it, or use the wheel (Shift for fine steps) |
-| Tempo | Click **BPM** and type, or use the metronome menu (±1, half, double, tap tempo with T) |
+| Change a number | Drag it sideways, use the mouse wheel over it, or click it and type. Note boxes (like New sound's **Note**) take names such as `C4`, `F#3` or `Bb2`, or a MIDI number |
+| Tempo | Click **BPM** and type, or use the metronome menu (±1, half, double, tap tempo with T). Clips keep their times, except the selected ones: they keep their place in bars and beats and play at the new speed. Beat loops, chords, tones and sung lines are made again at the new tempo, audio is time-stretched (same pitch), note clips' notes move, and one-shots just move. One Ctrl+Z puts it all back |
 | Tuning | **A4** beside BPM (415–466 Hz, e.g. 432). New sounds use it |
 | Metronome | **Click** in the top bar, or M. Its arrow sets the sound, 8th/16th ticks, accent and a 1-2 bar count-in |
 | Add a track | **+** next to TRACKS (up to 16). Each track has mute, solo and volume |
@@ -232,6 +234,9 @@ sounds exactly like what you hear, including the delay and reverb dying away aft
   stops on each press.
 - **Rebinding:** select a pad, press **Learn input**, then press any key, controller button, stick,
   trigger, MIDI note or knob.
+- **Pitch bend:** a MIDI pitch wheel, or a controller stick (the right stick's up/down to start
+  with; choose another or turn it off in Settings > Input). It springs back to centre; Mixer >
+  Live sets how far it bends.
 - **Instrument:** a MIDI keyboard plays a chosen sound at every pitch. On a piano keyboard, press
   **Stop MIDI notes triggering pads** in Settings > Input so every key plays the instrument.
 - **Recording:** turn on **Rec**, play the song and play along. Hits become clips, snapped to the

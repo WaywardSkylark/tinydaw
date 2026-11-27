@@ -102,9 +102,11 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
             for (int k = 0; k < v->nnotes; k++)
                 fprintf(f, "vnote %d %.9g %.9g\n", v->notes[k].note, v->notes[k].start, v->notes[k].len);
         }
-        if (s->pitched) fprintf(f, "variant %d %d %d\n", s->src, s->semis, s->reversed);
+        if (s->pitched) fprintf(f, "variant %d %d %d %.17g\n", s->src, s->semis, s->reversed, s->stretch > 0 ? s->stretch : 1);
+        if (s->hidden) fprintf(f, "hidden\n");
         if (s->path[0]) fprintf(f, "path %s\n", s->path);
         if (s->removed) fprintf(f, "removed\n");
+        if (s->listed) fprintf(f, "listed\n");
         fprintf(f, "end\n");
     }
     for (int c = 0; c < p->nclips; c++) {
@@ -150,7 +152,8 @@ typedef struct {
     double gen_bpm;
     int chord[6], nchord;
     BeatSpec beat;
-    int mask, src, semis, reversed, removed;
+    int mask, src, semis, reversed, removed, listed, hidden;
+    double stretch;
 } Pending;
 
 static const char *rest_after(const char *line, int fields)   /* the text after n words */
@@ -197,7 +200,7 @@ static int build(Project *p, Pending *s, int *missing)
     } else if (!strcmp(s->kind, "hit") && s->has_beat) {
         idx = sample_generate_hit(p, &s->beat, s->mask, s->name);
     } else if ((!strcmp(s->kind, "pitched") || !strcmp(s->kind, "variant")) && s->src >= 0 && s->src < p->nsamples) {
-        idx = sample_variant(p, s->src, s->semis, s->reversed);
+        idx = sample_variant_ex(p, s->src, s->semis, s->reversed, s->stretch > 0 ? s->stretch : 1);
     } else if (!strcmp(s->kind, "file") && s->path[0]) {
         char err[200];
         idx = sample_import(p, s->path, err, sizeof err);
@@ -212,6 +215,8 @@ static int build(Project *p, Pending *s, int *missing)
     if (idx < 0) idx = silence(p, s->name, s->frames);
     if (idx >= 0) snprintf(p->samples[idx].name, sizeof p->samples[idx].name, "%s", s->name);
     if (idx >= 0) p->samples[idx].removed = s->removed;
+    if (idx >= 0) p->samples[idx].listed = s->listed;
+    if (idx >= 0) p->samples[idx].hidden = s->hidden;
     return idx;
 }
 
@@ -332,9 +337,14 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         } else if (in_sample && !strcmp(word, "pitch")) {         /* older files */
             ok = sscanf(line, "pitch %d %d", &s.src, &s.semis) == 2;
         } else if (in_sample && !strcmp(word, "variant")) {
-            ok = sscanf(line, "variant %d %d %d", &s.src, &s.semis, &s.reversed) == 3;
+            s.stretch = 1;
+            ok = sscanf(line, "variant %d %d %d %lf", &s.src, &s.semis, &s.reversed, &s.stretch) >= 3 && s.stretch > 0;
         } else if (in_sample && !strcmp(word, "removed")) {
             s.removed = 1;
+        } else if (in_sample && !strcmp(word, "listed")) {
+            s.listed = 1;
+        } else if (in_sample && !strcmp(word, "hidden")) {
+            s.hidden = 1;
         } else if (in_sample && !strcmp(word, "path")) {
             snprintf(s.path, sizeof s.path, "%.1023s", rest_after(line, 1));
         } else if (in_sample && !strcmp(word, "end")) {

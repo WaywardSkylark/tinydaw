@@ -22,6 +22,31 @@
 
 static Project P;
 static SDL_AudioDeviceID dev;
+static int out_buffer = 512;                /* the output's buffer, frames (for the recording offset) */
+/* the microphone (see "the microphone", further down) */
+#define CAP_RING (1 << 20)                  /* frames: about 20 s at 48 kHz */
+static SDL_AudioDeviceID cap_dev;
+static int cap_channels = 2, cap_buffer, cap_fake;   /* cap_fake: the self-test feeds it directly */
+static char audio_in[256];                  /* input device name, "" = the system default */
+static float in_gain_db = 0;                /* input gain */
+static int monitor_on;                      /* hear the microphone through the output */
+static double rec_offset_ms = -1;           /* < 0: automatic (the buffers' round trip) */
+static float *cap_ring;
+static SDL_atomic_t cap_w;                  /* frames written, ever (wraps around the ring) */
+static unsigned cap_r, mon_r;               /* frames read by the interface and by the monitor */
+static float in_peak, in_meter;             /* the loudest input since last looked at; the meter */
+static unsigned char track_arm[MAX_TRACKS];
+static struct { unsigned w; long playhead; int playing; } cap_marks[64];   /* each chunk: where the song was */
+static SDL_atomic_t cap_nmark;
+static struct {
+    int on, track;
+    float *buf;
+    long n, cap;
+    long start;                             /* where in the song the first frame belongs */
+    int start_known, lost;
+} mic;
+
+
 static SDL_Window *win;
 static SDL_Renderer *ren;
 static TTF_Font *font;
@@ -156,10 +181,13 @@ static Col wash(Col c, float k)
     return (Col){(Uint8)(c.r + (255 - c.r) * t), (Uint8)(c.g + (255 - c.g) * t), (Uint8)(c.b + (255 - c.b) * t), c.a};
 }
 
+static void tcheck_cover(SDL_Rect r);
+
 static void fill(SDL_Rect r, Col c)
 {
     SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, c.a);
     SDL_RenderFillRect(ren, &r);
+    if (c.a >= 230 || (c.a >= 150 && r.w >= W && r.h >= H)) tcheck_cover(r);   /* (checking text: hidden can't overlap) */
 }
 static void outline(SDL_Rect r, Col c)
 {
@@ -298,29 +326,101 @@ static TextEntry *text_get(const char *s, Col c)
     return victim->t ? victim : NULL;
 }
 
-static void text_forget(SDL_Renderer *r)   /* a window is closing: its text goes with it */
+/* ---- the interface's size. Everything is laid out in logical units; each window's renderer is
+ * scaled by ui_px, its device pixels per unit (the chosen size times the screen's own pixel density),
+ * and text is rendered at its real size in device pixels, so it stays sharp at any size. */
+static float ui_user = 1;               /* the chosen interface size: 1 = 100% */
+static int ui_choice;                   /* 0 = automatic (matches the screen), else the percentage */
+static float ui_px = 1;                 /* device pixels per logical unit, in the main window */
+static int font_pt;                     /* the size the font is open at, in device pixels */
+
+static void text_forget(SDL_Renderer *r)   /* a window is closing (NULL: the size changed): its text goes */
 {
     for (size_t i = 0; i < sizeof tcache / sizeof *tcache; i++)
-        if (tcache[i].t && tcache[i].r == r) {
+        if (tcache[i].t && (!r || tcache[i].r == r)) {
             SDL_DestroyTexture(tcache[i].t);
             tcache[i].t = NULL;
         }
+}
+
+/* TINYDAW_CHECK_TEXT: every piece of text's visible box, to find any that overlap (tcheck_report) */
+static int tcheck = -1, ntlog;
+static struct { SDL_Rect r; char s[40]; } tlog[4096];
+
+/* an opaque box drawn over text hides it: it no longer counts */
+static void tcheck_cover(SDL_Rect r)
+{
+    if (tcheck <= 0) return;
+    if (SDL_RenderIsClipEnabled(ren)) {
+        SDL_Rect clip;
+        SDL_RenderGetClipRect(ren, &clip);
+        if (!SDL_IntersectRect(&r, &clip, &r)) return;
+    }
+    for (int i = 0; i < ntlog; i++) {
+        SDL_Rect o, *t = &tlog[i].r;
+        if (!SDL_IntersectRect(t, &r, &o)) continue;
+        if (o.w * o.h * 2 > t->w * t->h) {      /* mostly hidden: gone */
+            tlog[i--] = tlog[--ntlog];
+        } else if (o.h >= t->h / 2) {           /* hidden at one end: what's left of it */
+            if (o.x <= t->x) {
+                t->w -= o.x + o.w - t->x;
+                t->x = o.x + o.w;
+            } else {
+                t->w = o.x - t->x;
+            }
+        }
+    }
+}
+
+static void tcheck_report(const char *where)
+{
+    if (tcheck <= 0) return;
+    for (int i = 0; i < ntlog; i++)
+        for (int j = i + 1; j < ntlog; j++) {
+            SDL_Rect o;
+            if (SDL_IntersectRect(&tlog[i].r, &tlog[j].r, &o) && o.w > 2 && o.h > 3)
+                fprintf(stderr, "overlap [%s] \"%s\" (%d,%d %dx%d) and \"%s\" (%d,%d %dx%d)\n", where, tlog[i].s,
+                        tlog[i].r.x, tlog[i].r.y, tlog[i].r.w, tlog[i].r.h, tlog[j].s, tlog[j].r.x, tlog[j].r.y,
+                        tlog[j].r.w, tlog[j].r.h);
+        }
+    ntlog = 0;
 }
 
 static int text(int x, int y, const char *s, Col c)
 {
     TextEntry *e = text_get(s, c);
     if (!e) return 0;
-    SDL_Rect d = {x, y, e->w, e->h};
-    SDL_RenderCopy(ren, e->t, NULL, &d);
-    return e->w;
+    if (tcheck < 0) tcheck = getenv("TINYDAW_CHECK_TEXT") != NULL;
+    if (tcheck && ntlog < 4096 && s[0] && strcmp(s, " ")) {   /* what of it can be seen */
+        int tw = (int)ceilf(e->w / ui_px), th = font_h;
+        int lead = 0, trail = 0;                 /* the glyphs' own box, without padding spaces */
+        while (s[lead] == ' ') lead++;
+        size_t n = strlen(s);
+        while (n > (size_t)lead && s[n - 1 - trail] == ' ') trail++;
+        SDL_Rect r = {x, y + th / 6, tw, th * 2 / 3}, clip;
+        if (SDL_RenderIsClipEnabled(ren)) {
+            SDL_RenderGetClipRect(ren, &clip);
+            if (!SDL_IntersectRect(&r, &clip, &r)) r.w = 0;
+        }
+        if (r.x < 0) r.w += r.x, r.x = 0;
+        if (r.x + r.w > W) r.w = W - r.x;
+        if (r.w > 0) {
+            tlog[ntlog].r = r;
+            snprintf(tlog[ntlog].s, sizeof tlog[ntlog].s, "%s", s);
+            ntlog++;
+        }
+    }
+    /* on whole device pixels, at its own size: one texture pixel to one screen pixel */
+    SDL_FRect d = {roundf(x * ui_px) / ui_px, roundf(y * ui_px) / ui_px, e->w / ui_px, e->h / ui_px};
+    SDL_RenderCopyF(ren, e->t, NULL, &d);
+    return (int)ceilf(e->w / ui_px);
 }
 
 static int text_w(const char *s)
 {
     int w = 0, h = 0;
     TTF_SizeUTF8(font, s, &w, &h);
-    return w;
+    return (int)ceilf(w / ui_px);
 }
 
 static void text_clip(SDL_Rect r, int x, int y, const char *s, Col c)
@@ -337,7 +437,10 @@ static void text_clip(SDL_Rect r, int x, int y, const char *s, Col c)
 
 static void text_center(SDL_Rect r, const char *s, Col c)
 {
-    text(r.x + (r.w - text_w(s)) / 2, r.y + (r.h - font_h) / 2, s, c);
+    int w = text_w(s);
+    if (tcheck > 0 && w > r.w - 2 && r.w > 8)   /* (checking text: a label wider than its box) */
+        fprintf(stderr, "overlap [too wide] \"%s\" is %d wide in a box %d wide at %d,%d\n", s, w, r.w, r.x, r.y);
+    text(r.x + (r.w - w) / 2, r.y + (r.h - font_h) / 2, s, c);
 }
 
 static char status_msg[300];
@@ -470,9 +573,143 @@ static const char *SNAP_NAMES[] = {"off", "bar", "1/2", "1/4", "1/8", "1/16"};
 static const double SNAP_BEATS[] = {0, 4, 2, 1, 0.5, 0.25};
 static int snap_i = 4;
 
+/* the screen's own pixels per window point (2 on a "Retina"-style screen, 1.5 on Windows at 150%) */
+static float window_density(SDL_Window *w)
+{
+    int pw = 0, ph = 0, ww = 0, wh = 0;
+    SDL_GetWindowSizeInPixels(w, &pw, &ph);
+    SDL_GetWindowSize(w, &ww, &wh);
+    return ww > 0 && pw > 0 ? (float)pw / ww : 1;
+}
+
+/* The size "Automatic" picks: 100% where the system already scales the window for us (it reports
+ * more device pixels than window points), else from the desktop's scale or the screen's DPI. */
+static float ui_auto(void)
+{
+    const char *e = getenv("TINYDAW_SCALE");
+    if (e && atof(e) >= 0.5 && atof(e) <= 3) return (float)atof(e);
+    if (win && window_density(win) > 1.1f) return 1;   /* the system scales already */
+    e = getenv("GDK_SCALE");
+    if (!e) e = getenv("QT_SCALE_FACTOR");
+    if (e && atof(e) >= 1 && atof(e) <= 3) return (float)atof(e);
+    float ddpi = 0, hdpi = 0, vdpi = 0;
+    if (win && SDL_GetDisplayDPI(SDL_GetWindowDisplayIndex(win), &ddpi, &hdpi, &vdpi) == 0 && hdpi >= 130 && hdpi < 600) {
+        float k = roundf(hdpi / 96 * 4) / 4;    /* to the nearest quarter */
+        return k < 1 ? 1 : k > 2 ? 2 : k;
+    }
+    return 1;
+}
+
+/* The largest size that leaves the window room for the whole layout on its screen. */
+static int ui_offscreen;                /* drawing off-screen (screenshots, the self-test): no real screen to fit */
+
+static float ui_max(void)
+{
+    SDL_Rect b;
+    if (ui_offscreen) return 3;
+    if (!win || SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(win), &b) != 0 || b.w <= 0) return 3;
+    float k = fminf(b.w / 1070.0f, (b.h - 40) / 560.0f);   /* the smallest the main window can be */
+    return k < 1 ? 1 : k;
+}
+
+static void ui_apply(void);
+static TTF_Font *open_font(int size);
+
+
+/* a window's size in logical units */
+static void logical_size(SDL_Renderer *r, int *w, int *h)
+{
+    int ow = 0, oh = 0;                         /* the window's own pixels: they don't lag a resize */
+    SDL_Window *wn = SDL_RenderGetWindow(r);
+    if (wn) SDL_GetWindowSizeInPixels(wn, &ow, &oh);
+    else SDL_GetRendererOutputSize(r, &ow, &oh);
+    *w = (int)(ow / ui_px);
+    *h = (int)(oh / ui_px);
+}
+
+
+/* Puts the chosen size into effect: the scale every window draws at, the font at its real size,
+ * the cached text redrawn, and the window big enough for the layout. */
+static void ui_apply(void)
+{
+    float want = ui_choice ? ui_choice / 100.0f : ui_auto(), top = ui_max();
+    ui_user = want > top ? top : want;
+    ui_px = ui_user * window_density(win);
+    int pt = (int)floorf(13 * ui_px);           /* never larger than the layout expects */
+    if (pt != font_pt) {
+        TTF_Font *f = open_font(pt);
+        if (f) {
+            if (font) TTF_CloseFont(font);
+            font = f;
+            font_pt = pt;
+        }
+    }
+    font_h = (int)lroundf(TTF_FontHeight(font) / ui_px);
+    text_forget(NULL);
+    SDL_RenderSetScale(ren, ui_px, ui_px);
+    for (int k = 0; k < NPOPS; k++)
+        if (pops[k].ren) SDL_RenderSetScale(pops[k].ren, ui_px, ui_px);
+}
+
+/* The window at its size for the interface: the layout's 1280 x 760 (or what's there, if bigger),
+ * no smaller than its minimum, and no bigger than the screen. */
+static void ui_fit_window(void)
+{
+    int lw, lh;
+    logical_size(ren, &lw, &lh);
+    int want_w = (int)((lw > 1280 ? lw : 1280) * ui_user), want_h = (int)((lh > 760 ? lh : 760) * ui_user);
+    SDL_Rect b;
+    if (!ui_offscreen && SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(win), &b) == 0 && b.w > 0) {
+        if (want_w > b.w) want_w = b.w;
+        if (want_h > b.h - 40) want_h = b.h - 40;
+    }
+    int ww, wh;
+    SDL_GetWindowSize(win, &ww, &wh);
+    if (ww != want_w || wh != want_h) SDL_SetWindowSize(win, want_w, want_h);
+}
+
+static void settings_save(void);
+
+/* A new interface size (0 = automatic): applied, the window resized to keep the layout, saved. */
+static void ui_set(int percent)
+{
+    float top = ui_max();
+    if (percent && percent / 100.0f > top + 0.001f) {
+        status("This screen has room for up to %.0f%%", floorf(top * 4) / 4 * 100);
+        percent = (int)(floorf(top * 4) / 4 * 100);
+    }
+    float before = ui_user;
+    ui_choice = percent;
+    ui_apply();
+    if (ui_user != before) {                    /* the window grows or shrinks with what's in it */
+        int ww, wh;
+        SDL_GetWindowSize(win, &ww, &wh);
+        int nw = (int)(ww * ui_user / before), nh = (int)(wh * ui_user / before);
+        SDL_Rect b;
+        if (!ui_offscreen && SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(win), &b) == 0 && b.w > 0) {
+            if (nw > b.w) nw = b.w;
+            if (nh > b.h - 40) nh = b.h - 40;
+        }
+        SDL_SetWindowMinimumSize(win, 1, 1);    /* the old size's minimum mustn't hold it; the next frame sets the new one */
+        SDL_SetWindowSize(win, nw, nh);
+    }
+    settings_save();
+    status("Interface size %.0f%%%s", ui_user * 100, percent ? "" : " (automatic: matches your screen)");
+}
+
+/* where the mouse is, in logical units of the window it's over (events can arrive already scaled
+ * or not, depending on the system; the mouse state is always in window points) */
+static void mouse_logical(int *x, int *y)
+{
+    int sx = 0, sy = 0;
+    SDL_GetMouseState(&sx, &sy);
+    *x = (int)floorf(sx / ui_user);
+    *y = (int)floorf(sy / ui_user);
+}
+
 static void layout(void)
 {
-    SDL_GetWindowSize(win, &W, &H);
+    logical_size(ren, &W, &H);
     L.top = 48;
     L.head = 170;
     L.ruler = 44;                       /* bar numbers above, minutes:seconds below */
@@ -1273,6 +1510,90 @@ static int button2(SDL_Rect r, const char *label, int on, int enabled)
 
 static int button(SDL_Rect r, const char *label, int on) { return button2(r, label, on, 1); }
 
+/* ---- tooltips: hold the mouse still over something for a moment and it says what it is.
+ * Widgets offer one with tip(); the last one under the mouse in a pass wins (the innermost), and
+ * tip_draw() puts it on top at the end of the pass, inside the window, clear of the pointer. */
+static int tips_on = 1;
+static struct {
+    int have, win;
+    SDL_Rect r;
+    char text[300];
+} tipc;
+static struct { int win; SDL_Rect r; Uint32 since; int pressed; } tip_seen;
+static char tip_shown[300];
+
+static void db_text(float v, char *buf, size_t n)
+{
+    if (v < 0.0005f) snprintf(buf, n, "-inf");
+    else snprintf(buf, n, "%+.1f dB", 20 * log10f(v));
+}
+
+static void tip(SDL_Rect r, const char *fmt, ...)
+{
+    if (!tips_on || drag.kind != D_NONE || !hit(r)) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tipc.text, sizeof tipc.text, fmt, ap);
+    va_end(ap);
+    tipc.have = 1;
+    tipc.r = r;
+}
+
+static void tip_draw(int win_k)
+{
+    if (!tipc.have) {
+        if (tip_seen.win == win_k) tip_seen.r.w = 0;
+        return;
+    }
+    tipc.have = 0;
+    Uint32 now = SDL_GetTicks();
+    if (tip_seen.win != win_k || memcmp(&tip_seen.r, &tipc.r, sizeof tipc.r)) {
+        tip_seen.win = win_k;
+        tip_seen.r = tipc.r;
+        tip_seen.since = now;
+        tip_seen.pressed = 0;
+    }
+    if (lpress || ldown || rpress) tip_seen.pressed = 1;   /* a click puts it away until the mouse moves on */
+    if (tip_seen.pressed || now - tip_seen.since < 550) return;
+    snprintf(tip_shown, sizeof tip_shown, "%s", tipc.text);   /* (for the self-test) */
+    /* word-wrapped to a comfortable width */
+    char lines[8][160];
+    int nl = 0, maxw = 0, limit = 340;
+    const char *p = tipc.text;
+    while (*p && nl < 8) {
+        int n = 0, last_space = -1;
+        char buf[160];
+        while (p[n] && p[n] != '\n' && n < 159) {
+            buf[n] = p[n];
+            buf[n + 1] = 0;
+            if (p[n] == ' ') last_space = n;
+            if (text_w(buf) > limit && last_space > 0) {
+                n = last_space;
+                break;
+            }
+            n++;
+        }
+        snprintf(lines[nl], sizeof lines[nl], "%.*s", n, p);
+        int lw = text_w(lines[nl]);
+        maxw = lw > maxw ? lw : maxw;
+        nl++;
+        p += n;
+        while (*p == ' ' || *p == '\n') p++;
+    }
+    int bw = maxw + 20, bh = nl * (font_h + 3) + 12;
+    int x = mx + 14, y = my + 22;
+    if (x + bw > W - 4) x = W - 4 - bw;
+    if (x < 4) x = 4;
+    if (y + bh > H - 4) y = my - bh - 10;         /* no room below: above the pointer */
+    if (y < 4) y = 4;
+    SDL_Rect box = {x, y, bw, bh};
+    fill((SDL_Rect){x + 3, y + 3, bw, bh}, alpha(DARK, 120));
+    fill(box, theme_light ? rgb(255, 252, 232) : rgb(44, 46, 54));
+    outline(box, ACCENT);
+    for (int i = 0; i < nl; i++) text(x + 10, y + 6 + i * (font_h + 3), lines[i], theme_light ? rgb(30, 30, 34) : rgb(236, 236, 240));
+}
+
+
 /* ---- drop-down lists */
 
 /* A field showing the current choice with an arrow. The arrow opens a list to pick from; with
@@ -1432,12 +1753,11 @@ static void scrollbar(SDL_Rect area, int *scroll, int content_h)
         if (*scroll > 0) line(area.x, area.y + i, trk.x - 3, area.y + i, alpha(DARK, a));
         if (*scroll < max) line(area.x, area.y + area.h - 1 - i, trk.x - 3, area.y + area.h - 1 - i, alpha(DARK, a));
     }
-    if (*scroll == 0 && !hit(area)) {            /* there's more: shown until you reach in or scroll */
-        const char *more = "more ▾";
-        int mw = text_w(more) + 12;
-        SDL_Rect pill = {trk.x - mw - 6, area.y + area.h - font_h - 8, mw, font_h + 4};
-        fill(pill, alpha(ACCENT, 200));
-        text_center(pill, more, DARK);
+    if (*scroll == 0 && !hit(area)) {            /* there's more: an arrow at the foot of the scrollbar, */
+        SDL_Rect b = {trk.x - 3, area.y + area.h - 17, sw + 6, 14};   /* clear of anything written */
+        fill(b, ACCENT);
+        for (int i = 0; i < 4; i++)
+            line(b.x + b.w / 2 - 3 + i, b.y + 5 + i, b.x + b.w / 2 + 3 - i, b.y + 5 + i, DARK);
     }
     int dragging = drag.kind == D_SCROLL && drag.inum == scroll;
     int hov = drag.kind == D_NONE && hit((SDL_Rect){trk.x - 3, trk.y, trk.w + 6, trk.h});
@@ -1457,6 +1777,8 @@ static void scrollbar(SDL_Rect area, int *scroll, int content_h)
 
 static void number_box(SDL_Rect r, const char *label, const char *value, int active)
 {
+    tip(r, "%s%s%s: drag sideways or use the mouse wheel to change it (Shift for fine steps), or click it and type",
+        label, label[0] ? " " : "", value);
     int hov = hit(r) && (drag.kind == D_NONE || active);
     field_box(r, hov, active);
     text(r.x + 8, r.y + (r.h - font_h) / 2, label, DIM);
@@ -2820,16 +3142,43 @@ static struct {
 } take;
 static int rec_quantize = 1;            /* recorded notes snap to the grid when the take ends */
 
+/* Filled shapes as triangles, not rows of lines: solid and smooth at any interface size. */
+static void poly_fill(const float *xy, int n, Col c)   /* a convex polygon, n points */
+{
+    SDL_Vertex v[72];
+    int idx[210], ni = 0;
+    if (n > 72) n = 72;
+    for (int i = 0; i < n; i++) {
+        v[i].position = (SDL_FPoint){xy[2 * i], xy[2 * i + 1]};
+        v[i].color = (SDL_Color){c.r, c.g, c.b, c.a};
+        v[i].tex_coord = (SDL_FPoint){0, 0};
+    }
+    for (int i = 1; i + 1 < n; i++) {
+        idx[ni++] = 0;
+        idx[ni++] = i;
+        idx[ni++] = i + 1;
+    }
+    SDL_RenderGeometry(ren, NULL, v, n, idx, ni);
+}
+
 static void disc_small(int cx, int cy, int r, Col c)
 {
-    for (int dy = -r; dy <= r; dy++) {
-        int dx = (int)sqrt((double)(r * r - dy * dy));
-        line(cx - dx, cy + dy, cx + dx, cy + dy, c);
+    float xy[2 * 40], fr = r + 0.5f;
+    for (int i = 0; i < 40; i++) {
+        float a = (float)i / 40 * 6.2831853f;
+        xy[2 * i] = cx + 0.5f + fr * cosf(a);
+        xy[2 * i + 1] = cy + 0.5f + fr * sinf(a);
     }
+    poly_fill(xy, 40, c);
 }
 
 static void take_note_off(int note, long frame);
 static void take_notes_finish(void);
+static void mic_take_start(void);
+static int mic_take_end(void);
+static int armed_track(void);
+static int open_input(void);
+static double rec_offset(void);
 static void rec_drain(void);
 static int note_add(int pattern, int note, long start, long len, float vel);
 
@@ -2957,11 +3306,20 @@ static void take_check(void)
         take.note_clip = -1;
         take.notes = 0;
         for (int i = 0; i < 128; i++) take.held[i] = -1;
+        mic_take_start();                       /* and the microphone, if a track is armed for it */
     } else if (!now && take.on) {
         take.on = 0;
         double secs = (SDL_GetTicks() - take.since) / 1000.0;
         rec_drain();                            /* what was played up to the end belongs to this take */
         take_notes_finish();
+        int mc = mic_take_end();
+        if (mc >= 0) {
+            char pos[48];
+            pos_text(P.clips[mc].start, pos, sizeof pos);
+            status("Recorded %.1f s from the microphone onto %s, from %s%s", (double)P.clips[mc].length / SR,
+                   P.tracks[P.clips[mc].track].name, pos, take.hits || take.notes ? " (and what you played)" : "");
+            return;
+        }
         if (take.notes && !take.hits)
             status("Recorded %d note%s in %.1f s into a note clip on track %d (%s)%s", take.notes,
                    take.notes == 1 ? "" : "s", secs, take.track + 1, P.tracks[take.track].name,
@@ -3196,6 +3554,11 @@ static int pads_content(int x, int y, int w)
     for (int i = 0; i < NPADS; i++) {
         SDL_Rect r = {x + (i % 4) * (pw + gap), y + (i / 4) * (ph + gap), pw, ph};
         pad_rects[i] = r;
+        if (P.pads[i].sample >= 0 && P.pads[i].sample < P.nsamples)
+            tip(r, "Pad %d: %s. Click or press its key to play; right-click to copy, paste or clear", i + 1,
+                P.samples[P.pads[i].sample].name);
+        else
+            tip(r, "Pad %d is empty: drag a library sound onto it, or right-click to paste one", i + 1);
         Pad *pd = &P.pads[i];
         int has = pd->sample >= 0 && pd->sample < P.nsamples;
         Uint32 age = now - pad_flash[i];
@@ -4737,6 +5100,14 @@ static void rail(void)
     for (int i = 0; i < RI_COUNT; i++) {
         int y = i == RI_SETTINGS ? r.y + r.h - 62 : r.y + 6 + i * 62;
         SDL_Rect b = {4, y, RAIL_W - 8, 56};
+        static const char *const RTIPS[RI_COUNT] = {
+            "Sounds (Ctrl+1): your library, the Generator, the Singer, and plain tones",
+            "Theory (Ctrl+2): drum beats, keys and scales, chords and progressions",
+            "Pads (Ctrl+3): play sounds live from the keyboard, a controller or MIDI, and record",
+            "Mixer (Ctrl+4): levels, effects, the master, and the mixing console",
+            "Visual (Ctrl+5): spectrum, waveform, meters and the full-screen show",
+            "Settings (Ctrl+6): look and size, audio, inputs, keys"};
+        tip(b, "%s", RTIPS[i]);
         int on = *RAIL_FLAG[i], hov = hit(b) && drag.kind == D_NONE;
         if (ST.shaped) {
             if (on) shape_fill(b, ST.rail_on, ST.rail_on, ST.radius, theme_kind == THEME_AERO);
@@ -5047,6 +5418,8 @@ static void library_list(int x, int y, int w, int bottom)
         int i = vis[row];
         SDL_Rect r = {x, y + (row - lib_scroll) * item_h, lw, item_h - 3};
         lib_rects[i] = r;
+        tip(r, "%s (%.2f s): click to hear it, drag it onto a track or a pad, right-click to copy, paste or remove",
+            P.samples[i].name, (double)P.samples[i].frames / SR);
         int hov = hit(r) && drag.kind == D_NONE;
         fill(r, P.preview == i ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
         if (lib_flash == i && SDL_GetTicks() - lib_flash_at < 1500) outline(r, ACCENT);   /* just pasted */
@@ -5333,6 +5706,13 @@ static int gx_shape(int x, int y, int w)
         int hx = x + w - ww;
         text(hx, y + 4, MACRO_NAMES[m][2], DIM);
         gx_slide_r[m] = (SDL_Rect){x + lw + lo, y, hx - (x + lw + lo) - 16, font_h + 8};
+        static const char *const MTIPS[MACROS] = {
+            "Brightness: muffled (dark) to crisp (bright)",
+            "Softness: a hard start and short tail (snappy) to a slow fade in and long tail (smooth)",
+            "Thickness: one thin voice to several detuned, wider and with more sub (fat)",
+            "Grit: clean, or saturated and then crushed (dirty)",
+            "Wobble: still, or the filter moving in a rhythm (wobbly)"};
+        tip((SDL_Rect){x, y, w, font_h + 8}, "%s. Double-click the slider to put it back in the middle", MTIPS[m]);
         changed |= slider(gx_slide_r[m], &GX.macro[m]);
         y += font_h + 16;
     }
@@ -5410,7 +5790,10 @@ static int generator(int x, int y, int w)
 {
     y = section(x, y, w, "1  WHAT KIND OF MUSIC?");
     {
-        int cols = 5, gap = 4, bw = (w - gap * (cols - 1)) / cols;
+        int cols = 5, gap = 4, widest = 0;          /* as many columns as the longest name allows */
+        for (int i = 0; i < NSYNTH_GENRES; i++) widest = text_w(SYNTH_GENRES[i]) > widest ? text_w(SYNTH_GENRES[i]) : widest;
+        while (cols > 2 && (w - gap * (cols - 1)) / cols < widest + 14) cols--;
+        int bw = (w - gap * (cols - 1)) / cols;
         for (int i = -1; i < NSYNTH_GENRES; i++) {
             int k = i + 1;
             SDL_Rect r = {x + (k % cols) * (bw + gap), y + (k / cols) * 32, bw, 28};
@@ -5421,7 +5804,10 @@ static int generator(int x, int y, int w)
     }
     y = section(x, y, w, "2  WHAT IS THE SOUND FOR?");
     {
-        int cols = 5, gap = 4, bw = (w - gap * (cols - 1)) / cols;
+        int cols = 5, gap = 4, widest = text_w("Anything");
+        for (int i = 0; i < NSYNTH_KINDS; i++) widest = text_w(SYNTH_KINDS[i]) > widest ? text_w(SYNTH_KINDS[i]) : widest;
+        while (cols > 2 && (w - gap * (cols - 1)) / cols < widest + 14) cols--;
+        int bw = (w - gap * (cols - 1)) / cols;
         for (int i = -1; i < NSYNTH_KINDS; i++) {
             int k = i + 1;
             SDL_Rect r = {x + (k % cols) * (bw + gap), y + (k / cols) * 32, bw, 28};
@@ -5856,7 +6242,39 @@ static int settings_content(int x, int y, int w)
         }
         y += 46;
         text(x, y, "The full-screen show is always dark.", DIM);
-        y += font_h + 10;
+        y += font_h + 16;
+        y = section(x, y, w, "TOOLTIPS");
+        if (button((SDL_Rect){x, y, w, 28}, tips_on ? "Tooltips: on (hold the mouse still over something)" : "Tooltips: off",
+                   tips_on)) {
+            tips_on = !tips_on;
+            settings_save();
+        }
+        y += 40;
+        y = section(x, y, w, "INTERFACE SIZE");
+        {                                       /* everything bigger or smaller, sharp at any size */
+            static const int SIZES[6] = {0, 100, 125, 150, 175, 200};
+            static const char *const NAMES[6] = {"Automatic", "100%", "125%", "150%", "175%", "200%"};
+            float top = ui_max();
+            int aw = text_w("Automatic") + 24, bw = (w - aw - 5 * 4) / 5;   /* "Automatic" gets the room it needs */
+            for (int i = 0; i < 6; i++) {
+                int fits = !SIZES[i] || SIZES[i] / 100.0f <= top + 0.001f;
+                SDL_Rect r = i == 0 ? (SDL_Rect){x, y, aw, 30}
+                                    : (SDL_Rect){x + aw + 4 + (i - 1) * (bw + 4), y, i == 5 ? w - aw - 4 - 4 * (bw + 4) : bw, 30};
+                if (button2(r, NAMES[i], ui_choice == SIZES[i], fits)) ui_set(SIZES[i]);
+            }
+            y += 38;
+            char buf[120];
+            snprintf(buf, sizeof buf, "Now %.0f%%%s. Ctrl+= and Ctrl+- change it, Ctrl+0 back to automatic.",
+                     ui_user * 100, ui_choice ? "" : " (automatic)");
+            text_clip((SDL_Rect){x, y, w, font_h + 2}, x, y, buf, DIM);
+            y += font_h + 4;
+            if (top < 2) {
+                snprintf(buf, sizeof buf, "This screen has room for up to %.0f%%.", floorf(top * 4) / 4 * 100);
+                text(x, y, buf, DIM);
+                y += font_h + 4;
+            }
+            y += 6;
+        }
         break;
     }
     case 1: {
@@ -5885,6 +6303,92 @@ static int settings_content(int x, int y, int w)
                 settings_save();
             }
             y += 42;
+        }
+        y = section(x, y, w, "INPUT: THE MICROPHONE");
+        {                                       /* the system default, or a particular device */
+            static char names[DD_MAX][48];
+            static const char *ptrs[DD_MAX];
+            static int pick;
+            int n = SDL_GetNumAudioDevices(1), m = 1;
+            snprintf(names[0], sizeof names[0], "System default");
+            ptrs[0] = names[0];
+            int cur = 0;
+            for (int i = 0; i < n && m < DD_MAX; i++) {
+                const char *name = SDL_GetAudioDeviceName(i, 1);
+                if (!name) continue;
+                if (!strcmp(audio_in, name)) cur = m;
+                snprintf(names[m], sizeof names[m], "%s", name);
+                ptrs[m] = names[m];
+                m++;
+            }
+            if (!(dd.open && dd.sel == &pick)) pick = cur;
+            if (dropdown((SDL_Rect){x, y, w, 30}, "", ptrs, m, &pick, 0)) {
+                if (pick == 0) audio_in[0] = 0;
+                else snprintf(audio_in, sizeof audio_in, "%s", names[pick]);
+                if (cap_dev) open_input();
+                settings_save();
+            }
+            y += 38;
+            SDL_Rect mr = {x, y + 4, w - 90, 12};    /* its level, live */
+            static Meter im;
+            im.level = in_meter;
+            im.peak = fmaxf(im.peak * 0.97f, in_meter);
+            if (in_meter > 0.99f) im.clipped = 1;
+            meter_draw(mr, &im, 0);
+            if (hit(mr) && lpress) im.clipped = 0;
+            text(x + w - 82, y + 2, cap_dev ? (in_meter > 0.0005f ? "listening" : "silent") : "closed", cap_dev ? TEXT : DIM);
+            y += 26;
+            double g = in_gain_db;
+            number((SDL_Rect){x, y, (w - 8) / 2, 26}, "Input gain", &g, -24, 24, 0.05, "%+.1f dB");
+            if (g != in_gain_db) {
+                in_gain_db = (float)g;
+                settings_save();
+            }
+            if (button((SDL_Rect){x + (w - 8) / 2 + 8, y, (w - 8) / 2, 26}, monitor_on ? "Hear yourself: on" : "Hear yourself: off",
+                       monitor_on)) {
+                monitor_on = !monitor_on;
+                settings_save();
+            }
+            y += 34;
+            static double off;
+            if (!(drag.kind == D_NUM && drag.num == &off) && !(numedit.active && numedit.v == &off)) off = rec_offset();
+            char lab[40];
+            snprintf(lab, sizeof lab, rec_offset_ms < 0 ? "Offset (auto)" : "Offset");
+            number((SDL_Rect){x, y, (w - 8) / 2, 26}, lab, &off, 0, 500, 0.2, "%.0f ms");
+            if (fabs(off - rec_offset()) > 0.01) {
+                rec_offset_ms = off;
+                settings_save();
+            }
+            if (button((SDL_Rect){x + (w - 8) / 2 + 8, y, (w - 8) / 2, 26}, "Automatic offset", rec_offset_ms < 0)) {
+                rec_offset_ms = -1;
+                settings_save();
+            }
+            y += 34;
+            {                                   /* word-wrapped to the panel */
+                const char *help = "Arm a track with its red dot, then press Rec. Wear headphones to hear yourself, "
+                                   "or the speakers feed back. The offset moves each take earlier, to make up for "
+                                   "the system's delay.";
+                char ln[200];
+                int n = 0;
+                const char *q = help;
+                while (*q) {
+                    int k = 0, brk = 0;
+                    while (q[k] && k < (int)sizeof ln - 1) {
+                        memcpy(ln, q, (size_t)k + 1);
+                        ln[k + 1] = 0;
+                        if (text_w(ln) > w) break;
+                        if (q[k] == ' ') brk = k;
+                        k++;
+                    }
+                    int take_n = q[k] ? (brk ? brk : k) : k;
+                    memcpy(ln, q, (size_t)take_n);
+                    ln[take_n] = 0;
+                    text(x, y + n++ * (font_h + 2), ln, DIM);
+                    q += take_n;
+                    while (*q == ' ') q++;
+                }
+                y += n * (font_h + 2) + 12;
+            }
         }
         y = section(x, y, w, "PROJECT");
         text(x, y + 6, "Sample rate", DIM);
@@ -5944,6 +6448,7 @@ static int settings_content(int x, int y, int w)
             {"M", "metronome on/off"}, {"T", "tap tempo"}, {"L", "loop on/off"},
             {"Ctrl+Z / Ctrl+Shift+Z", "undo / redo"}, {"Ctrl+S, Ctrl+O, Ctrl+N", "save, open, new"},
             {"Ctrl+E", "export"}, {"Ctrl+1 .. Ctrl+6", "open a panel"}, {"Ctrl+B", "hide / show the panel"},
+            {"Ctrl+= / Ctrl+-", "interface bigger / smaller"}, {"Ctrl+0", "interface size: automatic"},
             {"Ctrl+,", "settings"}, {"F11", "full-screen show"}, {"Ctrl+A, Esc", "select all, none"},
             {"Shift+click, drag a box", "select several"}, {"Delete", "delete selected"},
             {"Ctrl+C / X / V", "copy, cut, paste"}, {"Ctrl+D", "duplicate"}, {"Arrows", "nudge selected"},
@@ -6021,6 +6526,8 @@ static void settings_save(void)
     FILE *f = fopen(settings_file(), "w");
     if (!f) return;
     fprintf(f, "# tinydaw settings\ntheme %d\naudio_output %s\npanel %d\n", theme_choice, audio_out, last_panel);
+    fprintf(f, "ui_scale %d\ntooltips %d\n", ui_choice, tips_on);
+    fprintf(f, "audio_input %s\ninput_gain %.2f\nmonitor %d\nrec_offset %.1f\n", audio_in, in_gain_db, monitor_on, rec_offset_ms);
     fprintf(f, "metronome %d %d %d %d %d %d %.3f\n", MET.on, MET.sound, MET.sub, MET.accent, MET.countin,
             MET.countin_rec_only, MET.volume);
     fprintf(f, "show %d %d %.0f\n", show_scene, show_cycle, show_each);
@@ -6036,6 +6543,12 @@ static void settings_load(void)
         line_[strcspn(line_, "\r\n")] = 0;
         int v;
         if (sscanf(line_, "theme %d", &v) == 1 && v >= 0 && v < THEME_COUNT) theme_choice = v;
+        else if (sscanf(line_, "ui_scale %d", &v) == 1 && (v == 0 || (v >= 50 && v <= 300))) ui_choice = v;
+        else if (sscanf(line_, "tooltips %d", &v) == 1) tips_on = v != 0;
+        else if (!strncmp(line_, "audio_input ", 12)) snprintf(audio_in, sizeof audio_in, "%.255s", line_ + 12);
+        else if (sscanf(line_, "input_gain %f", &in_gain_db) == 1) in_gain_db = in_gain_db < -24 ? -24 : in_gain_db > 24 ? 24 : in_gain_db;
+        else if (sscanf(line_, "monitor %d", &v) == 1) monitor_on = v != 0;
+        else if (sscanf(line_, "rec_offset %lf", &rec_offset_ms) == 1) rec_offset_ms = rec_offset_ms > 500 ? 500 : rec_offset_ms;
         else if (!strncmp(line_, "audio_output ", 13)) snprintf(audio_out, sizeof audio_out, "%.255s", line_ + 13);
         else if (sscanf(line_, "panel %d", &v) == 1 && v >= 0 && v < RI_COUNT) last_panel = v;
         else if (!strncmp(line_, "show ", 5)) {
@@ -6143,16 +6656,21 @@ static void top_bar(void)
     }
     int x = 10, y = 9, h = 30;
     file_btn = (SDL_Rect){x, y, 44, h};          /* the menu: files, export, settings, show */
+    tip(file_btn, "The menu: new, open, save, examples, export audio and MIDI, the mixing console, settings");
     if (button(file_btn, "", menu_open)) menu_open = !menu_open;
     for (int i = 0; i < 3; i++) fill((SDL_Rect){x + 13, y + 9 + i * 5, 18, 2}, btn_fg(menu_open));
     x += 54;
+    if (nundo > 0) tip((SDL_Rect){x, y, 54, h}, "Undo: %s (Ctrl+Z)", undo_stack[nundo - 1].label[0] ? undo_stack[nundo - 1].label : "the last change");
     if (button2((SDL_Rect){x, y, 54, h}, "Undo", 0, nundo > 0 || !state_same(&committed))) undo_redo(0);
     x += 58;
+    if (nredo > 0) tip((SDL_Rect){x, y, 54, h}, "Redo: %s (Ctrl+Shift+Z)", redo_stack[nredo - 1].label[0] ? redo_stack[nredo - 1].label : "what was undone");
     if (button2((SDL_Rect){x, y, 54, h}, "Redo", 0, nredo > 0)) undo_redo(1);
     x += 66;
     line(x - 6, y + 4, x - 6, y + h - 4, sep);
+    tip((SDL_Rect){x, y, 72, h}, P.playing ? "Stop playing (Space)" : "Play from the playhead (Space)");
     if (button((SDL_Rect){x, y, 72, h}, P.playing ? "Stop" : "Play", P.playing)) toggle_play();
     x += 76;
+    tip((SDL_Rect){x, y, 62, h}, "Loop: play the loop region over and over (L). Right-drag in the ruler to set it");
     if (button((SDL_Rect){x, y, 62, h}, "Loop", P.loop)) toggle_loop();
     x += 72;
     line(x - 6, y + 4, x - 6, y + h - 4, sep);
@@ -6171,6 +6689,7 @@ static void top_bar(void)
                 if (TS_NUM[i] == *pn && TS_DEN[i] == *pd) tsel = i;
         }
         ts_rect = (SDL_Rect){x, y, 64, h};
+        tip(ts_rect, "Time signature here: beats in a bar (3/4, 6/8...). Add a change mid-song from the metronome menu");
         static char other[16];
         const char *items[NTS];
         for (int i = 0; i < NTS; i++) items[i] = TS_NAMES[i];
@@ -6192,13 +6711,16 @@ static void top_bar(void)
     number(a4_rect, "A4", &P.a4, 415, 466, 0.05, "%.1f Hz");   /* tuning for new sounds */
     x += 120;
     snap_rect = (SDL_Rect){x, y, 110, h};
+    tip(snap_rect, "Snap: the grid clips and notes jump to. Click for the next one, the arrow for the list; hold Shift while dragging to ignore it");
     dropdown(snap_rect, "Snap ", SNAP_NAMES, 6, &snap_i, 1);   /* click: next, arrow: list */
     x += 118;
+    tip((SDL_Rect){x, y, 62, h}, "The metronome click (M)");
     if (button((SDL_Rect){x, y, 62, h}, "Click", MET.on)) {
         MET.on = !MET.on;
         settings_save();
     }
     met_btn = (SDL_Rect){x + 64, y, 22, h};
+    tip(met_btn, "Metronome and tempo: the click's sound, count-in, tap tempo, and tempo or time signature changes");
     if (button(met_btn, "", met_open)) met_open = !met_open;
     for (int i = 0; i < 4; i++)                     /* a small down arrow */
         line(met_btn.x + 7 + i, y + 13 + i, met_btn.x + 15 - i, y + 13 + i, btn_fg(met_open));
@@ -7284,7 +7806,8 @@ static void track_headers(void)
         int bh = compact ? L.lane_h - 10 : 20, by = compact ? y + 3 : y + 5;
         if (bh > 20) bh = 20;
         if (mixer_open && t == sel_track) fill((SDL_Rect){L.left + 4, y, L.head - 4, L.lane_h - 1}, tone(PANEL3, 1.1f));
-        text_clip((SDL_Rect){L.left + 8, y, L.head - 102, L.lane_h}, L.left + 12, by + (bh - font_h) / 2, tr->name, TEXT);
+        text_clip((SDL_Rect){L.left + 8, y, L.lane_h >= 63 ? L.head - 102 : L.head - 128, L.lane_h}, L.left + 12,
+                  by + (bh - font_h) / 2, tr->name, TEXT);
         if (track_has_fx(tr) && L.lane_h >= 56) text(L.left + 12, by + bh + 3, "fx", ACCENT);
         SDL_Rect name_r = {L.left + 4, y, L.head - 92, L.lane_h - 16};
         if (drag.kind == D_NONE && hit(name_r) && lpress) {      /* pick it for the Mixer pane */
@@ -7293,11 +7816,39 @@ static void track_headers(void)
             lpress = 0;
         }
         SDL_Rect m = {L.left + L.head - 58, by, 22, bh}, s = {L.left + L.head - 32, by, 22, bh};
+        {                                       /* record-arm: the microphone records onto this track */
+            int roomy = L.lane_h >= 63;
+            SDL_Rect rb = roomy ? (SDL_Rect){L.left + L.head - 32, by + bh + 4, 22, 18}
+                                : (SDL_Rect){L.left + L.head - 110, by, 22, bh};
+            tip(rb, track_arm[t] ? "Armed: Rec records the microphone onto %s (click to disarm)"
+                                 : "Arm %s to record the microphone onto it, then press Rec", tr->name);
+            int hov = hit(rb) && drag.kind == D_NONE;
+            style_box(rb, track_arm[t] ? 2 : hov ? 1 : 0);
+            if (track_arm[t]) {                 /* red, with the microphone's level rising inside */
+                fill(rb, rgb(190, 45, 40));
+                float db = in_meter > 1e-5f ? 20 * log10f(in_meter) : -60, k = (db + 60) / 60;
+                k = k < 0 ? 0 : k > 1 ? 1 : k;
+                int lh = (int)((rb.h - 4) * k);
+                fill((SDL_Rect){rb.x + 2, rb.y + rb.h - 2 - lh, rb.w - 4, lh}, in_meter > 0.95f ? rgb(255, 220, 80) : rgb(255, 150, 140));
+            }
+            disc_small(rb.x + rb.w / 2, rb.y + rb.h / 2, 4, track_arm[t] ? rgb(255, 255, 255) : rgb(210, 60, 55));   /* a record dot */
+            if (hov && lpress) {
+                lpress = 0;
+                int was = track_arm[t];
+                memset(track_arm, 0, sizeof track_arm);   /* one track at a time: one microphone */
+                track_arm[t] = !was;
+                status(track_arm[t] ? "%s is armed: press Rec to record the microphone onto it (Settings > Audio picks the input)"
+                                    : "%s disarmed", tr->name);
+            }
+        }
+        tip(m, "Mute %s", tr->name);
+        tip(s, "Solo %s: hear only the soloed tracks", tr->name);
         if (button(m, "M", tr->mute)) { LOCK(); tr->mute = !tr->mute; UNLOCK(); }
         if (button(s, "S", tr->solo)) { LOCK(); tr->solo = !tr->solo; UNLOCK(); }
         SDL_Rect ab = {L.left + L.head - 84, by, 22, bh};
         int automated = 0;
         for (int p = 0; p < AUTO_PARAMS; p++) automated |= auto_lane(&P, t, p, NULL) > 0;
+        tip(ab, "Automation: draw %s's volume, pan, filter or sends changing over time", tr->name);
         if (button(ab, "A", auto_open[t])) {           /* show or hide its automation lane */
             auto_open[t] = !auto_open[t];
             if (auto_open[t] && !auto_lane(&P, t, auto_param[t], NULL))   /* show a lane with points in it */
@@ -7312,6 +7863,11 @@ static void track_headers(void)
         if (auto_open[t]) auto_header(t, y + L.lane_h);
         meter_draw((SDL_Rect){L.left + L.head - 7, y + 3, 4, L.lane_h - 7}, &track_meter[t], 1);
         SDL_Rect vb = volume_bar(t);
+        {
+            char db[24];
+            db_text(tr->volume, db, sizeof db);
+            tip((SDL_Rect){vb.x, vb.y - 4, vb.w, vb.h + 8}, "%s volume %s: drag it, or use the Mixer's Levels for faders in dB", tr->name, db);
+        }
         fill(vb, PANEL3);
         int vol_auto;
         float av = auto_at(&P, t, AUTO_VOLUME, P.playhead, &vol_auto), shown = vol_auto ? auto_to_value(AUTO_VOLUME, av) : tr->volume;
@@ -7419,6 +7975,15 @@ static void timeline(void)
         const Clip *c = &P.clips[i];
         SDL_Rect r = clip_rect(c);
         if (r.x > W || r.x + r.w < L.tl_x) continue;
+        {
+            char pos[48];
+            pos_text(c->start, pos, sizeof pos);
+            char gain[24] = "";
+            if (c->gain_db != 0) snprintf(gain, sizeof gain, ", %+.1f dB", c->gain_db);
+            tip(r, "%s%s on %s, %s, %.2f s%s. Drag to move it, its edges to trim. Double-click: %s",
+                c->pattern > 0 ? "Notes: " : "", P.samples[c->sample].name, P.tracks[c->track].name, pos,
+                (double)c->length / SR, gain, c->pattern > 0 ? "the piano roll" : "the clip editor");
+        }
         Col col = TRACK_COL[c->track];
         fill(r, wash(col, 0.42f));
         fill((SDL_Rect){r.x, r.y, r.w, font_h + 4}, wash(col, 0.78f));
@@ -7646,11 +8211,10 @@ enum { TI_START, TI_BACK, TI_PLAY, TI_PAUSE, TI_STOP, TI_FWD, TI_END, TI_LOOP, T
 
 static void tri(int x, int cy, int hgt, int dir, Col c)  /* a filled triangle pointing left (-1) or right */
 {
-    for (int i = 0; i <= hgt; i++) {
-        int half = (hgt - i) * 6 / 10;
-        int xx = dir > 0 ? x + i : x - i;
-        line(xx, cy - half, xx, cy + half, c);
-    }
+    float half = hgt * 6 / 10 + 0.5f, tip = dir > 0 ? x + hgt + 1.0f : x - hgt;
+    float bx = dir > 0 ? (float)x : x + 1.0f;
+    float xy[6] = {bx, cy + 0.5f - half, tip, cy + 0.5f, bx, cy + 0.5f + half};
+    poly_fill(xy, 3, c);
 }
 
 static void transport_icon(int kind, SDL_Rect r, Col c)
@@ -7675,6 +8239,11 @@ static void transport_icon(int kind, SDL_Rect r, Col c)
 
 static int transport_button(SDL_Rect r, int kind, int on, Col tint)
 {
+    static const char *const TIPS[] = {"To the start (Home)", "Back a bar (Ctrl+Left)", "Play (Space)", "Pause (Space)",
+                                       "Stop: back to where play began; again for the start",
+                                       "Forward a bar (Ctrl+Right)", "To the end (End)", "Loop the loop region (L)",
+                                       "Record: plays the song and records the pads, MIDI keys and (on an armed track) the microphone"};
+    tip(r, "%s", TIPS[kind]);
     int hov = hit(r) && drag.kind == D_NONE;
     style_box(r, on ? 2 : hov ? 1 : 0);
     transport_icon(kind, r, on ? btn_fg(1) : tint.a ? tint : btn_fg(0));
@@ -8122,6 +8691,33 @@ static void key(SDL_Keysym k)
         case SDLK_q:
             request(ACT_QUIT, NULL);
             return;
+        case SDLK_EQUALS:
+        case SDLK_PLUS:
+        case SDLK_KP_PLUS:
+        case SDLK_MINUS:
+        case SDLK_KP_MINUS: {                   /* the interface's size, a step at a time */
+            static const int STEPS[5] = {100, 125, 150, 175, 200};
+            int cur = (int)lroundf(ui_user * 100), up = k.sym != SDLK_MINUS && k.sym != SDLK_KP_MINUS, pick = cur;
+            if (up) {
+                for (int i = 0; i < 5; i++)
+                    if (STEPS[i] > cur) {
+                        pick = STEPS[i];
+                        break;
+                    }
+            } else {
+                for (int i = 4; i >= 0; i--)
+                    if (STEPS[i] < cur) {
+                        pick = STEPS[i];
+                        break;
+                    }
+            }
+            if (pick != cur) ui_set(pick);
+            return;
+        }
+        case SDLK_0:
+        case SDLK_KP_0:
+            ui_set(0);
+            return;
         case SDLK_a:
             for (int i = 0; i < P.nclips; i++) csel[i] = 1;
             sel_fix_primary();
@@ -8298,6 +8894,15 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
     }
     for (int i = 0; i < 2 * frames; i++) out[i] *= P.master;
     master_dynamics(MX, &P, out, frames);         /* the master's compressor and limiter */
+    if (monitor_on && cap_ring && cap_dev) {      /* hearing yourself: the newest of the microphone */
+        unsigned w = (unsigned)SDL_AtomicGet(&cap_w);
+        if (w - mon_r > (unsigned)(2 * frames + 1024)) mon_r = w - (unsigned)frames;   /* stay close behind */
+        for (int i = 0; i < frames && mon_r != w; i++, mon_r++) {
+            unsigned j = mon_r % CAP_RING;
+            out[2 * i] += cap_ring[2 * j];
+            out[2 * i + 1] += cap_ring[2 * j + 1];
+        }
+    }
     for (int i = 0; i < 2 * frames; i++) out[i] = soft_clip(out[i]);
     for (int i = 0; i < frames; i++) {          /* for the meters and the visualizer */
         vis_ring[2 * vis_pos] = out[2 * i];
@@ -8329,8 +8934,200 @@ static void open_audio(void)
         status("Output \"%s\" isn't available: using the default", audio_out);
         dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     }
-    if (dev) SDL_PauseAudioDevice(dev, 0);
-    else status("No audio output: %s", SDL_GetError());
+    if (dev) {
+        out_buffer = have.samples;
+        SDL_PauseAudioDevice(dev, 0);
+    } else {
+        status("No audio output: %s", SDL_GetError());
+    }
+}
+
+
+/* ---------------------------------------------------------------- the microphone
+ *
+ * The input device runs only while it's needed: a track is armed to record it, or the Input
+ * settings are showing. Its callback (SDL's capture thread) writes into a ring, noting for each
+ * chunk where the song was; each frame the interface drains the ring into the take being recorded.
+ * A take's start is that song position, less the round trip through the audio buffers (and any
+ * offset set by hand), so what was played lands where it was heard. */
+
+static int armed_track(void)
+{
+    for (int t = 0; t < P.ntracks; t++)
+        if (track_arm[t]) return t;
+    return -1;
+}
+
+static void cap_cb(void *ud, Uint8 *stream, int len)
+{
+    (void)ud;
+    const float *in = (const float *)stream;
+    int ch = cap_channels < 1 ? 1 : cap_channels, frames = len / (int)(ch * sizeof(float));
+    unsigned w = (unsigned)SDL_AtomicGet(&cap_w);
+    int k = SDL_AtomicGet(&cap_nmark);         /* this chunk: where the song is */
+    cap_marks[k % 64].w = w;
+    cap_marks[k % 64].playhead = P.playhead;
+    cap_marks[k % 64].playing = P.playing && countin_left == 0;
+    SDL_AtomicSet(&cap_nmark, k + 1);
+    float g = powf(10, in_gain_db / 20), pk = in_peak;
+    for (int i = 0; i < frames; i++) {
+        float l = in[i * ch] * g, r = ch > 1 ? in[i * ch + 1] * g : l;
+        if (fabsf(l) > pk) pk = fabsf(l);
+        if (fabsf(r) > pk) pk = fabsf(r);
+        unsigned j = (w + (unsigned)i) % CAP_RING;
+        cap_ring[2 * j] = l;
+        cap_ring[2 * j + 1] = r;
+    }
+    in_peak = pk;
+    SDL_AtomicSet(&cap_w, (int)(w + (unsigned)frames));
+}
+
+static void close_input(void)
+{
+    if (cap_dev) SDL_CloseAudioDevice(cap_dev);
+    cap_dev = 0;
+}
+
+static int open_input(void)
+{
+    close_input();
+    if (!cap_ring) cap_ring = calloc((size_t)CAP_RING * 2, sizeof(float));
+    if (!cap_ring) return 0;
+    SDL_AudioSpec want, have;
+    SDL_zero(want);
+    want.freq = SR;
+    want.format = AUDIO_F32SYS;
+    want.channels = 2;
+    want.samples = SR > 96000 ? 2048 : SR > 48000 ? 1024 : 512;
+    want.callback = cap_cb;
+    cap_dev = SDL_OpenAudioDevice(audio_in[0] ? audio_in : NULL, 1, &want, &have, SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
+    if (!cap_dev && audio_in[0]) {
+        status("Input \"%s\" isn't available: using the default", audio_in);
+        cap_dev = SDL_OpenAudioDevice(NULL, 1, &want, &have, SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
+    }
+    if (!cap_dev) {
+#ifdef _WIN32
+        status("No microphone: %s (Windows Settings > Privacy > Microphone must let apps use it)", SDL_GetError());
+#else
+        status("No microphone: %s", SDL_GetError());
+#endif
+        return 0;
+    }
+    cap_channels = have.channels;
+    cap_buffer = have.samples;
+    cap_r = mon_r = (unsigned)SDL_AtomicGet(&cap_w);
+    SDL_PauseAudioDevice(cap_dev, 0);
+    return 1;
+}
+
+/* the automatic offset: one input buffer and one output buffer, in ms */
+static double rec_offset_auto(void) { return (double)(cap_buffer + out_buffer) * 1000.0 / SR; }
+static double rec_offset(void) { return rec_offset_ms >= 0 ? rec_offset_ms : rec_offset_auto(); }
+
+/* Each frame: the input open while it's wanted, its meter, and anything new into the take. */
+static void input_update(void)
+{
+    int want = armed_track() >= 0 || (settings_open && settings_sub == 1) || mic.on;
+    if (want && !cap_dev && !cap_fake) {
+        static Uint32 tried;                    /* don't hammer a missing device */
+        if (!tried || SDL_GetTicks() - tried > 3000) {
+            tried = SDL_GetTicks();
+            open_input();
+        }
+    } else if (!want && cap_dev) {
+        close_input();
+    }
+    in_meter = fmaxf(in_peak, in_meter * 0.85f);
+    in_peak = 0;
+    if (!cap_ring) return;
+    unsigned w = (unsigned)SDL_AtomicGet(&cap_w), n = w - cap_r;
+    if (n > CAP_RING) {                         /* fell behind: the oldest is gone */
+        if (mic.on) mic.lost = 1;
+        cap_r = w - CAP_RING;
+        n = CAP_RING;
+    }
+    if (mic.on && n) {
+        if (!mic.start_known) {                 /* where the first frame belongs in the song */
+            int k = SDL_AtomicGet(&cap_nmark), best = -1;
+            for (int i = 1; i <= 64 && i <= k; i++) {
+                int m = (k - i) % 64;
+                if (cap_marks[m].w <= cap_r && cap_marks[m].playing) {
+                    best = m;
+                    break;
+                }
+            }
+            long ph = best >= 0 ? cap_marks[best].playhead + (long)(cap_r - cap_marks[best].w) : P.playhead;
+            mic.start = ph - (long)llround(rec_offset() / 1000.0 * SR);
+            mic.start_known = 1;
+        }
+        if (mic.n + (long)n > mic.cap) {
+            long nc = mic.cap ? mic.cap * 2 : (long)SR * 30;
+            while (nc < mic.n + (long)n) nc *= 2;
+            float *nb = realloc(mic.buf, (size_t)nc * 2 * sizeof(float));
+            if (!nb) {
+                mic.lost = 1;
+                cap_r = w;
+                return;
+            }
+            mic.buf = nb;
+            mic.cap = nc;
+        }
+        for (unsigned i = 0; i < n; i++) {
+            unsigned j = (cap_r + i) % CAP_RING;
+            mic.buf[2 * (mic.n + i)] = cap_ring[2 * j];
+            mic.buf[2 * (mic.n + i) + 1] = cap_ring[2 * j + 1];
+        }
+        mic.n += n;
+    }
+    cap_r = w;
+}
+
+static void mic_take_start(void)
+{
+    int t = armed_track();
+    if (t < 0 || (!cap_dev && !cap_fake)) return;
+    mic.on = 1;
+    mic.track = t;
+    mic.n = 0;
+    mic.lost = 0;
+    mic.start_known = 0;
+    cap_r = (unsigned)SDL_AtomicGet(&cap_w);    /* from now on */
+}
+
+/* The take's sound: saved as a WAV in Music/tinydaw/Recordings and put on the armed track.
+ * Returns the clip, or -1. */
+static int mic_take_end(void)
+{
+    if (!mic.on) return -1;
+    input_update();                              /* the last of it */
+    mic.on = 0;
+    if (mic.n < SR / 20) return -1;              /* nothing worth keeping */
+    long start = mic.start, skip = 0;
+    if (start < 0) {                             /* began before the song: start at its start */
+        skip = -start;
+        start = 0;
+    }
+    if (skip >= mic.n) return -1;
+    char dir[900], path[1200], stamp[32], name[96], err[300], base[96];
+    user_dir("music", dir, sizeof dir);
+    snprintf(dir + strlen(dir), sizeof dir - strlen(dir), "/tinydaw/Recordings");
+    ensure_dir(dir);
+    snprintf(base, sizeof base, "%.60s", proj_path[0] ? path_base(proj_path) : "untitled");
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = 0;
+    for (char *q = base; *q; q++)
+        if (!isalnum((unsigned char)*q) && *q != '-') *q = '_';
+    time_t now = time(NULL);
+    strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", localtime(&now));
+    snprintf(path, sizeof path, "%s/%s-take-%s.wav", dir, base, stamp);
+    snprintf(name, sizeof name, "Mic take %d (%s)", take.number, P.tracks[mic.track].name);
+    int idx = sample_record(&P, mic.buf + 2 * skip, mic.n - skip, path, name, err, sizeof err);
+    if (idx < 0) {
+        status("Couldn't save the recording: %s", err);
+        return -1;
+    }
+    int c = clip_add(idx, mic.track, start, 0, P.samples[idx].frames);
+    return c;
 }
 
 static void set_rate(int rate)
@@ -11013,6 +11810,147 @@ static int selftest(void)
         make_demo();
     }
 
+
+    /* ---- the interface's size, and tooltips */
+    {
+        frame();
+        int w0 = W, h0 = H, tw0 = text_w("Play from the playhead"), fh0 = font_h;
+        ui_set(150);
+        frame();
+        int ow, oh;
+        SDL_GetWindowSizeInPixels(win, &ow, &oh);
+        int tw1 = text_w("Play from the playhead");
+        check(fabsf(ui_px - 1.5f) < 0.01f && ow == (int)(w0 * 1.5f) && W == w0 && H == h0 && font_pt == 19,
+              "at 150% the window grows and the layout keeps its size in its own units");
+        check(abs(tw1 - tw0) <= tw0 / 12 && abs(font_h - fh0) <= 1, "text measures the same at 150%, so nothing shifts or overlaps");
+        ui_set(100);
+        frame();
+        SDL_GetWindowSizeInPixels(win, &ow, &oh);
+        check(fabsf(ui_px - 1) < 0.01f && ow == w0 && W == w0, "and back at 100%");
+        key((SDL_Keysym){.sym = SDLK_EQUALS, .mod = KMOD_CTRL});
+        float up = ui_user;
+        key((SDL_Keysym){.sym = SDLK_MINUS, .mod = KMOD_CTRL});
+        check(fabsf(up - 1.25f) < 0.01f && fabsf(ui_user - 1) < 0.01f, "Ctrl+= and Ctrl+- step the size by a quarter");
+        ui_choice = 0;
+        ui_apply();
+        ui_set(0);
+
+        tips_on = 1;                             /* hold the mouse over the record button: its tooltip */
+        frame();
+        SDL_Rect tr = transport_rect;
+        int bx = tr.x + 7 * 33 + 10, by = tr.y + tr.h / 2;
+        tip_shown[0] = 0;
+        sim(bx, by, 0, 0, 0, 0);
+        int early = tip_shown[0] != 0;
+        tip_seen.since = SDL_GetTicks() - 1000;
+        sim(bx, by, 0, 0, 0, 0);
+        check(!early && strstr(tip_shown, "Record") != NULL, "holding the mouse still over a button shows what it does, after a moment");
+        tip_shown[0] = 0;
+        sim(bx, by, 1, 0, 0, 0);                 /* a click puts it away */
+        sim(bx, by, 0, 1, 0, 0);
+        tip_shown[0] = 0;
+        sim(bx, by, 0, 0, 0, 0);
+        check(tip_shown[0] == 0, "and clicking puts it away");
+        if (pads_rec) rec_toggle();
+        LOCK();
+        P.playing = 0;
+        UNLOCK();
+        countin_left = 0;
+        tips_on = 0;
+        tip_shown[0] = 0;
+        sim(bx - 33, by, 0, 0, 0, 0);
+        tip_seen.since = SDL_GetTicks() - 1000;
+        sim(bx - 33, by, 0, 0, 0, 0);
+        check(tip_shown[0] == 0, "with tooltips off, none show");
+        tips_on = 1;
+        frame();
+        history_check();
+    }
+
+
+    /* ---- recording the microphone (a synthetic one, fed straight to the capture callback) */
+    {
+        new_project();
+        make_demo();
+        int was_paused = !dev || SDL_GetAudioDeviceStatus(dev) == SDL_AUDIO_PAUSED;
+        if (dev) SDL_PauseAudioDevice(dev, 1);  /* the test moves the playhead itself */
+        close_input();
+        cap_fake = 1;
+        if (!cap_ring) cap_ring = calloc((size_t)CAP_RING * 2, sizeof(float));
+        cap_channels = 1;                        /* a mono microphone */
+        cap_buffer = 512;
+        out_buffer = 512;
+        rec_offset_ms = -1;
+        in_gain_db = 6;
+        memset(track_arm, 0, sizeof track_arm);
+        track_arm[2] = 1;
+        frame();
+        history_check();
+        int u0 = nundo, nc = P.nclips, ns = P.nsamples, keep_countin = MET.countin;
+        MET.countin = 0;
+        long bar = 4 * beat_frames(), at = 2 * bar;
+        LOCK();
+        P.loop = 0;
+        P.playhead = at;
+        UNLOCK();
+        rec_toggle();                            /* Rec: plays, and the armed track records */
+        frame();
+        int recording = mic.on;
+        float chunk[512];
+        long fed = 0;
+        for (int k = 0; k < 94; k++) {           /* about a second of a 440 Hz tone at -12 dB */
+            for (int i = 0; i < 512; i++, fed++) chunk[i] = 0.25f * (float)sin(2 * 3.14159265358979 * 440 * fed / SR);
+            cap_cb(NULL, (Uint8 *)chunk, (int)sizeof chunk);
+            LOCK();
+            P.playhead += 512;
+            UNLOCK();
+            if (k % 4 == 3) frame();
+        }
+        rec_toggle();                            /* Rec again: the take ends */
+        LOCK();
+        P.playing = 0;
+        UNLOCK();
+        frame();
+        int c = P.nclips > nc ? P.nclips - 1 : -1;
+        long want = at - (long)llround((1024.0 / SR) * SR);   /* one input and one output buffer earlier */
+        double rms = 0;
+        const Sample *sm = c >= 0 ? &P.samples[P.clips[c].sample] : NULL;
+        for (long i = SR / 10; sm && i < sm->frames - SR / 10; i++) rms += sm->data[2 * i] * sm->data[2 * i];
+        if (sm) rms = sqrt(rms / (sm->frames - SR / 5));
+        check(recording && c >= 0 && P.clips[c].track == 2 && labs(P.clips[c].start - want) <= 1 && P.nsamples == ns + 1 &&
+                  labs(sm->frames - fed) <= 1,
+              "Rec with a track armed records the microphone onto it, moved earlier by the buffers' delay");
+        check(sm && fabs(rms - 0.5 / sqrt(2)) < 0.02 && sm->data[2 * 1000] == sm->data[2 * 1000 + 1] && file_exists(sm->path),
+              "the take is what was sung, with the input gain, a mono mic on both sides, saved as a file");
+        check(nundo == u0 + 1, "a microphone take is one undo step");
+        char path[1024];
+        snprintf(path, sizeof path, "%s", sm ? sm->path : "");
+        undo_redo(0);
+        check(P.nclips == nc, "and undo takes it away");
+        remove(path);
+        memset(track_arm, 0, sizeof track_arm);   /* nothing armed: Rec doesn't record the microphone */
+        frame();
+        nc = P.nclips;
+        rec_toggle();
+        frame();
+        for (int k = 0; k < 20; k++) cap_cb(NULL, (Uint8 *)chunk, (int)sizeof chunk);
+        frame();
+        int on = mic.on;
+        rec_toggle();
+        LOCK();
+        P.playing = 0;
+        UNLOCK();
+        frame();
+        check(!on && P.nclips == nc, "with no track armed, Rec leaves the microphone alone");
+        MET.countin = keep_countin;
+        cap_fake = 0;
+        cap_channels = 2;
+        in_gain_db = 0;
+        if (dev && !was_paused) SDL_PauseAudioDevice(dev, 0);
+        new_project();
+        make_demo();
+    }
+
     /* ---- Export: choosing the folder and file name */
     {
         char keep_proj[1024];
@@ -11555,26 +12493,25 @@ static int tab_keys(int x, int y, int w)
     return y + 2 * font_h + 8;
 }
 
-static void disc(int cx, int cy, int r, Col c)
-{
-    SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, c.a);
-    for (int dy = -r; dy <= r; dy++) {
-        int dx = (int)sqrt((double)(r * r - dy * dy));
-        SDL_RenderDrawLine(ren, cx - dx, cy + dy, cx + dx, cy + dy);
-    }
-}
+static void disc(int cx, int cy, int r, Col c) { disc_small(cx, cy, r, c); }
 
-static void ring(int cx, int cy, int r, Col c)
+static void ring(int cx, int cy, int r, Col c)   /* a circle one unit thick, as triangles: smooth at any size */
 {
-    SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, c.a);
-    int px = cx + r, py = cy;
-    for (int i = 1; i <= 120; i++) {
-        double a = i * 2 * PI_D / 120;
-        int nx = cx + (int)lround(r * cos(a)), ny = cy + (int)lround(r * sin(a));
-        SDL_RenderDrawLine(ren, px, py, nx, ny);
-        px = nx;
-        py = ny;
+    enum { N = 64 };
+    SDL_Vertex v[2 * N];
+    int idx[6 * N], ni = 0;
+    float ro = r + 1.0f, ri = r > 0 ? (float)r : 0;
+    for (int i = 0; i < N; i++) {
+        float a = (float)i / N * 6.2831853f, ca = cosf(a), sa = sinf(a);
+        v[2 * i].position = (SDL_FPoint){cx + 0.5f + ro * ca, cy + 0.5f + ro * sa};
+        v[2 * i + 1].position = (SDL_FPoint){cx + 0.5f + ri * ca, cy + 0.5f + ri * sa};
+        v[2 * i].color = v[2 * i + 1].color = (SDL_Color){c.r, c.g, c.b, c.a};
+        v[2 * i].tex_coord = v[2 * i + 1].tex_coord = (SDL_FPoint){0, 0};
+        int j = (i + 1) % N;
+        int q[6] = {2 * i, 2 * i + 1, 2 * j, 2 * j, 2 * i + 1, 2 * j + 1};
+        for (int k = 0; k < 6; k++) idx[ni++] = q[k];
     }
+    SDL_RenderGeometry(ren, NULL, v, 2 * N, idx, ni);
 }
 
 static int tab_circle(int x, int y, int w)
@@ -12565,7 +13502,8 @@ static int pop_open(int k, const char *title, int w, int h, int minw, int minh)
         SDL_RaiseWindow(pw->win);
         return 1;
     }
-    pw->win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, SDL_WINDOW_RESIZABLE);
+    pw->win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (int)(w * ui_user),
+                               (int)(h * ui_user), SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!pw->win) {
         status("Couldn't open a window: %s", SDL_GetError());
         return 0;
@@ -12579,7 +13517,8 @@ static int pop_open(int k, const char *title, int w, int h, int minw, int minh)
         return 0;
     }
     SDL_SetRenderDrawBlendMode(pw->ren, SDL_BLENDMODE_BLEND);
-    SDL_SetWindowMinimumSize(pw->win, minw, minh);
+    SDL_RenderSetScale(pw->ren, ui_px, ui_px);
+    SDL_SetWindowMinimumSize(pw->win, (int)(minw * ui_user), (int)(minh * ui_user));
     pw->id = SDL_GetWindowID(pw->win);
     memset(&pw->in, 0, sizeof pw->in);
     pw->in.mx = pw->in.my = -1000;
@@ -12596,7 +13535,8 @@ static void pop_pass(int k, void (*draw)(void))
     int mW = W, mH = H, smx = mx, smy = my, sld = ldown, slp = lpress, slr = lrel, srp = rpress, swx = wheel_x,
         swy = wheel_y, sdb = ldouble;
     ren = pw->ren;
-    SDL_GetWindowSize(pw->win, &W, &H);
+    SDL_RenderSetScale(ren, ui_px, ui_px);
+    logical_size(ren, &W, &H);
     mx = pw->in.mx;
     my = pw->in.my;
     ldown = pw->in.ldown;
@@ -12610,7 +13550,10 @@ static void pop_pass(int k, void (*draw)(void))
     if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
     SDL_SetRenderDrawColor(ren, BG.r, BG.g, BG.b, 255);
     SDL_RenderClear(ren);
+    ntlog = 0;
     draw();
+    if (pw->win) tip_draw(k);
+    tcheck_report(k == POP_EDITOR ? "clip editor" : "mixing console");
     if (pw->win) {
         if (drag_pop == k && drag.kind != D_NONE && ldown) update_drag();
         if (drag_pop == k && lrel && drag.kind != D_NONE) end_drag();
@@ -12990,11 +13933,6 @@ static void editor_draw(void)
 
 static float *fader_target(int t) { return t < 0 ? &P.master : &P.tracks[t].volume; }
 
-static void db_text(float v, char *buf, size_t n)
-{
-    if (v < 0.0005f) snprintf(buf, n, "-inf");
-    else snprintf(buf, n, "%+.1f dB", 20 * log10f(v));
-}
 
 /* A fader for track t (-1: master), across `r` (or up it, when vertical). Returns its value. */
 static float fader(SDL_Rect r, int t, int vertical)
@@ -13008,6 +13946,12 @@ static float fader(SDL_Rect r, int t, int vertical)
     }
     float p = sqrtf(shown / 1.5f);
     p = p < 0 ? 0 : p > 1 ? 1 : p;
+    {
+        char db[24];
+        db_text(shown, db, sizeof db);
+        tip(r, automated ? "%s: %s, set by its automation lane" : "%s: %s. Drag, or the wheel for half a dB (Shift: a tenth); double-click for 0 dB",
+            t < 0 ? "Master" : P.tracks[t].name, db);
+    }
     int active = drag.kind == D_FADER && drag.track == t, hov = hit(r);
     fill(r, tone(PANEL, 0.72f));
     Col col = automated ? ACCENT : t >= 0 ? TRACK_COL[t % MAX_TRACKS] : HEAD;
@@ -13315,15 +14259,17 @@ static void editor_frame(void)
 
 static void frame(void)
 {
-    static int min_for = -1;            /* the pane needs a wider window */
+    static int min_for = -1;            /* the pane needs a wider window (or the size changed) */
     int need = 70 + (theory_open || pads_open || mixer_open || vis_open || sounds_open ? PANE_W : settings_open ? 440 : 0) + 520;
-    if (min_for != need) {              /* the panel plus a usable timeline */
-        min_for = need;
-        SDL_SetWindowMinimumSize(win, need, 560);
+    if (min_for != need + (int)(ui_user * 1000) * 10000) {              /* the panel plus a usable timeline */
+        min_for = need + (int)(ui_user * 1000) * 10000;
+        SDL_SetWindowMinimumSize(win, (int)(need * ui_user), (int)(560 * ui_user));
         int ww, wh;
         SDL_GetWindowSize(win, &ww, &wh);
-        if (ww < need) SDL_SetWindowSize(win, need, wh);
+        if (ww < need * ui_user) SDL_SetWindowSize(win, (int)(need * ui_user), wh);
     }
+    if (fabsf(window_density(win) * ui_user - ui_px) > 0.01f) ui_apply();   /* moved to a screen with another density */
+    SDL_RenderSetScale(ren, ui_px, ui_px);       /* every frame: a resize can put the renderer back to 1 */
     theme_poll();
     layout();
     if (P.playing) {                    /* keep the playhead in view */
@@ -13408,6 +14354,8 @@ static void frame(void)
         lpress = rpress = 0;
         waiting_overlay("Choose a file in the file dialog...");
     }
+    if (!picking && !show_open) tip_draw(-1);   /* the tooltip, on top of everything */
+    else tipc.have = 0;
 
     if (drag.kind != D_NONE && ldown && !drag_in_editor) update_drag();   /* the editor runs its own */
     if (lrel && drag.kind != D_NONE && !drag_in_editor) end_drag();
@@ -13442,6 +14390,7 @@ static void frame(void)
         dd.changed_for = NULL;
         if (example_pick >= 0 && example_pick < nexamples) request(ACT_OPEN_EXAMPLE, example_path[example_pick]);
     }
+    input_update();
     take_check();
     rec_drain();
     if (drag.kind == D_NONE && !(pads_rec && P.playing) && !tempo_from)   /* a take, or a tempo change */
@@ -13457,6 +14406,7 @@ static void frame(void)
         autosave_tick();
     }
     binds_changed = 0;
+    tcheck_report("main window");
 }
 
 int main(int argc, char **argv)
@@ -13624,9 +14574,12 @@ int main(int argc, char **argv)
     if (test) shot = "";
     if (shot) {
         SDL_setenv("SDL_VIDEODRIVER", "offscreen", 1);
+        ui_offscreen = 1;
         SDL_setenv("SDL_AUDIODRIVER", "dummy", 1);
     }
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");   /* play pads with the window behind */
+    SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");   /* tinydaw scales itself: never blurry */
+    SDL_SetHint("SDL_WINDOWS_DPI_SCALING", "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "tinydaw: SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -13637,7 +14590,7 @@ int main(int argc, char **argv)
     }
     font_h = TTF_FontHeight(font);
     win = SDL_CreateWindow("tinydaw", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W, H,
-                           SDL_WINDOW_RESIZABLE);
+                           SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!win) {
         fprintf(stderr, "tinydaw: window: %s\n", SDL_GetError());
         return 1;
@@ -13651,6 +14604,14 @@ int main(int argc, char **argv)
         return 1;
     }
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    if (getenv("TINYDAW_SHOT_SCALE")) ui_choice = (int)lround(atof(getenv("TINYDAW_SHOT_SCALE")) * 100);
+    ui_apply();                                  /* the interface's size, and the font at it */
+    ui_fit_window();
+    if (shot && getenv("TINYDAW_SHOT_SIZE")) {   /* "WxH" in logical units: e.g. the smallest window */
+        int sw = 0, sh = 0;
+        if (sscanf(getenv("TINYDAW_SHOT_SIZE"), "%dx%d", &sw, &sh) == 2 && sw > 200 && sh > 200)
+            SDL_SetWindowSize(win, (int)(sw * ui_user), (int)(sh * ui_user));
+    }
     cur_arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
     cur_resize = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE);
     cur_hand = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEALL);
@@ -13662,6 +14623,8 @@ int main(int argc, char **argv)
         binds_default();
     } else {
         settings_load();
+        ui_apply();                              /* the saved interface size */
+        ui_fit_window();
         if (theme_choice == THEME_SYSTEM) theme_follow();
         else theme_apply(theme_choice);
         if (audio_out[0]) open_audio();          /* the saved output device */
@@ -13758,6 +14721,14 @@ int main(int argc, char **argv)
                 lib_badge = 3;
                 lib_badge_at = 0;
             }
+        }
+        if (getenv("TINYDAW_SHOT_TIP")) {        /* "x,y": the mouse held still there, its tooltip showing */
+            int tx = 0, ty = 0;
+            sscanf(getenv("TINYDAW_SHOT_TIP"), "%d,%d", &tx, &ty);
+            mx = tx;
+            my = ty;
+            frame();
+            tip_seen.since = SDL_GetTicks() - 2000;
         }
         if (getenv("TINYDAW_SHOT_METER")) {      /* a song in 4/4, then 3/4 slower, then 6/8 faster */
             P.changes[0] = (MeterChange){2, 96, 3, 4};
@@ -13858,13 +14829,14 @@ int main(int argc, char **argv)
                 P.tracks[4].width = 1.6f;
                 for (int i = 0; i < 2; i++) mixwin_frame();
                 SDL_Renderer *m = ren;
-                int ew, eh, sw = W, sh = H;
-                SDL_GetWindowSize(pops[POP_MIXER].win, &ew, &eh);
+                int ew, eh, sw = W, sh = H, ow, oh;
                 ren = pops[POP_MIXER].ren;
+                logical_size(ren, &ew, &eh);
+                SDL_GetRendererOutputSize(ren, &ow, &oh);
                 W = ew;
                 H = eh;
                 console_draw();
-                SDL_Surface *es = SDL_CreateRGBSurfaceWithFormat(0, ew, eh, 32, SDL_PIXELFORMAT_ARGB8888);
+                SDL_Surface *es = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ARGB8888);
                 SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, es->pixels, es->pitch);
                 int ok = SDL_SaveBMP(es, shot) == 0;
                 SDL_FreeSurface(es);
@@ -13880,14 +14852,15 @@ int main(int argc, char **argv)
             if (ewin) {
                 for (int i = 0; i < 2; i++) editor_frame();
                 SDL_Renderer *m = ren;           /* draw it once more and keep the pixels */
-                int ew, eh;
-                SDL_GetWindowSize(ewin, &ew, &eh);
+                int ew, eh, ow, oh;
                 ren = eren;
+                logical_size(ren, &ew, &eh);
+                SDL_GetRendererOutputSize(ren, &ow, &oh);
                 int sw = W, sh = H;
                 W = ew;
                 H = eh;
                 editor_draw();
-                SDL_Surface *es = SDL_CreateRGBSurfaceWithFormat(0, ew, eh, 32, SDL_PIXELFORMAT_ARGB8888);
+                SDL_Surface *es = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ARGB8888);
                 SDL_RenderReadPixels(eren, NULL, SDL_PIXELFORMAT_ARGB8888, es->pixels, es->pitch);
                 int ok = SDL_SaveBMP(es, shot) == 0;
                 SDL_FreeSurface(es);
@@ -13899,7 +14872,9 @@ int main(int argc, char **argv)
             }
         }
         for (int i = 0; i < 2; i++) frame();
-        SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
+        int ow, oh;
+        SDL_GetRendererOutputSize(ren, &ow, &oh);
+        SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ARGB8888);
         SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, s->pixels, s->pitch);
         int ok = SDL_SaveBMP(s, shot) == 0;
         SDL_FreeSurface(s);
@@ -13918,29 +14893,33 @@ int main(int argc, char **argv)
                 break;
             case SDL_MOUSEMOTION: {
                 int k = pop_of(e.motion.windowID);  /* a pop-out window has its own mouse */
+                int lx, ly;
+                mouse_logical(&lx, &ly);
                 if (k >= 0) {
-                    pops[k].in.mx = e.motion.x;
-                    pops[k].in.my = e.motion.y;
+                    pops[k].in.mx = lx;
+                    pops[k].in.my = ly;
                 } else {
-                    mx = e.motion.x;
-                    my = e.motion.y;
+                    mx = lx;
+                    my = ly;
                 }
                 break;
             }
             case SDL_MOUSEBUTTONDOWN: {
                 int k = pop_of(e.button.windowID);
+                int lx, ly;
+                mouse_logical(&lx, &ly);
                 if (k >= 0) {
                     PopIn *in = &pops[k].in;
-                    in->mx = e.button.x;
-                    in->my = e.button.y;
+                    in->mx = lx;
+                    in->my = ly;
                     if (e.button.button == SDL_BUTTON_LEFT) {
                         in->lpress = in->ldown = 1;
                         in->ldouble = e.button.clicks >= 2;
                     } else if (e.button.button == SDL_BUTTON_RIGHT) in->rpress = 1;
                     break;
                 }
-                mx = e.button.x;
-                my = e.button.y;
+                mx = lx;
+                my = ly;
                 if (e.button.button == SDL_BUTTON_LEFT) {
                     lpress = ldown = 1;
                     ldouble = e.button.clicks >= 2;

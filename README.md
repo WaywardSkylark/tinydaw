@@ -2,7 +2,7 @@
 
 A small music maker for Windows and Linux. Make drums, synth sounds and chords, arrange them on a
 timeline, mix them with effects and export a finished song. You can also play sounds live from
-your computer keyboard, a game controller or a MIDI keyboard, and record what you play.
+your computer keyboard, a game controller or a MIDI keyboard, and record what you play or sing.
 
 ![tinydaw playing the House example song](docs/screenshot.png)
 
@@ -21,7 +21,8 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
 - **Live play:** 16 pads and a MIDI instrument, played from the keyboard, a controller or MIDI, and
   recorded onto the timeline.
 - **Exports** to WAV, AIFF, FLAC, OGG, Opus or MP3, as a full mix or as one file per track.
-- **Looks how you like:** Dark, Light, follow-your-desktop, Windows XP, Frutiger Aero and Blender themes.
+- **Looks how you like:** Dark, Light, follow-your-desktop, Windows XP, Frutiger Aero and Blender themes,
+  sharp on high-resolution screens, at any size from 100% to 200%, with tooltips on everything.
 
 ## Get it
 
@@ -73,6 +74,11 @@ Settings > **Keys** lists every shortcut.
   panel with its own tabs. Click the open one again, or press **Ctrl+B**, to hide it and give the
   timeline the full width. **Ctrl+1** to **Ctrl+6** open them from the keyboard.
 - **The timeline:** tracks down the side, bars and minutes:seconds along the top.
+- **Tooltips:** hold the mouse still over anything for a moment and it says what it is and how to
+  use it (turn them off in Settings > Look).
+- **Size:** Settings > Look > **Interface size** (or Ctrl+= and Ctrl+-, Ctrl+0 for automatic) makes
+  everything bigger or smaller together. Automatic matches your screen's scaling, and text stays
+  sharp at every size.
 
 ## Arranging
 
@@ -249,6 +255,12 @@ sounds exactly like what you hear, including the delay and reverb dying away aft
   A timer runs beside the transport; when you stop, the take is on an open track (a new one if
   none is free). Pad hits become clips; MIDI keys become notes in a note clip you can edit in the
   piano roll, quantized to the Snap grid unless you turn that off beside **Rec**. One Ctrl+Z undoes a take.
+- **Microphone:** click a track's red dot to arm it, then press **Rec**. What the microphone hears
+  becomes a clip on that track, from where you started, and is saved as a WAV in
+  Music/tinydaw/Recordings. The armed dot shows the input level. Settings > Audio picks the input,
+  its gain, **Hear yourself** (use headphones) and the offset, which moves takes earlier to make up
+  for the audio system's delay (automatic by default). On Windows, Settings > Privacy > Microphone
+  must allow apps to use it.
 
 Controllers and MIDI devices are picked up when they're plugged in, even while tinydaw is running.
 Pads play through their track's effects.
@@ -320,13 +332,15 @@ Each sets up the pads with its own sounds too. `examples/make_examples.py` write
 ## Settings
 
 - **Look:** Dark, Light, System (follows your desktop's dark/light setting), Windows XP, Frutiger
-  Aero or Blender.
-- **Audio:** output device, the project's sample rate (44.1 to 192 kHz) and master volume.
+  Aero or Blender; tooltips on or off; and the interface size (Automatic, or 100% to 200%, as far as
+  the screen has room for).
+- **Audio:** output device; the microphone input, its gain, hearing yourself and the recording
+  offset; the project's sample rate (44.1 to 192 kHz) and master volume.
 - **Input:** connected controllers and MIDI devices, MIDI options, and which stick bends pitch.
 - **Keys:** every shortcut.
 - **About:** the version, and where projects, pad bindings and autosaves are kept.
 
-Your theme, output device, metronome and pad bindings are remembered: in `~/.config/tinydaw/` on
+Your theme, interface size, output and input devices, metronome and pad bindings are remembered: in `~/.config/tinydaw/` on
 Linux and `%APPDATA%\tinydaw` on Windows.
 
 ## Command line
@@ -345,7 +359,7 @@ Linux and `%APPDATA%\tinydaw` on Windows.
 
 ## Limits
 
-tinydaw has no MIDI output to other devices and no recording from a microphone. Beat loops and
+tinydaw has no MIDI output to other devices, and records one microphone at a time. Beat loops and
 sung lines are made at one tempo, so they don't follow tempo changes inside them. The drum patterns
 are approximations of each style, meant as a starting point, and the Singer sounds synthetic.
 
@@ -384,6 +398,8 @@ are approximations of each style, meant as a starting point, and the Singer soun
 ./tinydaw --selftest                      # 300 checks, driving the real interface with simulated input
 ./tinydaw --demo --screenshot ui.bmp      # draw the window off-screen
 TINYDAW_DEBUG_INPUT=1 ./tinydaw           # print every key, controller and MIDI input
+TINYDAW_CHECK_TEXT=1 ./tinydaw            # report any text that overlaps other text or outgrows its button
+TINYDAW_SCALE=1.5 ./tinydaw               # the automatic interface size, overridden
 ```
 
 The self-test covers editing, undo, saving and reopening sound for sound, pads, MIDI and controller

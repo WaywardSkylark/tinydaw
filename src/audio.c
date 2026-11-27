@@ -1023,6 +1023,21 @@ static float *render_range(const Project *p, long a, long b, int only_track, lon
     return buf;
 }
 
+int sample_record(Project *p, const float *buf, long frames, const char *path, const char *name, char *err, size_t errlen)
+{
+    SF_INFO info = {.samplerate = SR, .channels = 2, .format = SF_FORMAT_WAV | SF_FORMAT_PCM_24};
+    SNDFILE *f = sf_open(path, SFM_WRITE, &info);
+    if (!f) {
+        snprintf(err, errlen, "can't write %s: %s", path, sf_strerror(NULL));
+        return -1;
+    }
+    sf_writef_float(f, buf, frames);
+    sf_close(f);
+    int idx = sample_import(p, path, err, errlen);
+    if (idx >= 0) snprintf(p->samples[idx].name, sizeof p->samples[idx].name, "%s", name);
+    return idx;
+}
+
 int sample_bounce(Project *p, const int *clips, int n, const char *path, const char *name, char *err, size_t errlen)
 {
     if (n <= 0) {

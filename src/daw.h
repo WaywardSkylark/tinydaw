@@ -364,6 +364,8 @@ int sample_import(Project *p, const char *path, char *err, size_t errlen);
 /* Renders clips (indices into p->clips) together, alone, through their tracks' effects, writes
  * the result to `path` (a 32-bit float WAV) and adds that file to the library. */
 int sample_bounce(Project *p, const int *clips, int n, const char *path, const char *name, char *err, size_t errlen);
+/* Writes a recording (stereo, the project rate) to `path` as a WAV and adds that file to the library. */
+int sample_record(Project *p, const float *buf, long frames, const char *path, const char *name, char *err, size_t errlen);
 void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);
 
 /* A copy of sample `src` shifted by `semis` semitones and/or reversed; reuses an existing one.

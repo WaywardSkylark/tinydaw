@@ -770,6 +770,133 @@ static int button2(SDL_Rect r, const char *label, int on, int enabled)
 
 static int button(SDL_Rect r, const char *label, int on) { return button2(r, label, on, 1); }
 
+/* ---- drop-down lists */
+
+/* A field showing the current choice with an arrow. The arrow opens a list to pick from; with
+ * `cycle`, clicking the rest of the field still steps to the next choice as before. The list is
+ * drawn on top of everything at the end of the frame (dd_draw) and takes the next click
+ * (dd_input). Long lists split into columns so they never need scrolling. */
+#define DD_MAX 40
+static struct {
+    int open, *sel, n, cols, changed_for_set;
+    int *changed_for;
+    char items[DD_MAX][48];
+    SDL_Rect anchor, box;
+} dd;
+
+static int dropdown(SDL_Rect r, const char *prefix, const char *const *items, int n, int *sel, int cycle)
+{
+    if (*sel < 0 || *sel >= n) *sel = 0;
+    char label[120];
+    snprintf(label, sizeof label, "%s%s", prefix, items[*sel]);
+    SDL_Rect arrow = {r.x + r.w - 22, r.y, 22, r.h}, body = {r.x, r.y, r.w - 22, r.h};
+    int is_open = dd.open && dd.sel == sel, hov = hit(r) && drag.kind == D_NONE;
+    fill(r, is_open || hov ? PANEL3 : PANEL2);
+    outline(r, is_open ? ACCENT : LINE);
+    if (cycle) line(arrow.x, r.y + 5, arrow.x, r.y + r.h - 5, LINE);
+    text_clip(body, r.x + 8, r.y + (r.h - font_h) / 2, label, TEXT);
+    for (int i = 0; i < 4; i++)
+        line(arrow.x + 7 + i, r.y + r.h / 2 - 2 + i, arrow.x + 15 - i, r.y + r.h / 2 - 2 + i, is_open ? ACCENT : TEXT);
+    int changed = 0;
+    if (dd.changed_for == sel) {        /* picked from the list last frame */
+        dd.changed_for = NULL;
+        changed = 1;
+    }
+    if (hov && lpress) {
+        lpress = 0;
+        if (cycle && !hit(arrow)) {
+            *sel = (*sel + 1) % n;
+            changed = 1;
+        } else if (is_open) {
+            dd.open = 0;
+        } else {
+            dd.open = 1;
+            dd.sel = sel;
+            dd.n = n < DD_MAX ? n : DD_MAX;
+            for (int i = 0; i < dd.n; i++) snprintf(dd.items[i], sizeof dd.items[i], "%s", items[i]);
+            dd.anchor = r;
+        }
+    }
+    return changed;
+}
+
+static void dd_layout(void)
+{
+    int iw = 0, ih = 26;
+    for (int i = 0; i < dd.n; i++) {
+        int tw = text_w(dd.items[i]) + 24;
+        if (tw > iw) iw = tw;
+    }
+    int max_rows = (H - L.top - 40) / ih;
+    dd.cols = (dd.n + max_rows - 1) / max_rows;
+    if (dd.n > 15 && dd.cols < 2) dd.cols = 2;           /* long lists: two short columns */
+    if (dd.cols < 1) dd.cols = 1;
+    if (iw * dd.cols < dd.anchor.w) iw = dd.anchor.w / dd.cols;   /* at least as wide as the field */
+    int rows = (dd.n + dd.cols - 1) / dd.cols;
+    dd.box = (SDL_Rect){dd.anchor.x, dd.anchor.y + dd.anchor.h + 2, iw * dd.cols + 8, rows * ih + 8};
+    if (dd.box.y + dd.box.h > H - 4) dd.box.y = dd.anchor.y - dd.box.h - 2;   /* no room below: above */
+    if (dd.box.y < 4) dd.box.y = 4;
+    if (dd.box.x + dd.box.w > W - 4) dd.box.x = W - 4 - dd.box.w;
+    if (dd.box.x < 4) dd.box.x = 4;
+}
+
+static SDL_Rect dd_item(int i)
+{
+    int rows = (dd.n + dd.cols - 1) / dd.cols, iw = (dd.box.w - 8) / dd.cols;
+    return (SDL_Rect){dd.box.x + 4 + (i / rows) * iw, dd.box.y + 4 + (i % rows) * 26, iw, 26};
+}
+
+/* before anything else sees the click: a click on the open list picks, anywhere else closes it */
+static void dd_input(void)
+{
+    if (!dd.open) return;
+    dd_layout();
+    if (lpress || rpress) {
+        if (lpress && hit(dd.box)) {
+            for (int i = 0; i < dd.n; i++)
+                if (hit(dd_item(i))) {
+                    *dd.sel = i;
+                    dd.changed_for = dd.sel;
+                }
+            dd.open = 0;
+            lpress = rpress = 0;
+        } else if (!hit(dd.anchor)) {
+            dd.open = 0;
+            lpress = rpress = 0;
+        }
+    }
+    if (hit(dd.box)) wheel_y = 0;
+}
+
+static void dd_draw(void)
+{
+    if (!dd.open) return;
+    dd_layout();
+    fill((SDL_Rect){dd.box.x + 3, dd.box.y + 4, dd.box.w, dd.box.h}, alpha(DARK, 90));   /* shadow */
+    fill(dd.box, PANEL);
+    outline(dd.box, ACCENT);
+    for (int i = 0; i < dd.n; i++) {
+        SDL_Rect r = dd_item(i);
+        int cur = *dd.sel == i;
+        if (cur) fill(r, tone(ACCENT, 0.45f));
+        else if (hit(r)) fill(r, PANEL3);
+        text_clip(r, r.x + 8, r.y + (r.h - font_h) / 2, dd.items[i], TEXT);
+    }
+}
+
+/* a dropdown of the tracks, by number and name */
+static int track_dropdown(SDL_Rect r, const char *prefix, int *track)
+{
+    static char names[MAX_TRACKS][48];
+    static const char *ptrs[MAX_TRACKS];
+    for (int t = 0; t < P.ntracks; t++) {
+        snprintf(names[t], sizeof names[t], "%d  %s", t + 1, P.tracks[t].name);
+        ptrs[t] = names[t];
+    }
+    if (*track >= P.ntracks) *track = P.ntracks - 1;
+    return dropdown(r, prefix, ptrs, P.ntracks, track, 0);
+}
+
 /* A row of sub-tabs: one category's pages. Returns the y below it. */
 static int subtabs(int x, int y, int w, const char *const *names, int n, int *sel)
 {
@@ -1873,21 +2000,9 @@ static int pads_drop(int sample)
 
 static void track_picker(int x, int y, const char *label, int *track)
 {
-    char b[16];
     text(x, y + 6, label, DIM);
     int lx = x + text_w(label) + 8;
-    if (button((SDL_Rect){lx, y, 24, 26}, "<", 0) && *track > 0) {
-        LOCK();
-        (*track)--;
-        UNLOCK();
-    }
-    snprintf(b, sizeof b, "%d", *track + 1);
-    text_center((SDL_Rect){lx + 26, y, 26, 26}, b, TEXT);
-    if (button((SDL_Rect){lx + 54, y, 24, 26}, ">", 0) && *track < P.ntracks - 1) {
-        LOCK();
-        (*track)++;
-        UNLOCK();
-    }
+    track_dropdown((SDL_Rect){lx, y, 160, 26}, "", track);
 }
 
 static void device_row(int x, int y, int w, const char *name, Uint32 flash, Col c)
@@ -2150,7 +2265,7 @@ static int pads_take_key(SDL_Keysym k)
 
 /* ---- File menu and the "save changes?" question */
 
-static SDL_Rect file_btn, met_btn;
+static SDL_Rect file_btn, met_btn, snap_rect;
 static int met_open;
 
 static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int enabled)
@@ -2444,12 +2559,9 @@ static int mixer_content(int x, int y, int w)
     if (sel_track >= P.ntracks) sel_track = P.ntracks - 1;
     Track *t = &P.tracks[sel_track];
     y = section(x, y, w, "TRACK");
-    if (button((SDL_Rect){x, y, 24, 26}, "<", 0) && sel_track > 0) sel_track--;
-    if (button((SDL_Rect){x + w - 24, y, 24, 26}, ">", 0) && sel_track < P.ntracks - 1) sel_track++;
+    fill((SDL_Rect){x, y + 4, 4, 18}, TRACK_COL[sel_track]);
+    track_dropdown((SDL_Rect){x + 10, y, w - 10, 26}, "Track ", &sel_track);
     t = &P.tracks[sel_track];
-    fill((SDL_Rect){x + 30, y + 4, 4, 18}, TRACK_COL[sel_track]);
-    snprintf(buf, sizeof buf, "%d  %s", sel_track + 1, t->name);
-    text_clip((SDL_Rect){x + 40, y, w - 72, 26}, x + 40, y + (26 - font_h) / 2, buf, TEXT);
     y += rh;
     fnumber((SDL_Rect){x, y, hw, 26}, "Volume", &t->volume, 0, 1.5, 0.004, "%.2f");
     double *pd = fproxy(&t->pan);
@@ -2531,18 +2643,22 @@ static int mixer_content(int x, int y, int w)
     fnumber((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Level", &fx->reverb_level, 0, 1.5, 0.004, "%.2f");
     y += rh + 8;
     y = section(x, y, w, "SIDECHAIN");
-    text(x, y + 6, "Source", DIM);
-    if (button((SDL_Rect){x + 64, y, 24, 26}, "<", 0) && fx->sc_source >= 0) {
-        LOCK();
-        fx->sc_source--;
-        UNLOCK();
-    }
-    snprintf(buf, sizeof buf, "%s", fx->sc_source < 0 ? "off" : P.tracks[fx->sc_source].name);
-    text_clip((SDL_Rect){x + 92, y, hw - 120, 26}, x + 96, y + (26 - font_h) / 2, buf, TEXT);
-    if (button((SDL_Rect){x + hw - 24, y, 24, 26}, ">", 0) && fx->sc_source < P.ntracks - 1) {
-        LOCK();
-        fx->sc_source++;
-        UNLOCK();
+    {                                           /* off, or which track ducks the others */
+        static char names[MAX_TRACKS + 1][48];
+        static const char *ptrs[MAX_TRACKS + 1];
+        static int pick;
+        snprintf(names[0], sizeof names[0], "off");
+        ptrs[0] = names[0];
+        for (int k = 0; k < P.ntracks; k++) {
+            snprintf(names[k + 1], sizeof names[k + 1], "%d  %s", k + 1, P.tracks[k].name);
+            ptrs[k + 1] = names[k + 1];
+        }
+        if (!(dd.open && dd.sel == &pick)) pick = fx->sc_source + 1;
+        if (dropdown((SDL_Rect){x, y, hw, 26}, "Source: ", ptrs, P.ntracks + 1, &pick, 0)) {
+            LOCK();
+            fx->sc_source = pick - 1;
+            UNLOCK();
+        }
     }
     fnumber((SDL_Rect){x + hw + 8, y, hw, 26}, "Release", &fx->sc_release, 20, 1000, 1, "%.0f ms");
     y += rh;
@@ -3304,24 +3420,31 @@ static int settings_content(int x, int y, int w)
     }
     case 1: {
         y = section(x, y, w, "OUTPUT");
-        int n = SDL_GetNumAudioDevices(0);
-        if (button((SDL_Rect){x, y, w, 28}, "System default", audio_out[0] == 0)) {
-            audio_out[0] = 0;
-            open_audio();
-            settings_save();
-        }
-        y += 32;
-        for (int i = 0; i < n && i < 12; i++) {
-            const char *name = SDL_GetAudioDeviceName(i, 0);
-            if (!name) continue;
-            if (button((SDL_Rect){x, y, w, 28}, name, !strcmp(audio_out, name))) {
-                snprintf(audio_out, sizeof audio_out, "%s", name);
+        {                                       /* the system default, or a particular device */
+            static char names[DD_MAX][48];
+            static const char *ptrs[DD_MAX];
+            static int pick;
+            int n = SDL_GetNumAudioDevices(0), m = 1;
+            snprintf(names[0], sizeof names[0], "System default");
+            ptrs[0] = names[0];
+            int cur = 0;
+            for (int i = 0; i < n && m < DD_MAX; i++) {
+                const char *name = SDL_GetAudioDeviceName(i, 0);
+                if (!name) continue;
+                if (!strcmp(audio_out, name)) cur = m;
+                snprintf(names[m], sizeof names[m], "%s", name);
+                ptrs[m] = names[m];
+                m++;
+            }
+            if (!(dd.open && dd.sel == &pick)) pick = cur;
+            if (dropdown((SDL_Rect){x, y, w, 30}, "", ptrs, m, &pick, 0)) {
+                if (pick == 0) audio_out[0] = 0;
+                else snprintf(audio_out, sizeof audio_out, "%s", names[pick]);
                 open_audio();
                 settings_save();
             }
-            y += 32;
+            y += 42;
         }
-        y += 8;
         y = section(x, y, w, "PROJECT");
         text(x, y + 6, "Sample rate", DIM);
         y += 28;
@@ -3553,9 +3676,9 @@ static void top_bar(void)
     line(x - 6, y + 4, x - 6, y + h - 4, LINE);
     number((SDL_Rect){x, y, 100, h}, "BPM", &P.bpm, 40, 300, 0.25, "%.0f");
     x += 104;
-    snprintf(buf, sizeof buf, "Snap %s", SNAP_NAMES[snap_i]);
-    if (button((SDL_Rect){x, y, 96, h}, buf, 0)) snap_i = (snap_i + 1) % 6;
-    x += 104;
+    snap_rect = (SDL_Rect){x, y, 110, h};
+    dropdown(snap_rect, "Snap ", SNAP_NAMES, 6, &snap_i, 1);   /* click: next, arrow: list */
+    x += 118;
     if (button((SDL_Rect){x, y, 62, h}, "Click", MET.on)) {
         MET.on = !MET.on;
         settings_save();
@@ -4090,8 +4213,8 @@ static void key(SDL_Keysym k)
         if (k.sym == SDLK_ESCAPE) confirm_act = ACT_NONE;
         return;
     }
-    if ((menu_open || met_open) && k.sym == SDLK_ESCAPE) {
-        menu_open = met_open = 0;
+    if ((menu_open || met_open || dd.open) && k.sym == SDLK_ESCAPE) {
+        menu_open = met_open = dd.open = 0;
         return;
     }
     if (learn_pad >= 0 && k.sym == SDLK_ESCAPE) {
@@ -4432,6 +4555,9 @@ static void check(int ok, const char *what)
 }
 
 static int lane_y(int t) { return L.lanes_y + t * L.lane_h + L.lane_h / 2; }
+
+static int dropdown_probe_snap(int x) { return x >= snap_rect.x && x < snap_rect.x + 4; }
+static int snap_arrow_x(void) { return snap_rect.x + snap_rect.w - 11; }
 
 static float *test_render(Project *p, long a, long n, int only)
 {
@@ -5219,6 +5345,50 @@ static int selftest(void)
         check(lib_badge == 0, "opening Sounds clears the count");
     }
 
+    /* drop-down lists */
+    {
+        open_panel(RI_THEORY);
+        theory_tab = 6;                          /* Beats */
+        th_scroll = 0;
+        gn_sel = 0;
+        frame();
+        frame();
+        SDL_Rect pane = {L.pane_x, L.top, L.pane_w, H - L.top - L.status};
+        check(th_content_h <= pane.h, "the Beats page fits without scrolling");
+        int fx0 = L.pane_x + 14, fy = L.top + 10 + 40 + 15;          /* the Style field, under the tabs */
+        sim(fx0 + 60, fy, 1, 0, 0, 0);
+        sim(fx0 + 60, fy, 0, 1, 0, 0);
+        check(dd.open && dd.sel == &gn_sel && dd.n == NGENRES && dd.cols == 2, "the style list opens in two columns");
+        SDL_Rect it = dd_item(20);
+        sim(it.x + 10, it.y + 10, 1, 0, 0, 0);
+        sim(it.x + 10, it.y + 10, 0, 1, 0, 0);
+        check(!dd.open && gn_sel == 20, "picking a style from the list selects it and closes the list");
+        sim(fx0 + 60, fy, 1, 0, 0, 0);
+        sim(fx0 + 60, fy, 0, 1, 0, 0);
+        sim(W - 20, H - 60, 1, 0, 0, 0);
+        sim(W - 20, H - 60, 0, 1, 0, 0);
+        check(!dd.open && gn_sel == 20, "clicking elsewhere closes it without changing anything");
+        gn_sel = 0;
+
+        snap_i = 4;
+        frame();
+        SDL_Rect sn = {0, 0, 0, 0};
+        for (int xx = 300; xx < 760 && !sn.w; xx += 2)      /* find the Snap field in the top bar */
+            if (dropdown_probe_snap(xx)) sn = (SDL_Rect){xx, 9, 1, 30};
+        sim(sn.x + 10, 24, 1, 0, 0, 0);
+        sim(sn.x + 10, 24, 0, 1, 0, 0);
+        check(snap_i == 5, "clicking Snap still steps to the next value");
+        sim(snap_arrow_x(), 24, 1, 0, 0, 0);
+        sim(snap_arrow_x(), 24, 0, 1, 0, 0);
+        check(dd.open && dd.sel == &snap_i, "its arrow opens the list");
+        it = dd_item(3);
+        sim(it.x + 10, it.y + 10, 1, 0, 0, 0);
+        sim(it.x + 10, it.y + 10, 0, 1, 0, 0);
+        check(snap_i == 3, "and a value can be picked directly");
+        snap_i = 3;
+        open_panel(RI_SOUNDS);
+    }
+
     /* a controller, through SDL's own events (a virtual gamepad stands in for hardware) */
     int vj = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 4, 12, 1);
     if (vj >= 0) {
@@ -5388,16 +5558,16 @@ static int adds_as(int x, int y, int w)
     GenParams g = chord_params(1);
     text(x, y, "+ adds to the library as:", DIM);
     y += font_h + 6;
-    snprintf(buf, sizeof buf, "Sound: %s", WAVE_NAMES[g.wave]);
-    if (button((SDL_Rect){x, y, 112, 26}, buf, 0)) {   /* cycles the generator's wave */
-        int k = 0;
+    static int wi;
+    static const char *const PNAMES[4] = {"sine", "square", "saw", "tri"};
+    if (!(dd.open && dd.sel == &wi))
         for (int i = 0; i < 4; i++)
-            if (PITCHED[i] == g.wave) k = i;
-        G.wave = PITCHED[(k + 1) % 4];
-    }
-    int lw = (w - 120 - 12) / 4;
+            if (PITCHED[i] == g.wave) wi = i;
+    if (dropdown((SDL_Rect){x, y, 128, 26}, "Sound: ", PNAMES, 4, &wi, 1)) G.wave = PITCHED[wi];
+    (void)buf;
+    int lw = (w - 136 - 12) / 4;
     for (int i = 0; i < 4; i++)
-        if (button((SDL_Rect){x + 120 + i * (lw + 4), y, lw, 26}, TH_LEN_NAMES[i], th_len == i)) th_len = i;
+        if (button((SDL_Rect){x + 136 + i * (lw + 4), y, lw, 26}, TH_LEN_NAMES[i], th_len == i)) th_len = i;
     return y + 38;
 }
 
@@ -5578,11 +5748,8 @@ static int tab_keys(int x, int y, int w)
     snprintf(buf, sizeof buf, "Progressions from %s", pitch_name(th_root, flats));
     text(x, y + 6, buf, DIM);
     int sx = x + w - 140;
-    text(sx, y + 6, "on track", DIM);
-    if (button((SDL_Rect){sx + 72, y, 24, 26}, "<", 0) && th_track > 0) th_track--;
-    snprintf(b2, sizeof b2, "%d", th_track + 1);
-    text(sx + 104, y + 6, b2, TEXT);
-    if (button((SDL_Rect){sx + 116, y, 24, 26}, ">", 0) && th_track < P.ntracks - 1) th_track++;
+    (void)sx;
+    track_dropdown((SDL_Rect){x + w - 170, y, 170, 26}, "on ", &th_track);
     y += 34;
     for (int i = 0; i < NPROGRESSIONS; i++) {
         const Progression *pr = &PROGRESSIONS[i];
@@ -6143,11 +6310,12 @@ static int tab_genres(int x, int y, int w)
 {
     genre_init();
     char buf[200];
-    int gw = (w - 2 * 4) / 3;
-    for (int g = 0; g < NGENRES; g++)
-        if (button((SDL_Rect){x + (g % 3) * (gw + 4), y + (g / 3) * 30, gw, 26}, GENRES[g].name, gn_sel == g))
-            gn_sel = g;
-    y += ((NGENRES + 2) / 3) * 30 + 8;
+    static const char *gnames[32];
+    for (int g = 0; g < NGENRES && g < 32; g++) gnames[g] = GENRES[g].name;
+    dropdown((SDL_Rect){x, y, w - 64, 30}, "Style: ", gnames, NGENRES < 32 ? NGENRES : 32, &gn_sel, 0);
+    if (button((SDL_Rect){x + w - 60, y, 28, 30}, "<", 0)) gn_sel = (gn_sel + NGENRES - 1) % NGENRES;
+    if (button((SDL_Rect){x + w - 28, y, 28, 30}, ">", 0)) gn_sel = (gn_sel + 1) % NGENRES;
+    y += 40;
 
     const Genre *ge = &GENRES[gn_sel];
     text(x, y, ge->name, HEAD);
@@ -6455,6 +6623,7 @@ static void frame(void)
     SDL_SetRenderDrawColor(ren, BG.r, BG.g, BG.b, 255);
     SDL_RenderClear(ren);
     vis_update();
+    dd_input();
 
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
@@ -6491,6 +6660,7 @@ static void frame(void)
     if (export_open) export_dialog();
     if (menu_open && !picking) file_menu();
     if (met_open && !picking) metronome_menu();
+    dd_draw();
     if (confirm_act && !picking) confirm_dialog();
     if (picking) {
         lpress = rpress = 0;
@@ -6854,7 +7024,16 @@ int main(int argc, char **argv)
             theory_open = 1;
             sscanf(th, "%d,%d,%d", &theory_tab, &th_root, &th_scale);
         }
-        for (int i = 0; i < 3; i++) frame();
+        frame();
+        if (getenv("TINYDAW_SHOT_CLICK")) {      /* "x,y": click there first (opens a list, a menu...) */
+            int cx = 0, cy = 0;
+            sscanf(getenv("TINYDAW_SHOT_CLICK"), "%d,%d", &cx, &cy);
+            sim(cx, cy, 1, 0, 0, 0);
+            sim(cx, cy, 0, 1, 0, 0);
+            mx = cx + 40;                        /* hover inside the list */
+            my = cy + 60;
+        }
+        for (int i = 0; i < 2; i++) frame();
         SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_ARGB8888);
         SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, s->pixels, s->pitch);
         int ok = SDL_SaveBMP(s, shot) == 0;

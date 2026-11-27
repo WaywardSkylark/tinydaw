@@ -33,6 +33,10 @@ see [win/README.md](win/README.md). It behaves the same; projects open on either
 
 ## The window
 
+Controls that step through choices when clicked (Snap, the Theory sound) also have an arrow
+that opens the whole list. Track choices (in Pads, the Mixer and Theory), the sidechain source,
+the output device and the beat style are lists too.
+
 - **Top bar:** the menu (☰: new, open, save, export, settings, the show, quit), undo and redo,
   play and loop, tempo and snap, where the playhead is, and the master level.
 - **Rail** down the left: Sounds, Theory, Pads, Mixer, Visual and Settings. Each opens its panel
@@ -60,7 +64,7 @@ see [win/README.md](win/README.md). It behaves the same; projects open on either
 | Trim a clip | Drag its left or right edge |
 | Delete a clip | Right-click it (the whole selection if it's in one), or select and press Delete |
 | Scroll a pane | Mouse wheel, drag its scrollbar, click above or below the handle for a page, or Page Up/Down |
-| Snap | **Snap** button cycles off / bar / 1/2 / 1/4 / 1/8 / 1/16. Hold Shift while dragging to ignore it |
+| Snap | Click **Snap** to step through off / bar / 1/2 / 1/4 / 1/8 / 1/16, or its arrow to pick from the list. Hold Shift while dragging to ignore it |
 | Play / stop | Space, or **Play**. Home jumps back to the start |
 | Playhead | Click or drag in the ruler. The ruler shows bars above and minutes:seconds below, and the playhead's time |
 | Move around | Ctrl+Left/Right a bar, Ctrl+Shift+Left/Right a beat, Alt+Left/Right the previous/next clip edge, Home/End the start/end, F brings the playhead into view, Z zooms to fit the song |
@@ -156,7 +160,7 @@ a copy, and the Sounds button on the rail counts what's waiting there.
 
 | Tab | What's there |
 |---|---|
-| Beats | 12 styles (house, techno, hip-hop, trap, drum & bass, rock, funk, reggaeton, dubstep, lo-fi, disco, jazz swing), each with a tempo and typical range, swing, a suggested key, tuning and its own drum kit. An editable step grid (kick, snare, clap, closed/open hat, perc; click to cycle hit, accent, ghost, roll). **Play** previews it, **+ Library** adds it as a loop (or one per drum with Row per drum), **Place on new row(s)** puts it at the bar nearest the playhead, and the orange handle can be **dragged** onto any row. The kick is tuned to the key root chosen in Keys |
+| Beats | 30 styles, picked from the **Style** list (or stepped with < >): house, deep house, tech house, techno, trance, UK garage, breakbeat, drum & bass, jungle, dubstep, hip-hop, trap, UK drill, phonk, R&B, pop, rock, funk, disco, synthwave, electro, footwork, lo-fi, reggaeton, dancehall, reggae, afrobeats, amapiano, bossa nova and jazz swing. Each has a tempo and typical range, swing, a suggested key, tuning and its own drum kit. An editable step grid (kick, snare, clap, closed/open hat, perc; click to cycle hit, accent, ghost, roll). **Play** previews it, **+ Library** adds it as a loop (or one per drum with Row per drum), **Place on new row(s)** puts it at the bar nearest the playhead, and the orange handle can be **dragged** onto any row. The kick is tuned to the key root chosen in Keys |
 | Keys | Any root and 12 scales/modes: notes (click to hear, + adds all of them), steps, key signature. The chords of the key as triads or 7ths with Roman numerals: click to hear, + under each to add, or add all 7. 12 common progressions spelled in the key: + adds their chords, **Play**, and **Place** (one chord per bar on the chosen track) |
 | Chords | 19 chord types with symbol, formula and notes on the current root: click to hear, + to add |
 | Reference > Circle | Circle of fifths with relative minors and key signatures; click a key to select it |

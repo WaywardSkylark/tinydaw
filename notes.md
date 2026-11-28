@@ -1,0 +1,112 @@
+# tinydaw notes
+
+A running log of major changes since 0.8.0: what changed, why, where it lives in the code, and
+what was decided along the way. Newest first. It's here to give context to whoever picks the work up
+next. The manual (`docs/manual.md`) says how things work for users; this says why they're built the
+way they are.
+
+## Unreleased (after 0.8.0)
+
+### 2026-11-27: Pitch bend on any clip
+
+Asked for: the Singer's drawn pitch curve should work on everything, as one of the Mixer tools. The
+live wheel and stick bend was left as it is. For audio clips the user wanted both behaviours, as a
+toggle.
+
+- **Where:** Mixer > Clip > PITCH BEND (`clip_bend_editor` in main.c). Draw, Shift for semitones,
+  right-click or Ctrl+drag to erase; presets Flat, Scoops, Fall-offs, Vibrato, Rise, Dive. On note
+  clips, Scoops and Fall-offs go on each note.
+- **Data:** `Bend` (id, keep_time, up to 512 points of seconds and semitones) in `Project.bends`;
+  `Clip.bend` holds the id. Time is **seconds from the clip's origin** (start - offset), so moving,
+  trimming, splitting and changing the sample rate need no changes to the curve. Copies share a
+  curve, and editing clones it first (`cb_edit`, copy-on-write). Flat sets `Clip.bend = 0`.
+- **Playback (`src/bend.c`, fx.c):** a warp table (`BendMap`), the integral of 2^(st/12) every 32
+  frames, maps timeline frames since the origin to frames into the sound. Note clips:
+  `pos = step * (W(f) - W(note start))`. Drum hits do the same from each hit. Tape audio uses
+  `src = W(offset + rel)`. Keep-timing audio plays a pitch-shifted render (`shift_sound`: grains
+  every ~10 ms, read at the bend's ratio, each placed where it best continues the last (WSOLA),
+  coarse then fine search, skipped where the curve is flat). It takes about 1.9 s per 3 minutes of
+  audio and is rendered when you let go of the curve.
+- **Threads:** `bends_build` makes new tables without the audio lock; `bends_install` swaps them in
+  under it. main.c's `bends_update()` runs every frame when nothing is being dragged, and before
+  export, bounce and test renders. The audio thread checks a table's hash against the curve and
+  plays the clip straight if they differ, so it never uses a stale table.
+- **File format:** `bend id keep_time`, then `bpt seconds semitones` lines, before the clips. A
+  clip line gains an 11th field, the bend id (audio clips then write `0 0` for pattern and root).
+  Older builds ignore all of it.
+- **Tests:** 12 checks measuring frequency with zero crossings: an octave up on notes, slides, tape
+  running fast and ending early, keep-timing at the right pitch and length, drum hits, saving, the
+  editor (Shift, copy-on-write, presets, one undo step).
+- **Not done:** MIDI export doesn't write the curves as pitch-bend events, and the clip editor
+  window doesn't show the curve.
+
+### 2026-11-27: Create panel, and parts written from the chord track
+
+**Menu reorganized.** Everything that makes sound or music now lives in one rail button, **Create**
+(it was Sounds), so the tools are in one place:
+
+- Create: Library | Synth (Presets = the Generator, Tones = the old New sound) | Voice (the Singer) |
+  Beats (moved from Theory) | Parts (new).
+- Theory is harmony and reference only: Keys | Chords | Reference.
+- Theory > Keys > **Place** now fills the chord track only. It used to also drop chord audio clips
+  on a track, which the Parts generators now do better. The "on track N" picker in Keys is gone.
+- The chord strip's right-click "Make a chord part" uses Create > Parts > Chords' settings.
+- Internally `sounds_sub` keeps its old numbers (0 library, 1 generator, 2 singer, 3 tones) and
+  adds 4 beats and 5 parts, so the self-tests and screenshot hooks kept working. `theory_tab` 6
+  (Beats) is mapped to Keys if anything still sets it.
+
+**Parts** (`src/parts.c`, UI in `main.c`, "Create > Parts"). The generators read the chord track
+and the key and write `PartNote`s (beats). The UI turns them into a note clip. With no UI or audio
+in parts.c it can be tested directly.
+
+- Chords: Held, Pulse, Stabs, Arp up, Arp up & down. Voiced with `chord_voice` so voices move as
+  little as possible.
+- Bass: Roots, Pulse, Octaves, Off-beat, Walking, Groove. Uses the slash bass when there is one.
+  The root sits low in the range with room for an octave above, and stays near the previous root.
+  Walking approaches the next root from a step away.
+- Melody: Hook (1-bar cells), Flowing, Sparse (2-bar cells). Phrase form A A B A: cells with the
+  same letter reuse the same random choices (seeded by letter), so the shape returns over different
+  chords. Strong beats snap to chord tones, other notes move by scale step in the key at that beat,
+  and the phrase's last note goes to the root or third. `near_prev` keeps leaps under an octave.
+- Fills: `drum_fill` copies the bar of the source pattern as it plays there (from the clip's origin)
+  and rewrites its end: Snare roll, Build, Toms, Drop-out, a beat, half a bar or a bar long. Rows
+  are found by sample name (kick/808, snare/clap/rim, hat, tom/perc). The drum clip is split around
+  the bar and the middle piece plays a new pattern named "Fill, bar N".
+- Every generator is deterministic for its seed. **Try another** bumps the seed and rewrites the
+  same clip (parts) or the same fill patterns, so it's one undo step and no clutter.
+- Sounds: a Generator preset of a suitable kind (Pad/Keys/Pluck, Bass, Lead/Pluck/Keys), made into
+  the library once and reused by name, or the Pads instrument. Held chords get a "(held)" variant
+  long enough for the longest chord.
+- Ranges (MIDI): chords 52-72, bass 28-55, melody 60-81, and the Octave buttons move them by 12.
+
+**Gotcha found on the way.** Beats from `meter_beats()` come back a hair off whole numbers
+(19.99999 for 20), because they go through frames. That put notes on the wrong side of chord and
+bar edges and left 0-length notes. parts.c puts bar starts on a 1/960-beat grid (`tidy`), and
+`emit` drops notes shorter than 0.05 beats. Anything new that walks bars by beats should do the same.
+
+Tests: 9 new self-test checks (410 in all): every style stays in range and on the chords or in the
+key, determinism, strong beats on chord tones, phrase endings, walking lead-ins, following the key,
+Make / Try another / This section, and fills (placement, roll shape, Try another in place).
+
+### 2026-11-27: Chord track and the song's key (commit ee8e4ea)
+
+- A CHORDS strip under SECTIONS. Chords are stored in **beats** (quarter notes from the start),
+  not frames, so tempo edits never move them. They're kept sorted and never overlap
+  (`chord_put` makes room).
+- The song's key is saved in the project, with key changes by bar (`KeyChange`). Theory's key
+  (`th_root`/`th_scale`) is synced both ways with the key at the playhead (`key_sync`, every
+  frame), like the BPM box with tempo changes.
+- `song_edit` (moving, copying, cutting sections) carries chords (split at the edges) and key
+  changes (written out at the edges, like the tempo map).
+- File format: `key`, `keychange` and `harmony` lines. Not `chord`, which chord sounds already use
+  inside their sample recipes. Older builds ignore the new lines.
+- `src/harmony.c`: key and chord lookup, `chord_voice` (voice leading), labels and numerals.
+  `theory.c`: `chord_guess` names the chord a set of notes makes (used for "chords from a note
+  clip").
+- The example songs carry their chords and keys, written by `examples/make_examples.py`
+  (`Song2.key`, `Song2.harmony`).
+- The type is `SongChord`, not `Chord`: Windows' wingdi.h already declares a `Chord()` function,
+  and the Windows build broke on it. Check `make windows` when adding short, common type names.
+- Decided: the chord track is silent, and parts are written from it. There's one key per stretch,
+  with key changes along the song.
+

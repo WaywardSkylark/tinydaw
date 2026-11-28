@@ -8,7 +8,7 @@ Everything tinydaw does, panel by panel. New here? Start with [Your first minute
 - [Arranging](#arranging)
 - [Chords and keys](#chords-and-keys)
 - [Notes and automation](#notes-and-automation)
-- [Making sounds](#making-sounds)
+- [Making sounds and parts](#making-sounds-and-parts)
 - [Mixing](#mixing)
 - [Playing live: pads and MIDI](#playing-live-pads-and-midi)
 - [Saving and exporting](#saving-and-exporting)
@@ -26,7 +26,7 @@ Everything tinydaw does, panel by panel. New here? Start with [Your first minute
   - play and loop
   - tempo, snap and the metronome
   - where you are in the song, and the master level
-- **The rail** down the left holds Sounds, Theory, Pads, Drums, Mixer, Visual and Settings. Each
+- **The rail** down the left holds Create, Theory, Pads, Drums, Mixer, Visual and Settings. Each
   opens a panel with its own tabs. Click the open one again, or press **Ctrl+B**, to hide it and give
   the timeline the full width. **Ctrl+1** to **Ctrl+7** open them from the keyboard.
 - **The timeline:** tracks down the side, bars and minutes:seconds along the top.
@@ -75,6 +75,7 @@ sections with the same name share a colour.
 | Jump around | Ctrl+←/→ a bar, Ctrl+Shift+←/→ a beat, Alt+←/→ to the next clip edge, F shows the playhead, Z zooms to fit the song |
 | Zoom / scroll | Ctrl + wheel to zoom, wheel to scroll, + and - also zoom |
 | Change a number | Click it and type, drag it, or use the wheel (Shift for fine steps). Note boxes take names like `C4`, `F#3` or `Bb2` |
+| Edit typed text | In a name, folder or a number being typed: click to put the caret there, ←/→ to move it (Ctrl: a word), Home / End, Backspace and Delete |
 | Tempo / time signature | **BPM** and the box beside it (4/4, 3/4, 6/8...) set them for the part of the song the playhead is in (BPM shows `BPM*` inside a change). The metronome menu adds a change at the playhead's bar; changes show as flags above the bar numbers (click to go there, right-click to remove). In a one-tempo song, selected clips follow a new tempo (audio is time-stretched, recipes are remade) |
 | Tuning | **A4** beside BPM (415–466 Hz, e.g. 432). New sounds use it |
 | Metronome | **Click** in the top bar, or M. Its arrow sets the sound, 8th/16th ticks, accent and a 1-2 bar count-in |
@@ -95,9 +96,9 @@ sits in the key.
 | Hear a chord | Click it |
 | Move / resize | Drag it (it takes the place of any chord it lands on); drag its right end |
 | Remove | Delete with the pointer on the strip, or right-click > **Remove it** |
-| Put in a progression | Theory > Keys > **Place**: the chords go on the chord track as well as a track |
+| Put in a progression | Theory > Keys > **Place**: one chord a bar on the chord track, from the bar nearest the playhead |
 | Find the chords in a part | Select a note clip, then right-click the strip > **Chords from the selected note clip**. It works half a bar at a time (a bar at a time in 3/4 and 6/8) and joins repeats |
-| Hear the chords | Right-click the strip > **Make a part from the chords**: a note clip on a free track with every chord held, each voice moving as little as it can. It uses the instrument's sound (Pads) if one is chosen, or a pad. Edit it in the piano roll like any part |
+| Hear the chords | Right-click the strip > **Make a chord part**, or use [Create > Parts](#parts-written-from-the-chords) for a chord part, a bassline, a melody or drum fills |
 
 **The key.** Every song has a key, saved with it, and shown beside CHORDS. Theory always shows the
 key where the playhead is, and changing it in Theory > Keys changes the key there. For a key change
@@ -133,7 +134,7 @@ Pitch still transpose a whole note clip.
 **Drums.** The Drums panel (Ctrl+4) holds each track's drum patterns: a row per sound, 16 or 32
 steps of a 16th each. Start one with **New from style** (any of Theory's 30 beats, with its kit), or
 drag a sound from the panel's list onto it; dropping a sound on a step puts a hit there, on a row's
-name swaps that row's sound. Theory > Beats > **Edit in Drums** turns the beat you see into one.
+name swaps that row's sound. Create > Beats > **Edit in Drums** turns the beat you see into one.
 
 | To | Do this |
 |---|---|
@@ -153,9 +154,19 @@ remove them. Between points the value moves in a straight line; before the first
 it holds. A lane with points overrides that control, and an orange dot on **A** means a hidden lane
 has points. Automating the cutoff turns the track's filter on as a low-pass if it was off.
 
-## Making sounds
+## Making sounds and parts
 
-**Sounds > Generator** is the quickest way to a sound, with no synth knowledge needed:
+Everything that makes something new is in **Create** (Ctrl+1), beside your library:
+
+| Tab | What it makes |
+|---|---|
+| Library | The sounds you have: click to hear, drag onto a track, right-click to pin, save or edit |
+| Synth | **Presets**: the Generator's ready-made sounds. **Tones**: plain waves and simple drums |
+| Voice | The Singer: words sung on a tune |
+| Beats | Drum beats in 30 styles |
+| Parts | A chord part, a bassline, a melody or drum fills, written from the chord track |
+
+**Create > Synth > Presets** (the Generator) is the quickest way to a sound, with no synth knowledge needed:
 
 1. **What kind of music?** House, Techno, Hip-hop, Trap, Lo-fi, Drum & bass, Dubstep, Synthwave,
    Pop, R&B, Ambient or Chiptune (or Any).
@@ -184,7 +195,7 @@ me** picks a random sound that fits your choices, with a little variation. Then:
 
 Generator sounds are saved as recipes, like everything else that tinydaw makes.
 
-**Sounds > Singer** sings words you type:
+**Create > Voice** (the Singer) sings words you type:
 
 1. **Type the words.** Each word gets a note; split longer words with `-` to give each part its
    own (`hap-py birth-day`). A comma leaves a short gap and a full stop a longer one. The line
@@ -207,18 +218,39 @@ The words are spoken by [eSpeak NG](https://github.com/espeak-ng/espeak-ng), a f
 program: the Windows download includes it, and on Linux it's the `espeak-ng` package. Sung lines are
 saved as words, notes and pitch curve, so they stay in a project (silent) where eSpeak NG is missing.
 
-**Sounds > New sound** builds a plain tone instead: choose sine, square, saw, triangle, noise, kick,
+**Create > Synth > Tones** builds a plain tone instead: choose sine, square, saw, triangle, noise, kick,
 snare or hat. Then set the note, length, volume and envelope (attack, release), and the tuning (A4,
 415–466 Hz). **Play** lets you hear it before adding it to the library.
 
-**Theory** has four tabs. Everything you can hear in them has a **+** that adds it to the library.
+**Create > Beats** has 30 styles: house, deep house, tech house, techno, trance, UK garage,
+breakbeat, drum & bass, jungle, dubstep, hip-hop, trap, UK drill, phonk, R&B, pop, rock, funk, disco,
+synthwave, electro, footwork, lo-fi, reggaeton, dancehall, reggae, afrobeats, amapiano, bossa nova
+and jazz swing. Each has its own tempo, swing, key and drum kit, and a step grid you can edit.
+**Play** previews it, **+ Library** adds it as a loop, **Place** puts it in the song, or drag the
+orange bar onto any track.
+
+### Parts written from the chords
+
+**Create > Parts** writes a part from the chord track, in the key wherever it is. Pick the part,
+its style, how busy it is, its octave and its sound (any Generator preset that suits it, or the
+instrument chosen in Pads), and where it goes: the whole chord track, the loop, or the section the
+playhead is in. **Make it** puts it on a free track as a note clip you can edit in the piano roll;
+**Try another** writes it again differently, in the same clip.
+
+| Part | Styles |
+|---|---|
+| Chords | **Held** (pads), **Pulse** and **Stabs** (keys), **Arp up** and **Arp up & down** (plucks). Each chord is voiced close to the last, so the voices move as little as they can |
+| Bass | **Roots**, **Pulse** (8ths), **Octaves**, **Off-beat**, **Walking** (quarters that lead into each new chord a step away) and **Groove** (a syncopated pattern with the fifth and octave). Slash chords put their bass note in the bass |
+| Melody | **Hook** (short and catchy), **Flowing** (moves more) and **Sparse** (room to breathe, or to sing). Short cells come back (A A B A), the strong beats land on chord tones, and each phrase ends on the root or third |
+| Fills | **Snare roll**, **Build**, **Toms** and **Drop-out**, in the bar before each section or every 4 or 8 bars, a beat, half a bar or a whole bar long. Each fill is made from that bar of your own drum pattern and becomes a pattern of its own you can open in Drums |
+
+**Theory** has three tabs. Everything you can hear in them has a **+** that adds it to the library.
 The strip at the top of each tab sets which wave and length those sounds use. Adding the same thing
-twice doesn't make a copy, and the Sounds button counts what you've added.
+twice doesn't make a copy, and the Create button counts what you've added.
 
 | Tab | What's there |
 |---|---|
-| Beats | 30 styles: house, deep house, tech house, techno, trance, UK garage, breakbeat, drum & bass, jungle, dubstep, hip-hop, trap, UK drill, phonk, R&B, pop, rock, funk, disco, synthwave, electro, footwork, lo-fi, reggaeton, dancehall, reggae, afrobeats, amapiano, bossa nova and jazz swing. Each has its own tempo, swing, key and drum kit, and a step grid you can edit. **Play** previews it, **+ Library** adds it as a loop, **Place** puts it in the song, or drag the orange bar onto any track |
-| Keys | Any key and 12 scales and modes: the notes, the chords of the key (triads or 7ths, with Roman numerals) and 12 common progressions to play, add or place |
+| Keys | The song's key (where the playhead is) and 12 scales and modes: the notes, the chords of the key (triads or 7ths, with Roman numerals) and 12 common progressions to play, add, or **Place** on the chord track |
 | Chords | 19 chord types on the chosen root |
 | Reference | The circle of fifths, intervals (with their just-intonation ratios), tempo maths (delay times in ms), and the frequency of every note |
 
@@ -229,10 +261,21 @@ twice doesn't make a copy, and the Sounds button counts what you've added.
 | Page | What's there |
 |---|---|
 | Levels | Every track's fader (in dB, with its meter), pan, mute and solo, then the master and the loudness. Drag a fader or use the wheel over it (half a dB a notch, Shift for a tenth); double-click puts it back to 0 dB. A fader whose volume is automated follows its lane. Click a name for that track's effects |
-| Clip | Gain, pitch, fades and reverse for the selected clips |
+| Clip | Gain, pitch, fades and reverse for the selected clips, and a pitch bend drawn over them |
 | Track | Volume, pan, a filter (low-, high- or band-pass with cutoff and resonance), 3-band EQ, drive, how much it ducks, its sends to the delay and reverb, its stereo width (0 mono to 2 twice as wide) and its own compressor (threshold, ratio, attack, release, makeup, and how hard it's working) |
 | Effects | The delay (in time with the tempo, 1/16 to 1/2 including dotted and triplet, feedback, tone, ping-pong), the reverb (size, damping), the sidechain (which track makes the others duck), and the master: **Off**, **Glue** or **Loud**, or set the compressor and the limiter's ceiling yourself, with a loudness meter |
 | Live | How far pitch bend goes; the mod wheel opens the filter on the instrument's track |
+
+**Pitch bend.** Mixer > Clip draws a pitch curve over the selected clip: any clip, whether audio,
+notes or drums. Drag across the curve to draw the pitch, from 12 semitones down to 12 up (24 once you
+need it); hold Shift for whole semitones, right-click or Ctrl+drag to rub a bend out. Or start from
+**Scoops** or **Fall-offs** (on each note of a note clip, or the clip's start or end), **Vibrato**,
+**Rise** or **Dive** (an octave over the clip); **Flat** takes the bend away. Notes and drum hits
+follow the curve as they play, slides included. For an audio clip, choose **Keep timing** (the
+pitch moves and the clip stays in time: it's pitch-shifted when you let go, which suits single
+voices and instruments best) or **Tape** (the speed moves with the pitch, like a tape or turntable).
+The curve belongs to the clip: it moves, trims and splits with it, and copies share it until you
+bend one of them.
 
 **The mixing console** (the button at the top of Levels, or ☰ > Mixing console) opens in its own
 window you can put anywhere, even another screen: a strip a track, side by side, with EQ, compressor,

@@ -179,7 +179,20 @@ typedef struct {
     long fade_in, fade_out; /* frames */
     int pattern;            /* 0 = an audio clip */
     int root;               /* note clips: the note at which the sound plays unpitched */
+    int bend;               /* its pitch curve (a Bend's id), 0 = none */
 } Clip;
+
+/* A pitch curve drawn over a clip (Mixer > Clip): semitones, in straight lines between points, at
+ * seconds from the clip's origin (start - offset: where its sound or pattern starts). Before the
+ * first point and after the last the bend holds. Copies of a clip share it until one is edited. */
+#define MAX_BENDS 256
+#define BEND_POINTS 512
+typedef struct {
+    int id;                 /* > 0 */
+    int keep_time;          /* audio clips: 1 = the pitch moves and the timing stays; 0 = tape (speed with pitch) */
+    int n;
+    float at[BEND_POINTS], semis[BEND_POINTS];   /* in time order */
+} Bend;
 
 /* A drum pattern (the Drums panel): rows of sounds over 16 or 32 sixteenth-note steps, each step with
  * a velocity and a chance of playing. A drum clip (Clip.pattern == -id) plays it over and over for as
@@ -301,7 +314,7 @@ typedef struct {
     double at, len;         /* quarter notes */
     int root, type;         /* pitch class 0..11, CH_* */
     int bass;               /* the bass note's pitch class for a slash chord (C/E), -1 = the root */
-} Chord;
+} SongChord;
 
 /* A key change from the start of bar `bar` (>= 1) on. The song's first key is the project's
  * key_root and key_scale (an index into SCALES). */
@@ -345,8 +358,10 @@ typedef struct {
     int key_root, key_scale;                /* the key at the start */
     KeyChange keys[MAX_KEYS];               /* in bar order */
     int nkeys;
-    Chord chords[MAX_CHORDS];               /* in order, not overlapping */
+    SongChord chords[MAX_CHORDS];               /* in order, not overlapping */
     int nchords;
+    Bend bends[MAX_BENDS];                  /* pitch curves, referred to by clips */
+    int nbends;
     Voice voices[MAX_VOICES];
     float bend;             /* live pitch wheel, -1..1 (not saved) */
     float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */
@@ -532,13 +547,50 @@ void chord_remove(Project *p, int i);
 void chords_sort(Project *p);
 void chord_split(Project *p, double beat);      /* a chord sounding across `beat` becomes two there */
 /* "Am", "C/E": spelled with sharps or flats as the key there wants. */
-void chord_label(const Project *p, const Chord *c, char *buf, size_t n);
+void chord_label(const Project *p, const SongChord *c, char *buf, size_t n);
 /* The chord's Roman numeral in the key at its start: "vi", "V7", or "bVII" for a chord borrowed
  * from outside the key (degrees counted on the major scale of the key's root). */
-void chord_numeral(const Project *p, const Chord *c, char *buf, size_t n);
+void chord_numeral(const Project *p, const SongChord *c, char *buf, size_t n);
 /* A voicing between lo and hi (MIDI notes) that moves as little as it can from prev (nprev notes,
  * 0 = none: close to the middle of the range). Returns how many notes went into out (up to 6). */
-int chord_voice(const Chord *c, const int *prev, int nprev, int lo, int hi, int *out);
+int chord_voice(const SongChord *c, const int *prev, int nprev, int lo, int hi, int *out);
+
+/* ---- pitch curves on clips (bend.c) ---- */
+typedef struct BendMap BendMap;
+typedef struct BendWork BendWork;
+float bend_at(const Bend *b, double sec);      /* semitones at a time from the clip's origin */
+const Bend *bend_find_c(const Project *p, int id);
+Bend *bend_find(Project *p, int id);
+int bend_new(Project *p);                       /* a new empty curve's id (keeping the timing), or 0 */
+/* The curve's warp, for playback: NULL when there's none or it isn't built yet. bend_warp gives how many
+ * frames into its sound a clip is, `frames` of timeline after its origin. */
+const BendMap *bend_map(const Project *p, int id);
+double bend_warp(const BendMap *m, double frames);
+const float *bend_shifted(const Project *p, int id, int sample);   /* a keep-time render, or NULL */
+BendWork *bends_build(const Project *p);        /* what changed, built without the audio lock (NULL: nothing) */
+void bends_install(BendWork *w);                /* swaps it in: call holding the audio lock */
+
+/* ---- parts written from the chord track (parts.c) ---- */
+enum { PART_CHORDS, PART_BASS, PART_MELODY, PART_KINDS };
+#define PART_MAX_STYLES 6
+extern const char *const PART_STYLES[PART_KINDS][PART_MAX_STYLES];
+extern const int PART_NSTYLES[PART_KINDS];
+typedef struct { int note; double at, len; float vel; } PartNote;   /* at and len in beats from the start */
+typedef struct {
+    int kind, style;        /* PART_*, an index into PART_STYLES[kind] */
+    double from, to;        /* the stretch of the song, in beats */
+    int lo, hi;             /* the range, MIDI notes */
+    double density;         /* 0 sparse .. 1 busy */
+    unsigned seed;          /* the same seed writes the same part */
+} PartSpec;
+/* The part's notes over [from, to), following the chord track and the key there. Returns how many. */
+int part_write(const Project *p, const PartSpec *s, PartNote *out, int max);
+enum { FILL_ROLL, FILL_BUILD, FILL_TOMS, FILL_DROP, FILL_KINDS };
+extern const char *const FILL_STYLES[FILL_KINDS];
+/* One bar of `src` as it plays from step `from_step` (bar_steps 16ths long), with its end turned
+ * into a fill. intensity 0..1 makes it a beat, half a bar or the whole bar long. */
+void drum_fill(const Project *p, const DrumPat *src, int from_step, int bar_steps, int style, double intensity,
+               unsigned seed, DrumPat *out);
 
 /* ---- analysis (analysis.c) ---- */
 #define VIS_FFT 4096

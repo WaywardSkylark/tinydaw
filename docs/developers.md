@@ -1,5 +1,7 @@
 # Working on tinydaw
 
+Major changes since 0.8.0, and the reasoning behind them, are logged in [notes.md](../notes.md).
+
 ## Layout of the code
 - `src/main.c`: the interface, drawn fresh every frame with SDL's 2D renderer, and the self-tests
 - `src/audio.c`: sounds, synthesis, import, sample-rate changes, export
@@ -16,6 +18,10 @@
 - `src/harmony.c`: the chord track and the song's key: which chord and key are where, voicing chords
   so each voice moves as little as it can, and naming them (theory.c's `chord_guess` names the chord
   a set of notes makes)
+- `src/parts.c`: parts written from the chord track (chord parts, basslines, melodies) and drum fills;
+  deterministic for a seed, so Try another is the next seed
+- `src/bend.c`: pitch curves on clips: the warp (how far into a sound a bent clip is) that notes, drum hits
+  and tape-style audio play through, and the WSOLA pitch shifter for audio that keeps its timing
 - `src/voice.c`: the Singer: runs eSpeak NG for each syllable, then either re-pitches it with
   PSOLA (Clear) or sings it through a 28-band vocoder, stretching the vowel to the note's length
 - `src/synth.c`: the Generator's synth (unison oscillators, FM, a resonant filter with its own
@@ -33,7 +39,7 @@
 ## Tests
 
 ```sh
-./tinydaw --selftest                      # 401 checks, driving the real interface with simulated input
+./tinydaw --selftest                      # 422 checks, driving the real interface with simulated input
 ./tinydaw --demo --screenshot ui.bmp      # draw the window off-screen
 TINYDAW_DEBUG_INPUT=1 ./tinydaw           # print every key, controller and MIDI input
 TINYDAW_CHECK_TEXT=1 ./tinydaw            # report any text that overlaps other text or outgrows its button

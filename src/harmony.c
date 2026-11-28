@@ -81,7 +81,7 @@ void key_change_remove(Project *p, int i)
 int chord_at(const Project *p, double beat)
 {
     for (int i = 0; i < p->nchords; i++) {
-        const Chord *c = &p->chords[i];
+        const SongChord *c = &p->chords[i];
         if (beat >= c->at - 1e-9 && beat < c->at + c->len - 1e-9) return i;
         if (c->at > beat) break;
     }
@@ -92,7 +92,7 @@ void chords_sort(Project *p)
 {
     for (int i = 1; i < p->nchords; i++)
         for (int j = i; j > 0 && p->chords[j - 1].at > p->chords[j].at; j--) {
-            Chord t = p->chords[j];
+            SongChord t = p->chords[j];
             p->chords[j] = p->chords[j - 1];
             p->chords[j - 1] = t;
         }
@@ -101,7 +101,7 @@ void chords_sort(Project *p)
 void chord_remove(Project *p, int i)
 {
     if (i < 0 || i >= p->nchords) return;
-    memmove(&p->chords[i], &p->chords[i + 1], (size_t)(p->nchords - i - 1) * sizeof(Chord));
+    memmove(&p->chords[i], &p->chords[i + 1], (size_t)(p->nchords - i - 1) * sizeof(SongChord));
     p->nchords--;
 }
 
@@ -110,13 +110,13 @@ int chord_put(Project *p, double at, double len, int root, int type, int bass)
     if (len < 1e-6 || at < 0 || type < 0 || type >= CH_COUNT) return -1;
     double end = at + len;
     for (int i = p->nchords - 1; i >= 0; i--) {   /* make room */
-        Chord *c = &p->chords[i];
+        SongChord *c = &p->chords[i];
         double ce = c->at + c->len;
         if (ce <= at + 1e-9 || c->at >= end - 1e-9) continue;
         if (c->at >= at - 1e-9 && ce <= end + 1e-9) {          /* covered: gone */
             chord_remove(p, i);
         } else if (c->at < at && ce > end) {                    /* split around the new one */
-            Chord tail = *c;
+            SongChord tail = *c;
             c->len = at - c->at;
             tail.at = end;
             tail.len = ce - end;
@@ -131,14 +131,14 @@ int chord_put(Project *p, double at, double len, int root, int type, int bass)
     if (p->nchords >= MAX_CHORDS) return -1;
     root = ((root % 12) + 12) % 12;
     if (bass == root) bass = -1;
-    p->chords[p->nchords++] = (Chord){at, len, root, type, bass < 0 ? -1 : bass % 12};
+    p->chords[p->nchords++] = (SongChord){at, len, root, type, bass < 0 ? -1 : bass % 12};
     chords_sort(p);
     for (int i = 0; i < p->nchords; i++)
         if (fabs(p->chords[i].at - at) < 1e-9) return i;
     return -1;
 }
 
-void chord_label(const Project *p, const Chord *c, char *buf, size_t n)
+void chord_label(const Project *p, const SongChord *c, char *buf, size_t n)
 {
     int kr, ks;
     key_at_beat(p, c->at, &kr, &ks);
@@ -149,7 +149,7 @@ void chord_label(const Project *p, const Chord *c, char *buf, size_t n)
     else snprintf(buf, n, "%s", name);
 }
 
-void chord_numeral(const Project *p, const Chord *c, char *buf, size_t n)
+void chord_numeral(const Project *p, const SongChord *c, char *buf, size_t n)
 {
     static const char *const UP[12] = {"I", "bII", "II", "bIII", "III", "IV", "bV", "V", "bVI", "VI", "bVII", "VII"};
     int kr, ks;
@@ -189,7 +189,7 @@ void chord_numeral(const Project *p, const Chord *c, char *buf, size_t n)
     snprintf(buf, n, "%s%s", r, suf);
 }
 
-int chord_voice(const Chord *c, const int *prev, int nprev, int lo, int hi, int *out)
+int chord_voice(const SongChord *c, const int *prev, int nprev, int lo, int hi, int *out)
 {
     const ChordType *t = &CHORDS[c->type];
     int pcs[6], np = 0;
@@ -243,9 +243,9 @@ void chord_split(Project *p, double beat)
 {
     int n = p->nchords;
     for (int i = 0; i < n && p->nchords < MAX_CHORDS; i++) {
-        Chord *c = &p->chords[i];
+        SongChord *c = &p->chords[i];
         if (c->at >= beat - 1e-9 || c->at + c->len <= beat + 1e-9) continue;
-        Chord tail = *c;
+        SongChord tail = *c;
         tail.at = beat;
         tail.len = c->at + c->len - beat;
         c->len = beat - c->at;

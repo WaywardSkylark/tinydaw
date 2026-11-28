@@ -35,11 +35,13 @@ make && ./tinydaw
 
 1. **Hear an example:** ☰ > **Open an example song**, then press **Space**. It opens as a copy,
    so change anything.
-2. **Start your own:** ☰ > **New**. In **Theory**, pick a **Style** under Beats and press
+2. **Start your own:** ☰ > **New**. In **Create > Beats**, pick a **Style** and press
    **Place on new row(s)**.
-3. **Add a sound:** **Sounds > Generator**, pick a style and what the sound is for, click one to
-   hear it, then **Put it at the playhead**.
-4. **Save** with Ctrl+S and **export** with Ctrl+E.
+3. **Add chords:** in **Theory > Keys**, press **Place** next to a progression. The chords go on
+   the CHORDS strip above the tracks.
+4. **Write parts from them:** **Create > Parts**, pick **Bass** or **Melody** and press **Make it**.
+   **Try another** writes it again differently.
+5. **Save** with Ctrl+S and **export** with Ctrl+E.
 
 Hold the mouse over anything to see what it does. Settings > **Keys** lists every shortcut.
 

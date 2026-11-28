@@ -260,6 +260,7 @@ static void add_pattern(Mixer *m, const Project *p, const Clip *cl, long start, 
     long origin = cl->start - cl->offset, rel_f = NOTE_RELEASE;
     float gain = cl->gain_db == 0 ? 1.0f : powf(10.0f, cl->gain_db / 20.0f);
     float *out = m->trk[cl->track];
+    const BendMap *bm = cl->bend ? bend_map(p, cl->bend) : NULL;   /* a pitch curve: notes read through its warp */
     for (int k = 0; k < p->nnotes; k++) {
         const Note *nt = &p->notes[k];
         if (nt->pattern != cl->pattern) continue;
@@ -270,10 +271,15 @@ static void add_pattern(Mixer *m, const Project *p, const Clip *cl, long start, 
         if (a >= b) continue;
         double step = pow(2.0, (nt->note - cl->root) / 12.0);
         long last = ns + (long)((s->frames - 1) / step);     /* where the sound runs out */
-        if (b > last) b = last;
+        if (b > last && !bm) b = last;
+        double w0 = bm ? bend_warp(bm, (double)(ns - origin)) : 0;
         for (long f = a; f < b; f++) {
-            double pos = (f - ns) * step;
+            double pos = bm ? (bend_warp(bm, (double)(f - origin)) - w0) * step : (f - ns) * step;
             long i = (long)pos;
+            if (i < 0 || i >= s->frames - 1) {
+                if (i < 0) continue;
+                break;
+            }
             float fr = (float)(pos - i), g = gain * nt->vel;
             long rel = f - cl->start, right = cl->length - 1 - rel, into = f - ns;
             if (rel < CLIP_EDGE) g *= (float)rel / CLIP_EDGE;
@@ -305,6 +311,7 @@ static void add_drums(Mixer *m, const Project *p, const Clip *cl, long start, in
         }
     }
     maxlen += maxlen / 50 + 64;                  /* a round-robin a few cents down is a touch longer */
+    if (cl->bend) maxlen *= 4;                   /* bent down, a hit lasts longer (two octaves: four times) */
     long cend = cl->start + cl->length;
     if (start >= cend + maxlen || start + n <= cl->start || !maxlen) return;
     long origin = cl->start - cl->offset, from = start - maxlen;
@@ -314,6 +321,7 @@ static void add_drums(Mixer *m, const Project *p, const Clip *cl, long start, in
     if (k0 < 0) k0 = 0;
     float gain = cl->gain_db == 0 ? 1.0f : powf(10.0f, cl->gain_db / 20.0f);
     float *out = m->trk[cl->track];
+    const BendMap *bm = cl->bend ? bend_map(p, cl->bend) : NULL;   /* a pitch curve: each hit follows it */
     for (long k = k0; k <= k1; k++) {
         long hf = meter_beats_frame(p, b0 + drum_step_beat(d, k));
         if (hf < cl->start || hf >= cend) continue;
@@ -324,8 +332,22 @@ static void add_drums(Mixer *m, const Project *p, const Clip *cl, long start, in
             si = sample_pick(p, si, d->vel[r][st] / 127.0f, (unsigned)((k / d->steps) * per[r] + before[r][st]));
             const Sample *s = &p->samples[si];
             if (!s->data) continue;
-            long a = start > hf ? start : hf, b = start + n < hf + s->frames ? start + n : hf + s->frames;
             float g = gain * d->row_vol[r] * d->vel[r][st] / 127.0f;
+            if (bm) {                            /* bent: read through the warp, as long as the sound lasts */
+                double w0 = bend_warp(bm, (double)(hf - origin));
+                long a = start > hf ? start : hf;
+                for (long f = a; f < start + n; f++) {
+                    double pos = bend_warp(bm, (double)(f - origin)) - w0;
+                    long i = (long)pos;
+                    if (i < 0) continue;
+                    if (i >= s->frames - 1) break;
+                    float fr = (float)(pos - i);
+                    out[2 * (f - start)] += (s->data[2 * i] + (s->data[2 * i + 2] - s->data[2 * i]) * fr) * g;
+                    out[2 * (f - start) + 1] += (s->data[2 * i + 1] + (s->data[2 * i + 3] - s->data[2 * i + 1]) * fr) * g;
+                }
+                continue;
+            }
+            long a = start > hf ? start : hf, b = start + n < hf + s->frames ? start + n : hf + s->frames;
             for (long f = a; f < b; f++) {
                 long i = f - hf;
                 out[2 * (f - start)] += s->data[2 * i] * g;
@@ -354,8 +376,26 @@ static void add_clips(Mixer *m, const Project *p, long start, int n)
         const Sample *s = &p->samples[cl->sample];
         float *out = m->trk[cl->track];
         float gain = cl->gain_db == 0 ? 1.0f : powf(10.0f, cl->gain_db / 20.0f);
+        const float *data = s->data;
+        const BendMap *bm = NULL;
+        if (cl->bend) {                          /* a pitch curve: a render that keeps the timing, or tape */
+            const Bend *bd = bend_find_c(p, cl->bend);
+            if (bd && bd->keep_time) {
+                const float *sh = bend_shifted(p, cl->bend, cl->sample);
+                if (sh) data = sh;
+            } else if (bd) {
+                bm = bend_map(p, cl->bend);
+            }
+        }
         for (long f = a; f < b; f++) {
             long rel = f - cl->start, src = cl->offset + rel;
+            float fr = 0;
+            if (bm) {
+                double pos = bend_warp(bm, (double)(cl->offset + rel));
+                src = (long)floor(pos);
+                fr = (float)(pos - src);
+                if (src >= s->frames - 1) continue;
+            }
             if (src < 0 || src >= s->frames) continue;
             float g = gain;
             long right = cl->length - 1 - rel;
@@ -363,8 +403,13 @@ static void add_clips(Mixer *m, const Project *p, long start, int n)
             if (right < CLIP_EDGE) g *= (float)right / CLIP_EDGE;
             if (cl->fade_in > 0 && rel < cl->fade_in) g *= (float)rel / cl->fade_in;
             if (cl->fade_out > 0 && right < cl->fade_out) g *= (float)right / cl->fade_out;
-            out[2 * (f - start)] += s->data[2 * src] * g;
-            out[2 * (f - start) + 1] += s->data[2 * src + 1] * g;
+            if (fr > 0) {
+                out[2 * (f - start)] += (data[2 * src] + (data[2 * src + 2] - data[2 * src]) * fr) * g;
+                out[2 * (f - start) + 1] += (data[2 * src + 1] + (data[2 * src + 3] - data[2 * src + 1]) * fr) * g;
+            } else {
+                out[2 * (f - start)] += data[2 * src] * g;
+                out[2 * (f - start) + 1] += data[2 * src + 1] * g;
+            }
         }
     }
 }

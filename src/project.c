@@ -140,14 +140,23 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     if (p->key_root || p->key_scale) fprintf(f, "key %d %d\n", p->key_root, p->key_scale);
     for (int i = 0; i < p->nkeys; i++) fprintf(f, "keychange %d %d %d\n", p->keys[i].bar, p->keys[i].root, p->keys[i].scale);
     for (int i = 0; i < p->nchords; i++) {
-        const Chord *c = &p->chords[i];
+        const SongChord *c = &p->chords[i];
         fprintf(f, "harmony %.9g %.9g %d %d %d\n", c->at, c->len, c->root, c->type, c->bass);
+    }
+    for (int i = 0; i < p->nbends; i++) {        /* pitch curves the clips use, before the clips */
+        const Bend *b = &p->bends[i];
+        int used = 0;
+        for (int c = 0; c < p->nclips && !used; c++) used = p->clips[c].bend == b->id;
+        if (!used) continue;
+        fprintf(f, "bend %d %d\n", b->id, b->keep_time);
+        for (int k = 0; k < b->n; k++) fprintf(f, "bpt %.9g %.6g\n", b->at[k], b->semis[k]);
     }
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
         fprintf(f, "clip %d %d %ld %ld %ld %.9g %ld %ld", cl->sample, cl->track, cl->start, cl->offset, cl->length,
                 cl->gain_db, cl->fade_in, cl->fade_out);
-        if (cl->pattern) fprintf(f, " %d %d", cl->pattern, cl->root);
+        if (cl->pattern || cl->bend) fprintf(f, " %d %d", cl->pattern, cl->root);
+        if (cl->bend) fprintf(f, " %d", cl->bend);
         fprintf(f, "\n");
     }
     for (int i = 0; i < p->nnotes; i++) {
@@ -441,8 +450,8 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         } else if (!strcmp(word, "clip")) {
             Clip c;
             memset(&c, 0, sizeof c);
-            ok = sscanf(line, "clip %d %d %ld %ld %ld %f %ld %ld %d %d", &c.sample, &c.track, &c.start, &c.offset,
-                        &c.length, &c.gain_db, &c.fade_in, &c.fade_out, &c.pattern, &c.root) >= 5 &&
+            ok = sscanf(line, "clip %d %d %ld %ld %ld %f %ld %ld %d %d %d", &c.sample, &c.track, &c.start, &c.offset,
+                        &c.length, &c.gain_db, &c.fade_in, &c.fade_out, &c.pattern, &c.root, &c.bend) >= 5 &&
                  c.sample >= 0 && c.sample < p->nsamples && c.track >= 0 && c.track < MAX_TRACKS;
             if (c.pattern < 0 && !drum_find(p, -c.pattern)) ok = 0;   /* a drum clip whose pattern is missing */
             if (ok && c.pattern && p->nclips < MAX_CLIPS) {   /* a note or drum clip */
@@ -474,6 +483,19 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 sc.name[strcspn(sc.name, "\r\n")] = 0;
                 p->sections[p->nsections++] = sc;
             }
+        } else if (!strcmp(word, "bend")) {
+            Bend b;
+            memset(&b, 0, sizeof b);
+            ok = sscanf(line, "bend %d %d", &b.id, &b.keep_time) == 2 && b.id > 0 && !bend_find_c(p, b.id);
+            if (ok && p->nbends < MAX_BENDS) p->bends[p->nbends++] = b;
+        } else if (!strcmp(word, "bpt")) {
+            float at, st;
+            ok = sscanf(line, "bpt %f %f", &at, &st) == 2 && p->nbends > 0 && at >= 0 && at < 1e6 && st >= -48 && st <= 48;
+            Bend *b = ok ? &p->bends[p->nbends - 1] : NULL;
+            if (b && b->n < BEND_POINTS && (b->n == 0 || at >= b->at[b->n - 1])) {
+                b->at[b->n] = at;
+                b->semis[b->n++] = st;
+            }
         } else if (!strcmp(word, "key")) {
             int r = 0, sc = 0;
             ok = sscanf(line, "key %d %d", &r, &sc) == 2 && r >= 0 && r < 12 && sc >= 0 && sc < NSCALES;
@@ -487,7 +509,7 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                  k.root >= 0 && k.root < 12 && k.scale >= 0 && k.scale < NSCALES;
             if (ok && p->nkeys < MAX_KEYS) p->keys[p->nkeys++] = k;
         } else if (!strcmp(word, "harmony")) {
-            Chord c;
+            SongChord c;
             ok = sscanf(line, "harmony %lf %lf %d %d %d", &c.at, &c.len, &c.root, &c.type, &c.bass) == 5 && c.at >= 0 &&
                  c.at < 1e6 && c.len > 0 && c.len < 1e5 && c.root >= 0 && c.root < 12 && c.type >= 0 && c.type < CH_COUNT &&
                  c.bass >= -1 && c.bass < 12;
@@ -576,6 +598,8 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         if (!good) o->nvel = o->nrr = 0;
     }
     auto_sort(p);
+    for (int c = 0; c < p->nclips; c++)          /* a curve that didn't come back: the clip plays straight */
+        if (p->clips[c].bend && !bend_find_c(p, p->clips[c].bend)) p->clips[c].bend = 0;
     keys_tidy(p);
     chords_sort(p);
     for (int i = 0; i + 1 < p->nchords; i++)     /* never overlapping */

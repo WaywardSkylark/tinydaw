@@ -109,6 +109,7 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
                     v->vibrato, v->volume, v->a4, v->bpm, v->tune, v->first, v->step, v->singer, v->words);
             for (int k = 0; k < v->nnotes; k++)
                 fprintf(f, "vnote %d %.9g %.9g\n", v->notes[k].note, v->notes[k].start, v->notes[k].len);
+            for (int k = 0; k < v->nbend; k++) fprintf(f, "vbend %.9g %.6g\n", v->bend_beat[k], v->bend_semis[k]);
         }
         if (s->pitched) fprintf(f, "variant %d %d %d %.17g\n", s->src, s->semis, s->reversed, s->stretch > 0 ? s->stretch : 1);
         if (s->is_layer) fprintf(f, "layer %d %d %d %d\n", s->src, s->layer_lvl, s->layer_n, s->layer_rr);
@@ -133,6 +134,8 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
             fprintf(f, "\n");
         }
     }
+    for (int i = 0; i < p->nsections; i++)
+        fprintf(f, "section %d %d %s\n", p->sections[i].bar, p->sections[i].bars, p->sections[i].name);
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
         fprintf(f, "clip %d %d %ld %ld %ld %.9g %ld %ld", cl->sample, cl->track, cl->start, cl->offset, cl->length,
@@ -380,6 +383,14 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 ok = sscanf(line, "vnote %d %lf %lf", &nt->note, &nt->start, &nt->len) == 3 && nt->len > 0;
                 if (ok) v->nnotes++;
             }
+        } else if (in_sample && !strcmp(word, "vbend")) {
+            VocalSpec *v = &s.voc;
+            float b, st;
+            ok = sscanf(line, "vbend %f %f", &b, &st) == 2;
+            if (ok && v->nbend < VOCAL_BENDS && (!v->nbend || b >= v->bend_beat[v->nbend - 1])) {
+                v->bend_beat[v->nbend] = b;
+                v->bend_semis[v->nbend++] = st < -24 ? -24 : st > 24 ? 24 : st;
+            }
         } else if (in_sample && !strcmp(word, "patch")) {
             synth_patch_parse(rest_after(line, 1), &s.syn.patch);
         } else if (in_sample && !strcmp(word, "lane")) {
@@ -444,6 +455,17 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 if (c.fade_in < 0 || c.fade_in > c.length) c.fade_in = 0;
                 if (c.fade_out < 0 || c.fade_in + c.fade_out > c.length) c.fade_out = 0;
                 p->clips[p->nclips++] = c;
+            }
+        } else if (!strcmp(word, "section")) {
+            Section sc;
+            memset(&sc, 0, sizeof sc);
+            int nm = 0;
+            ok = sscanf(line, "section %d %d %n", &sc.bar, &sc.bars, &nm) >= 2 && sc.bar >= 0 && sc.bars >= 1 &&
+                 sc.bar < 100000 && sc.bars < 100000;
+            if (ok && p->nsections < MAX_SECTIONS) {
+                if (nm > 0) snprintf(sc.name, sizeof sc.name, "%.23s", line + nm);
+                sc.name[strcspn(sc.name, "\r\n")] = 0;
+                p->sections[p->nsections++] = sc;
             }
         } else if (!strcmp(word, "drum")) {
             DrumPat d;

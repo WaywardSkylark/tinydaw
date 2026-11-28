@@ -458,6 +458,23 @@ static double white(uint32_t *r)
 }
 
 /* Sings one syllable into out (stereo, at the project rate) from frame `at`, `len` frames long. */
+double vocal_bend_at(const VocalSpec *v, double beat)
+{
+    int n = v->nbend;
+    if (n <= 0) return 0;
+    if (beat <= v->bend_beat[0]) return v->bend_semis[0];
+    if (beat >= v->bend_beat[n - 1]) return v->bend_semis[n - 1];
+    int lo = 0, hi = n - 1;                      /* the two points either side */
+    while (hi - lo > 1) {
+        int mid = (lo + hi) / 2;
+        if (v->bend_beat[mid] <= beat) lo = mid;
+        else hi = mid;
+    }
+    double span = v->bend_beat[hi] - v->bend_beat[lo];
+    double k = span > 0 ? (beat - v->bend_beat[lo]) / span : 1;
+    return v->bend_semis[lo] + (v->bend_semis[hi] - v->bend_semis[lo]) * k;
+}
+
 static void sing(const Analysis *a, const VocalSpec *v, int note, int prev_note, long at, long len, float *out,
                  long out_frames, uint32_t *rng)
 {
@@ -497,6 +514,7 @@ static void sing(const Analysis *a, const VocalSpec *v, int note, int prev_note,
         double glide = fmin(1, t / 0.04);
         double semis = 12 * log2(f_from / f_to) * (1 - glide);
         if (t > 0.2) semis += vib * sin(2 * PI * 5.5 * (t - 0.2)) * fmin(1, (t - 0.2) / 0.3);
+        if (v->nbend) semis += vocal_bend_at(v, ((double)(at + i) / SR) * (v->bpm > 0 ? v->bpm : 120) / 60.0);   /* the drawn curve */
         double f = f_to * pow(2.0, semis / 12.0);
         double cl = 0, cr = 0;
         for (int k = 0; k < nv; k++) {           /* the buzz */
@@ -750,6 +768,7 @@ static void sing_clear(const Spoken *s, const VocalSpec *v, int note, int prev_n
             }
             double sec = t / r, semis = 12 * log2(f_from / f_to) * (1 - fmin(1, sec / 0.06));
             if (sec > 0.18) semis += vib * sin(2 * PI * 5.5 * (sec - 0.18)) * fmin(1, (sec - 0.18) / 0.3);
+            if (v->nbend) semis += vocal_bend_at(v, ((double)at / SR + sec) * (v->bpm > 0 ? v->bpm : 120) / 60.0);   /* the drawn curve */
             double T1 = r / (f_to * pow(2.0, semis / 12.0));
             t += vo ? T1 : T0;
         }

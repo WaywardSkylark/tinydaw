@@ -14,10 +14,13 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
 - **A real mixer:** faders in dB with meters, per-track EQ, filter, drive, compressor, stereo width,
   pan and sidechain ducking, delay and reverb, a master compressor and limiter with a loudness meter
   (LUFS), and a mixing console you can pop out into its own window.
-- **Sings your words:** type a line, pick a tune and a voice, and it sings it, in 12 languages.
+- **Sings your words:** type a line, pick a tune and a voice, and it sings it, in 12 languages;
+  draw a pitch curve over the notes for slides, scoops and fall-offs.
 - **Sounds that respond to touch:** velocity layers (a soft hit is darker and gentler, not just
   quieter) and round-robins (no two hits in a row the same) on Generator sounds, drum kits and any
   sound you choose.
+- **Arrange by sections:** mark the intro, verses and choruses on a strip above the tracks, jump
+  between them, and drag a section to rearrange the song.
 - **Drum step sequencer:** patterns of any sounds over 16 or 32 steps, with velocity and a chance
   of playing on every step, swing, and a start from any of the 30 styles.
 - **Piano roll, MIDI and automation:** play or write melodies (quantize and humanize them), import
@@ -86,6 +89,17 @@ Settings > **Keys** lists every shortcut.
   sharp at every size.
 
 ## Arranging
+
+**Sections.** The strip above the tracks names the parts of the song. Drag along it (or press **+**
+beside SECTIONS) to mark one; new ones are named in the usual order (Intro, Verse, Chorus...), and
+sections with the same name share a colour.
+
+| To | Do this |
+|---|---|
+| Go to a section | Click it; **Ctrl+PageUp** / **Ctrl+PageDown** for the previous / next |
+| Rearrange the song | Drag a section to another section's edge: everything in it (clips, automation, tempo changes) moves, and what was between moves along. Clips crossing an edge are split there |
+| Rename / resize | Double-click it to type a name; drag its right end |
+| Repeat, loop or cut | Right-click: **Copy it in after itself**, **Loop it**, **Remove the marker** (the music stays) or **Remove it and its bars** |
 
 | To | Do this |
 |---|---|
@@ -209,12 +223,16 @@ Generator sounds are saved as recipes, like everything else that tinydaw makes.
 3. **Pick a voice.** **Clear** is a singer: pick Aria (high, bright), Lumi (high, soft), Kai
    (low, warm) or Ren (low, plain). **Robot**, **Talkbox**, **Choir** and **Whisper** are
    vocoder voices, low or high. Then one of 12 languages and how much vibrato.
-4. **Sing it** to hear it, then **+ Library** or **Put it at the playhead** (**Put it with the
+4. **Shape the pitch** (optional): the line's notes are drawn with the pitch as it will be sung
+   over them. Draw on it to bend notes (Shift: whole semitones), right-click to rub a bend out, or
+   start from **Scoops** (up into each note), **Slides** (gliding note to note) or **Fall-offs**
+   (dropping away at phrase ends); **Flat** clears it. Bends change the pitch, never the timing.
+5. **Sing it** to hear it, then **+ Library** or **Put it at the playhead** (**Put it with the
    clip** when singing a note clip's melody, so it lines up underneath).
 
 The words are spoken by [eSpeak NG](https://github.com/espeak-ng/espeak-ng), a free speech
 program: the Windows download includes it, and on Linux it's the `espeak-ng` package. Sung lines are
-saved as words and notes, so they stay in a project (silent) where eSpeak NG is missing.
+saved as words, notes and pitch curve, so they stay in a project (silent) where eSpeak NG is missing.
 
 **Sounds > New sound** builds a plain tone instead: choose sine, square, saw, triangle, noise, kick,
 snare or hat. Then set the note, length, volume and envelope (attack, release), and the tuning (A4,

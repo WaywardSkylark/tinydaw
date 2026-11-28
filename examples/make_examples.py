@@ -46,7 +46,11 @@ class Song:
         self.fx = dict(div=4, fb=0.35, tone=0.5, dlevel=0.8, ping=0, size=0.6, damp=0.4, rlevel=0.8,
                        sc=-1, release=180, bend=2)
         self.loop = (0, 0, 0)
+        self.sections = []                          # (bar, bars, name): the arranger strip
         self.bf = round(60.0 / bpm * RATE)          # frames per beat, as tinydaw rounds it
+
+    def section(self, bar, bars, name):
+        self.sections.append((bar, bars, name))
 
     # ---- sounds
     def _frames(self, beats):
@@ -137,6 +141,8 @@ class Song:
             elif s["kind"] == "variant":
                 out.append("variant %d %d %d" % (s["src"], s["semis"], s["rev"]))
             out.append("end")
+        for b, n, name in sorted(self.sections):
+            out.append("section %d %d %s" % (b, n, name))
         for c in sorted(self.clips, key=lambda c: (c[2], c[1])):
             out.append("clip %d %d %d %d %d %s %d %d" % (c[0], c[1], c[2], c[3], c[4], t(c[5]), c[6], c[7]))
         for i, p in enumerate(self.pads[:16]):
@@ -204,6 +210,11 @@ def house():
              [(stab[n], 0, 0.8, t_stab) for n, _, _ in chords] + [(bass[n], 0, 0.8, t_bass) for n, _, _ in chords] + \
              [(pad[n], 1, 0.7, t_pad) for n, _, _ in chords]
     s.loop = (1, 80 * s.bf, 96 * s.bf)
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Groove")
+    s.section(12, 4, "Build")
+    s.section(16, 4, "Break")
+    s.section(20, 12, "Drop")
     return s
 
 
@@ -252,6 +263,9 @@ def hiphop():
     s.pads = [(drums, 0, 0.9, t_drums), (hats, 0, 0.7, t_hats)] + [(keys[n], 1, 0.8, t_keys) for n, _, _ in chords] + \
              [(bass[n], 1, 0.9, t_bass) for n, _, _ in chords] + [(bell[n], 0, 0.7, t_bell) for n in (74, 77, 79, 81, 84)]
     s.loop = (1, 48 * s.bf, 64 * s.bf)
+    s.section(0, 8, "Verse")
+    s.section(8, 8, "Hook")
+    s.section(16, 8, "Verse")
     return s
 
 
@@ -601,6 +615,10 @@ def breakcore():
              [(chop, 0, 0.8, t_vox), (vow, 1, 0.8, t_vox), (zap, 0, 0.8, t_fx), (impact, 0, 0.9, t_fx),
               (riser, 0, 0.8, t_fx), (bell, 0, 0.8, t_bell), (pad, 1, 0.7, t_pad)]
     s.instrument = (bell, 72, t_bell)
+    s.section(0, 4, "Intro")
+    s.section(4, 16, "Break")
+    s.section(20, 4, "7/8")
+    s.section(24, 12, "Finale")
     return s
 
 
@@ -712,6 +730,11 @@ def rock():
              [(v, 0, 0.8, t_vox), (c, 0, 0.8, t_vox), (h, 0, 0.7, t_harm)]
     s.instrument = (gtr, 52, t_gl)
     s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Verse")
+    s.section(12, 8, "Chorus")
+    s.section(20, 4, "Solo")
+    s.section(24, 8, "Chorus")
     return s
 
 
@@ -804,6 +827,11 @@ def trap():
               (riser, 0, 0.8, t_fx), (impact, 0, 0.9, t_fx), (tag, 0, 0.8, t_vox)]
     s.instrument = (bell, 72, t_bell)
     s.loop = (1, s.frame(s.bar(4)), s.frame(s.bar(12)))
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Drop")
+    s.section(12, 4, "Break")
+    s.section(16, 12, "Drop")
+    s.section(28, 2, "Outro")
     return s
 
 

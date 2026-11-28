@@ -81,6 +81,11 @@ vnote 58 2.5 1.5
 vnote 65 5 0.5
 vnote 68 5.5 1.5
 end
+section 0 4 Intro
+section 4 8 Drop
+section 12 4 Break
+section 16 12 Drop
+section 28 2 Outro
 clip 8 4 0 0 329143 0 0 0 31 72
 clip 9 5 0 0 82286 0 0 0 1 60
 clip 9 5 82286 0 82285 0 0 0 2 60

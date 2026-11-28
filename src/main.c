@@ -462,7 +462,8 @@ static SDL_Keymod mods;
 static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h; }
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
-       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER, D_DRUM };
+       D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER, D_DRUM,
+       D_SEC, D_SECNEW, D_SECEND, D_BEND, D_BENDX };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
 /* Pop-out windows: the clip editor and the mixing console. Each has its own renderer and mouse;
  * a drag belongs to the window it started in (drag_pop, -1 = the main window). */
@@ -512,7 +513,7 @@ static struct {
 
 /* ---------------------------------------------------------------- layout and view */
 
-static struct { int top, left, head, ruler, status, lane_h, auto_h, tl_x, tl_w, lanes_y, pane_x, pane_w; } L;
+static struct { int top, left, head, ruler, arr, status, lane_h, auto_h, tl_x, tl_w, lanes_y, pane_x, pane_w; } L;
 
 /* automation lanes (one shown under a track when its A is on) and the piano roll */
 static int auto_open[MAX_TRACKS], auto_param[MAX_TRACKS];
@@ -538,6 +539,7 @@ static SDL_Rect dr_cell[DRUM_ROWS][DRUM_STEPS], dr_head[DRUM_ROWS], dr_add;
 static DrumPat *drum_from_style(int track, int g);
 static int drum_place(DrumPat *d, int bars);
 static void drum_delete(int id);
+static int sec_renaming = -1;           /* the arranger section whose name is being typed */
 static DrumPat *drum_new(int track, const char *name);
 static int hit_sample(const BeatSpec *b, int lane, const char *name);
 static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
@@ -737,7 +739,8 @@ static void layout(void)
     L.left = L.pane_x + L.pane_w;
     L.tl_x = L.left + L.head;
     L.tl_w = W - L.tl_x;
-    L.lanes_y = L.top + L.ruler;
+    L.arr = 22;                         /* the arranger strip: the song's sections */
+    L.lanes_y = L.top + L.ruler + L.arr;
     int avail = H - L.lanes_y - L.status, nopen = 0;
     for (int t = 0; t < P.ntracks; t++) nopen += auto_open[t] != 0;
     L.auto_h = nopen ? avail / (P.ntracks + nopen) : 0;   /* a lane gets a row's share, within reason */
@@ -2053,6 +2056,8 @@ typedef struct {
     int nautos;
     DrumPat *drums;
     int ndrums;
+    Section sections[MAX_SECTIONS];
+    int nsections;
     Track tracks[MAX_TRACKS];
     int ntracks;
     double bpm, a4;
@@ -2109,6 +2114,8 @@ static void state_capture(State *s)
     free(s->drums);
     s->drums = dup_mem(P.drums, (size_t)P.ndrums * sizeof(DrumPat));
     s->ndrums = s->drums ? P.ndrums : 0;
+    memcpy(s->sections, P.sections, sizeof s->sections);
+    s->nsections = P.nsections;
     memcpy(s->tracks, P.tracks, sizeof s->tracks);
     s->ntracks = P.ntracks;
     s->bpm = P.bpm;
@@ -2142,6 +2149,7 @@ static int state_same(const State *s)
            s->nnotes == P.nnotes && !memcmp(s->notes, P.notes, (size_t)P.nnotes * sizeof(Note)) &&
            s->nautos == P.nautos && !memcmp(s->autos, P.autos, (size_t)P.nautos * sizeof(AutoPoint)) &&
            s->ndrums == P.ndrums && !memcmp(s->drums, P.drums, (size_t)P.ndrums * sizeof(DrumPat)) &&
+           s->nsections == P.nsections && !memcmp(s->sections, P.sections, (size_t)P.nsections * sizeof(Section)) &&
            s->ntracks == P.ntracks && !memcmp(s->tracks, P.tracks, sizeof s->tracks) && s->bpm == P.bpm && s->ts_num == P.ts_num && s->ts_den == P.ts_den && s->nchanges == P.nchanges &&
            !memcmp(s->changes, P.changes, (size_t)P.nchanges * sizeof(MeterChange)) &&
            s->a4 == P.a4 && s->loop_start == P.loop_start && s->loop_end == P.loop_end &&
@@ -2161,6 +2169,8 @@ static void state_restore(const State *s)
     P.nautos = s->nautos;
     memcpy(P.drums, s->drums, (size_t)s->ndrums * sizeof(DrumPat));
     P.ndrums = s->ndrums;
+    memcpy(P.sections, s->sections, sizeof P.sections);
+    P.nsections = s->nsections;
     memcpy(P.tracks, s->tracks, sizeof s->tracks);
     P.ntracks = s->ntracks;
     P.bpm = s->bpm;
@@ -2196,6 +2206,8 @@ static void describe(const State *s, char *buf, size_t n)
         snprintf(buf, n, "%s", P.nnotes > s->nnotes ? "add notes" : P.nnotes < s->nnotes ? "delete notes" : "note edit");
     else if (s->nautos != P.nautos || memcmp(s->autos, P.autos, (size_t)P.nautos * sizeof(AutoPoint)))
         snprintf(buf, n, "automation");
+    else if (s->nsections != P.nsections || memcmp(s->sections, P.sections, (size_t)P.nsections * sizeof(Section)))
+        snprintf(buf, n, "%s", P.nsections > s->nsections ? "add section" : P.nsections < s->nsections ? "remove section" : "sections");
     else if (s->ndrums != P.ndrums || memcmp(s->drums, P.drums, (size_t)P.ndrums * sizeof(DrumPat)))
         snprintf(buf, n, "%s", P.ndrums > s->ndrums ? "new drum pattern" : P.ndrums < s->ndrums ? "delete drum pattern" : "drum steps");
     else if (P.nclips > s->nclips) snprintf(buf, n, "add %d clip%s", P.nclips - s->nclips, P.nclips - s->nclips == 1 ? "" : "s");
@@ -3438,7 +3450,7 @@ static void rec_drain(void)
 
 static int pad_sel, pads_scroll, pads_content_h;
 static SDL_Rect pad_rects[NPADS], inst_drop;
-enum { CM_LIB, CM_PAD, CM_INST };       /* what a right-click menu is for */
+enum { CM_LIB, CM_PAD, CM_INST, CM_SEC };   /* what a right-click menu is for */
 static void cm_open(int kind, int idx);
 
 static const char *MODE_NAMES[PAD_MODES] = {"One-shot", "Hold", "Loop"};
@@ -3953,6 +3965,214 @@ static void change_remove(int k)
     P.nchanges--;
     UNLOCK();
     status("Removed the change at bar %d", bar + 1);
+}
+
+/* ---- rearranging the song by whole bars (the arranger's sections)
+ *
+ * Moving, copying or taking out bars [a, b) moves everything on the timeline with them: clips
+ * (split where they cross a boundary), automation, tempo and time signature changes, and sections.
+ * Each thing keeps its place inside its bar, so a section keeps its own tempo wherever it goes. */
+
+enum { SE_MOVE, SE_COPY, SE_CUT };          /* move [a,b) to before bar t; copy it in at b; take it out */
+typedef struct { int mode, a, b, t; } SongEdit;
+
+static double se_map(const SongEdit *e, double x, int *gone)
+{
+    double len = e->b - e->a;
+    *gone = 0;
+    switch (e->mode) {
+    case SE_MOVE:
+        if (e->t <= e->a) {
+            if (x >= e->a && x < e->b) return x - (e->a - e->t);
+            if (x >= e->t && x < e->a) return x + len;
+        } else {
+            if (x >= e->a && x < e->b) return x + (e->t - e->b);
+            if (x >= e->b && x < e->t) return x - len;
+        }
+        return x;
+    case SE_COPY: return x >= e->b ? x + len : x;
+    default:
+        if (x >= e->a && x < e->b) *gone = 1;
+        return x >= e->b ? x - len : x;
+    }
+}
+
+static void se_split_at(long f)            /* clips crossing frame f become two */
+{
+    int n = P.nclips;
+    for (int c = 0; c < n && P.nclips < MAX_CLIPS; c++) {
+        Clip *cl = &P.clips[c];
+        if (cl->start >= f || cl->start + cl->length <= f) continue;
+        long cut = f - cl->start;
+        Clip r = *cl;
+        r.start = f;
+        r.offset = cl->offset + cut;
+        r.length = cl->length - cut;
+        r.fade_in = 0;
+        if (r.fade_out > r.length) r.fade_out = 0;
+        cl->length = cut;
+        cl->fade_out = 0;
+        if (cl->fade_in > cl->length) cl->fade_in = 0;
+        P.clips[P.nclips] = r;
+        csel[P.nclips] = 0;
+        P.nclips++;
+    }
+}
+
+/* where a frame is, as a whole bar and how far into it (0..1) */
+static void se_where(long f, int *bar, double *into)
+{
+    double x = meter_bars(&P, f);
+    int b = (int)floor(x + 1e-9);
+    long b0 = meter_bar_frame(&P, b), b1 = meter_bar_frame(&P, b + 1);
+    *bar = b;
+    *into = b1 > b0 ? (double)(f - b0) / (b1 - b0) : 0;
+}
+
+static long se_frame(int bar, double into)
+{
+    long b0 = meter_bar_frame(&P, bar), b1 = meter_bar_frame(&P, bar + 1);
+    return b0 + (long)llround(into * (b1 - b0));
+}
+
+static void song_edit(SongEdit e)
+{
+    if (e.b <= e.a) return;
+    int len = e.b - e.a;
+    LOCK();
+    /* 1. the tempo and time signature written out where the edit's edges are, so each part keeps its own */
+    MeterChange m[MAX_METER + 8];
+    int nm = 0;
+    m[nm++] = (MeterChange){0, P.bpm, P.ts_num, P.ts_den};
+    for (int i = 0; i < P.nchanges; i++) m[nm++] = P.changes[i];
+    int edges[3] = {e.a, e.b, e.mode == SE_MOVE ? e.t : 0};
+    for (int k = 0; k < 3; k++) {
+        int bar = edges[k], have = 0;
+        if (bar <= 0) continue;
+        for (int i = 0; i < nm; i++) have |= m[i].bar == bar;
+        if (have || nm >= MAX_METER + 8) continue;
+        double bpm;
+        int num, den;
+        meter_at(&P, meter_bar_frame(&P, bar), &bpm, &num, &den, NULL, NULL, NULL);
+        m[nm++] = (MeterChange){bar, bpm, num, den};
+    }
+    /* 2. clips split at the edges, then where everything is, in bars */
+    se_split_at(meter_bar_frame(&P, e.a));
+    se_split_at(meter_bar_frame(&P, e.b));
+    if (e.mode == SE_MOVE) se_split_at(meter_bar_frame(&P, e.t));
+    int *cb = malloc(sizeof(int) * (size_t)(P.nclips + 1)), *ab = malloc(sizeof(int) * (size_t)(P.nautos + 1));
+    double *ci = malloc(sizeof(double) * (size_t)(P.nclips + 1)), *ai = malloc(sizeof(double) * (size_t)(P.nautos + 1));
+    if (!cb || !ab || !ci || !ai) {
+        UNLOCK();
+        free(cb), free(ab), free(ci), free(ai);
+        status("Out of memory");
+        return;
+    }
+    for (int c = 0; c < P.nclips; c++) se_where(P.clips[c].start, &cb[c], &ci[c]);
+    for (int i = 0; i < P.nautos; i++) se_where(P.autos[i].at, &ab[i], &ai[i]);
+    /* 3. the tempo map, remapped */
+    MeterChange nmap[2 * (MAX_METER + 8)];
+    int nn = 0, gone;
+    for (int i = 0; i < nm; i++) {
+        double nb = se_map(&e, m[i].bar, &gone);
+        if (!gone) nmap[nn++] = (MeterChange){(int)nb, m[i].bpm, m[i].num, m[i].den};
+        if (e.mode == SE_COPY && m[i].bar >= e.a && m[i].bar < e.b) nmap[nn++] = (MeterChange){m[i].bar + len, m[i].bpm, m[i].num, m[i].den};
+    }
+    for (int i = 1; i < nn; i++)                 /* in bar order */
+        for (int j = i; j > 0 && nmap[j - 1].bar > nmap[j].bar; j--) {
+            MeterChange t = nmap[j];
+            nmap[j] = nmap[j - 1];
+            nmap[j - 1] = t;
+        }
+    if (nn && nmap[0].bar == 0) {
+        P.bpm = nmap[0].bpm;
+        P.ts_num = nmap[0].num;
+        P.ts_den = nmap[0].den;
+    }
+    P.nchanges = 0;
+    double pb = P.bpm;
+    int pn = P.ts_num, pd = P.ts_den;
+    for (int i = 0; i < nn; i++) {               /* only real changes, once a bar */
+        if (nmap[i].bar <= 0 || (i + 1 < nn && nmap[i + 1].bar == nmap[i].bar)) continue;
+        if (nmap[i].bpm == pb && nmap[i].num == pn && nmap[i].den == pd) continue;
+        if (P.nchanges >= MAX_METER) break;
+        P.changes[P.nchanges++] = nmap[i];
+        pb = nmap[i].bpm;
+        pn = nmap[i].num;
+        pd = nmap[i].den;
+    }
+    /* 4. clips and automation to their new places */
+    int n0 = P.nclips, w = 0;
+    for (int c = 0; c < n0; c++) {
+        Clip cl = P.clips[c];
+        if (e.mode == SE_COPY && cb[c] >= e.a && cb[c] < e.b && P.nclips < MAX_CLIPS) {   /* the copy */
+            Clip cp = cl;
+            cp.start = se_frame(cb[c] + len, ci[c]);
+            P.clips[P.nclips] = cp;
+            csel[P.nclips] = 0;
+            cb[P.nclips] = -1;
+            P.nclips++;
+        }
+        double nb = se_map(&e, cb[c], &gone);
+        if (gone) continue;
+        cl.start = se_frame((int)nb, ci[c]);
+        P.clips[w] = cl;
+        csel[w] = 0;
+        w++;
+    }
+    for (int c = n0; c < P.nclips; c++) {       /* the copies, after what was kept */
+        P.clips[w] = P.clips[c];
+        csel[w] = 0;
+        w++;
+    }
+    P.nclips = w;
+    int na0 = P.nautos, wa = 0;
+    AutoPoint extra[MAX_AUTO];
+    int nx = 0;
+    for (int i = 0; i < na0; i++) {
+        AutoPoint ap = P.autos[i];
+        if (e.mode == SE_COPY && ab[i] >= e.a && ab[i] < e.b && nx < MAX_AUTO) {
+            extra[nx] = ap;
+            extra[nx++].at = se_frame(ab[i] + len, ai[i]);
+        }
+        double nb = se_map(&e, ab[i], &gone);
+        if (gone) continue;
+        ap.at = se_frame((int)nb, ai[i]);
+        P.autos[wa++] = ap;
+    }
+    for (int i = 0; i < nx && wa < MAX_AUTO; i++) P.autos[wa++] = extra[i];
+    P.nautos = wa;
+    auto_sort(&P);
+    /* 5. sections */
+    int ws = 0, ns0 = P.nsections;
+    Section copy = {0};
+    int has_copy = 0;
+    for (int i = 0; i < ns0; i++) {
+        Section sc = P.sections[i];
+        if (e.mode == SE_COPY && sc.bar == e.a && sc.bars == len) {
+            copy = sc;
+            copy.bar = e.b;
+            has_copy = 1;
+        }
+        double nb = se_map(&e, sc.bar, &gone);
+        if (gone) continue;
+        sc.bar = (int)nb;
+        P.sections[ws++] = sc;
+    }
+    P.nsections = ws;
+    if (has_copy && P.nsections < MAX_SECTIONS) P.sections[P.nsections++] = copy;
+    for (int i = 1; i < P.nsections; i++)
+        for (int j = i; j > 0 && P.sections[j - 1].bar > P.sections[j].bar; j--) {
+            Section t = P.sections[j];
+            P.sections[j] = P.sections[j - 1];
+            P.sections[j - 1] = t;
+        }
+    UNLOCK();
+    selected = -1;
+    free(cb);
+    free(ab);
+    free(ci);
+    free(ai);
 }
 
 /* The metronome's options and the tempo, under the arrow next to Click. */
@@ -5254,7 +5474,8 @@ static struct {
     int has, sample, from_pad;
     Pad pad;                            /* a pad's settings, when copied from a pad */
 } sclip;
-enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR, CMA_PIN, CMA_SAVE, CMA_EDIT };
+enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR, CMA_PIN, CMA_SAVE, CMA_EDIT,
+       CMA_SREN, CMA_SLOOP, CMA_SDUP, CMA_SDEL, CMA_SCUT };
 static struct {
     int open, kind, idx, n;
     int act[6], enabled[6];
@@ -5600,6 +5821,69 @@ static void cm_open(int kind, int idx)
     if (cm.box.y + h > H - 4) cm.box.y = H - 4 - h;
 }
 
+static void cm_open_section(int i)
+{
+    memset(&cm, 0, sizeof cm);
+    cm.open = 1;
+    cm.kind = CM_SEC;
+    cm.idx = i;
+    static const char *const L5[5] = {"Rename", "Loop it", "Copy it in after itself", "Remove the marker",
+                                      "Remove it and its bars"};
+    static const int A5[5] = {CMA_SREN, CMA_SLOOP, CMA_SDUP, CMA_SDEL, CMA_SCUT};
+    int w = 0;
+    for (int k = 0; k < 5; k++) {
+        snprintf(cm.label[k], sizeof cm.label[k], "%s", L5[k]);
+        cm.act[k] = A5[k];
+        cm.enabled[k] = 1;
+        w = text_w(L5[k]) > w ? text_w(L5[k]) : w;
+    }
+    cm.n = 5;
+    w += 28;
+    int h = cm.n * (font_h + 12) + 8;
+    cm.box = (SDL_Rect){mx + 2, my + 2, w, h};
+    if (cm.box.x + w > W - 4) cm.box.x = W - 4 - w;
+    if (cm.box.y + h > H - 4) cm.box.y = H - 4 - h;
+}
+
+static void sec_action(int act, int i)
+{
+    if (i < 0 || i >= P.nsections) return;
+    Section sc = P.sections[i];
+    switch (act) {
+    case CMA_SREN:
+        tf_end(1);
+        tf.buf = P.sections[i].name;
+        tf.cap = sizeof P.sections[i].name;
+        tf.path = 0;
+        tf_drawn = 1;
+        snprintf(tf.orig, sizeof tf.orig, "%s", tf.buf);
+        SDL_StartTextInput();
+        sec_renaming = i;
+        break;
+    case CMA_SLOOP:
+        LOCK();
+        P.loop_start = meter_bar_frame(&P, sc.bar);
+        P.loop_end = meter_bar_frame(&P, sc.bar + sc.bars);
+        P.loop = 1;
+        UNLOCK();
+        status("Looping %s", sc.name);
+        break;
+    case CMA_SDUP:
+        song_edit((SongEdit){SE_COPY, sc.bar, sc.bar + sc.bars, 0});
+        status("A copy of %s, with everything in it, from bar %d; what came after moved along", sc.name, sc.bar + sc.bars + 1);
+        break;
+    case CMA_SDEL:
+        memmove(&P.sections[i], &P.sections[i + 1], (size_t)(P.nsections - i - 1) * sizeof(Section));
+        P.nsections--;
+        status("Removed the %s marker (the music is still there)", sc.name);
+        break;
+    case CMA_SCUT:
+        song_edit((SongEdit){SE_CUT, sc.bar, sc.bar + sc.bars, 0});
+        status("Took out %s and its %d bars; what came after moved up. Ctrl+Z brings it back", sc.name, sc.bars);
+        break;
+    }
+}
+
 /* Drawn last, over everything; takes the next click. */
 static void cm_draw(void)
 {
@@ -5622,6 +5906,7 @@ static void cm_draw(void)
         case CMA_REMOVE: remove_sound(cm.idx); break;
         case CMA_PIN: sound_pin(cm.idx, !P.samples[cm.idx].pinned); break;
         case CMA_EDIT: editor_open_sound(cm.idx); break;
+        case CMA_SREN: case CMA_SLOOP: case CMA_SDUP: case CMA_SDEL: case CMA_SCUT: sec_action(cm.act[chosen], cm.idx); break;
         case CMA_SAVE:
             if (P.samples[cm.idx].saved) sound_unsave(cm.idx);
             else if (sound_save(cm.idx) == 0)
@@ -6159,7 +6444,7 @@ static int sv_init, sv_espeak = -1;
 static float *sv_heard;
 static char sv_err[200];
 static SDL_Rect sv_words_r, sv_tune_r[TUNES], sv_sing_r, sv_lib_r, sv_place_r, sv_voice_r[2], sv_style_r[VS_STYLES],
-    sv_singer_r[8];
+    sv_singer_r[8], sv_bend_r[4];
 
 static void sv_defaults(void)
 {
@@ -6296,6 +6581,212 @@ static void sv_sing(void)
     } else {
         status("Couldn't sing that: %s", sv_err);
     }
+}
+
+
+/* ---- the Singer's pitch curve: bends drawn over the line's notes (slides, scoops, fall-offs) */
+
+static SDL_Rect sv_curve_r;
+static double sv_last_beat = -1;
+
+static void sv_bend_erase(double a, double b)   /* points with beats in [a, b] go */
+{
+    if (a > b) {
+        double t = a;
+        a = b;
+        b = t;
+    }
+    int w = 0;
+    for (int i = 0; i < SV.nbend; i++)
+        if (SV.bend_beat[i] < a || SV.bend_beat[i] > b) {
+            SV.bend_beat[w] = SV.bend_beat[i];
+            SV.bend_semis[w++] = SV.bend_semis[i];
+        }
+    SV.nbend = w;
+}
+
+static void sv_bend_put(double beat, double semis)
+{
+    if (SV.nbend >= VOCAL_BENDS) return;
+    int k = SV.nbend;
+    while (k > 0 && SV.bend_beat[k - 1] > beat) k--;
+    memmove(&SV.bend_beat[k + 1], &SV.bend_beat[k], (size_t)(SV.nbend - k) * sizeof(float));
+    memmove(&SV.bend_semis[k + 1], &SV.bend_semis[k], (size_t)(SV.nbend - k) * sizeof(float));
+    SV.bend_beat[k] = (float)beat;
+    SV.bend_semis[k] = (float)(semis < -24 ? -24 : semis > 24 ? 24 : semis);
+    SV.nbend++;
+}
+
+/* the note sounding at `beat` (or the nearest one), as an index into SV.notes */
+static int sv_note_at(double beat, int n, int nearest)
+{
+    int best = -1;
+    double bd = 1e9;
+    for (int i = 0; i < n; i++) {
+        const VocalNote *nt = &SV.notes[i];
+        if (beat >= nt->start && beat < nt->start + nt->len) return i;
+        double d = beat < nt->start ? nt->start - beat : beat - (nt->start + nt->len);
+        if (d < bd) {
+            bd = d;
+            best = i;
+        }
+    }
+    return nearest ? best : -1;
+}
+
+enum { BEND_SCOOP, BEND_SLIDE, BEND_FALL };
+static void sv_bend_preset(int kind, int n)
+{
+    SV.nbend = 0;
+    for (int i = 0; i < n; i++) {
+        const VocalNote *nt = &SV.notes[i];
+        double s0 = nt->start, e0 = nt->start + nt->len;
+        const VocalNote *nx = i + 1 < n ? &SV.notes[i + 1] : NULL;
+        if (kind == BEND_SCOOP) {                /* up into each note from below */
+            double d = fmin(0.15, nt->len / 3);
+            sv_bend_put(s0 - 0.001, 0);
+            sv_bend_put(s0, -1.5);
+            sv_bend_put(s0 + d, 0);
+        } else if (kind == BEND_SLIDE && nx && nx->start - e0 < 0.3 && nx->note != nt->note) {
+            double d = fmin(0.25, nt->len / 2);   /* glide into the next note at the end of this one */
+            sv_bend_put(e0 - d, 0);
+            sv_bend_put(e0 - 0.001, nx->note - nt->note);
+            sv_bend_put(nx->start, 0);
+        } else if (kind == BEND_FALL && (!nx || nx->start - e0 > 0.1)) {
+            double d = fmin(0.35, nt->len / 2);   /* the voice drops away at the end of a phrase */
+            sv_bend_put(e0 - d, 0);
+            sv_bend_put(e0 - 0.001, -4);
+            sv_bend_put(e0 + 0.001, 0);
+        }
+    }
+}
+
+static int sv_curve(int x, int y, int w)
+{
+    char syl[VOCAL_NOTES][40];
+    int nsyl = vocal_syllables(SV.words, syl, NULL, VOCAL_NOTES);
+    sv_make_notes();
+    int n = nsyl < SV.nnotes ? nsyl : SV.nnotes;
+    if (n <= 0) {
+        text(x, y, "Type some words first: their notes show here to bend.", DIM);
+        return y + font_h + 12;
+    }
+    double end = 0;
+    int lo = 127, hi = 0;
+    for (int i = 0; i < n; i++) {
+        end = fmax(end, SV.notes[i].start + SV.notes[i].len);
+        lo = SV.notes[i].note < lo ? SV.notes[i].note : lo;
+        hi = SV.notes[i].note > hi ? SV.notes[i].note : hi;
+    }
+    for (int i = 0; i < SV.nbend; i++) {        /* room for the bends too */
+        int nn = sv_note_at(SV.bend_beat[i], n, 1);
+        if (nn < 0) continue;
+        double p = SV.notes[nn].note + SV.bend_semis[i];
+        lo = p < lo ? (int)floor(p) : lo;
+        hi = p > hi ? (int)ceil(p) : hi;
+    }
+    lo -= 3;
+    hi += 3;
+    if (hi - lo < 12) {
+        int c = (hi + lo) / 2;
+        lo = c - 6;
+        hi = c + 6;
+    }
+    end += 0.25;
+    SDL_Rect r = {x, y, w, 150};
+    sv_curve_r = r;
+    fill(r, PANEL2);
+    SDL_Rect wr = {x, y + r.h, w, font_h + 6};   /* the words, under their notes */
+    fill(wr, tone(PANEL2, 0.85f));
+#define BX(b) (r.x + (int)((b) / end * r.w))
+#define PY(p) (r.y + (int)(((hi) - (p)) / (double)(hi - lo) * r.h))
+    for (int p = lo + 1; p < hi; p++)            /* semitones; C stronger */
+        line(r.x, PY(p), r.x + r.w - 1, PY(p), (p % 12) == 0 ? tone(PANEL2, 1.5f) : tone(PANEL2, 1.15f));
+    double rh = (double)r.h / (hi - lo);
+    for (int i = 0; i < n; i++) {                /* the notes, and their words */
+        const VocalNote *nt = &SV.notes[i];
+        SDL_Rect nr = {BX(nt->start), PY(nt->note + 0.5), BX(nt->start + nt->len) - BX(nt->start) - 1, (int)rh < 4 ? 4 : (int)rh};
+        fill(nr, tone(PANEL3, 1.3f));
+        SDL_Rect sr = {nr.x, wr.y, nr.w, wr.h};
+        if (sr.w > 8) text_clip(sr, sr.x + 2, wr.y + 3, syl[i], DIM);
+    }
+    int px0 = -1, py0 = -1;                      /* the pitch as it will be sung */
+    for (int px = 0; px < r.w; px++) {
+        double b = (double)px / r.w * end;
+        int nn = sv_note_at(b, n, 0);
+        if (nn < 0) {
+            px0 = -1;
+            continue;
+        }
+        double p = SV.notes[nn].note + vocal_bend_at(&SV, b);
+        int yy = PY(p);
+        yy = yy < r.y ? r.y : yy > r.y + r.h - 1 ? r.y + r.h - 1 : yy;
+        if (px0 >= 0) {
+            line(r.x + px0, py0, r.x + px, yy, ACCENT);
+            line(r.x + px0, py0 + 1, r.x + px, yy + 1, ACCENT);
+        }
+        px0 = px;
+        py0 = yy;
+    }
+    for (int i = 0; i < SV.nbend; i++) {         /* the points */
+        int nn = sv_note_at(SV.bend_beat[i], n, 0);   /* (between notes nothing is sung: not shown) */
+        if (nn < 0) continue;
+        int bx = BX(SV.bend_beat[i]), by = PY(SV.notes[nn].note + SV.bend_semis[i]);
+        if (bx >= r.x && bx < r.x + r.w && by >= r.y && by < r.y + r.h) fill((SDL_Rect){bx - 2, by - 2, 5, 5}, HEAD);
+    }
+    outline(r, LINE);
+    tip(r, "Draw over the notes to bend the pitch (Shift: whole semitones). Right-click rubs out a bend, "
+           "Ctrl+drag rubs out along the way");
+    /* drawing */
+    if (hit(r) && drag.kind == D_NONE && rpress) {
+        rpress = 0;
+        double b = (double)(mx - r.x) / r.w * end;
+        sv_bend_erase(b - end / 40, b + end / 40);
+    }
+    if (hit(r) && drag.kind == D_NONE && lpress) {
+        drag = (typeof(drag)){.kind = (mods & KMOD_CTRL) ? D_BENDX : D_BEND, .sx = mx, .sy = my};
+        sv_last_beat = -1;
+        lpress = 0;
+    }
+    if ((drag.kind == D_BEND || drag.kind == D_BENDX) && ldown) {
+        double b = (double)(mx - r.x) / r.w * end;
+        b = b < 0 ? 0 : b > end ? end : b;
+        double from = sv_last_beat < 0 ? b : sv_last_beat;
+        if (drag.kind == D_BENDX) {
+            sv_bend_erase(from - 0.02, b + 0.02);
+        } else {
+            int nn = sv_note_at(b, n, 1);
+            double p = hi - (double)(my - r.y) / r.h * (hi - lo), semis = p - SV.notes[nn].note;
+            semis = (mods & KMOD_SHIFT) ? round(semis) : round(semis * 20) / 20;
+            if (b > from) sv_bend_erase(from + 1e-6, b);     /* what the stroke passed over, not where it was */
+            else if (b < from) sv_bend_erase(b, from - 1e-6);
+            else sv_bend_erase(b, b);
+            sv_bend_put(b, semis);
+        }
+        sv_last_beat = b;
+    }
+#undef BX
+#undef PY
+    y += r.h + wr.h + 8;
+    static const char *const PRE[4] = {"Scoops", "Slides", "Fall-offs", "Flat"};
+    static const char *const PTIP[4] = {"Each note scooped up into from below",
+                                        "Glides from note to note where they join", "The voice drops away at the end of each phrase",
+                                        "No bends: every note straight"};
+    int bw = (w - 3 * 4) / 4;
+    for (int i = 0; i < 4; i++) {
+        SDL_Rect b = {x + i * (bw + 4), y, i == 3 ? w - 3 * (bw + 4) : bw, 26};
+        sv_bend_r[i] = b;
+        tip(b, "%s", PTIP[i]);
+        if (button(b, PRE[i], 0)) {
+            if (i == 3) SV.nbend = 0;
+            else sv_bend_preset(i, n);
+            status(i == 3 ? "Every note straight again" : "%s drawn in: press Sing it to hear them, or draw over them",
+                   PRE[i]);
+        }
+    }
+    y += 34;
+    text(x, y, "Draw on it to bend, right-click to rub out, then Sing it.", DIM);
+    return y + font_h + 12;
 }
 
 static int singer(int x, int y, int w)
@@ -6439,7 +6930,10 @@ static int singer(int x, int y, int w)
         y += 40;
     }
 
-    y = section(x, y, w, "4  HEAR IT AND KEEP IT");
+    y = section(x, y, w, "4  SHAPE THE PITCH");
+    y = sv_curve(x, y, w);
+
+    y = section(x, y, w, "5  HEAR IT AND KEEP IT");
     int ready = sv_espeak && n > 0 && (SV.tune != TUNE_CLIP || sv_clip() >= 0);
     int hearing = scratch && scratch == sv_heard && scratch_pos < scratch_len;
     int hw2 = (w - 8) / 2;
@@ -8112,8 +8606,19 @@ static void piano_roll(void)
     roll_hear(P.notes[i].note);
 }
 
+static void sec_add_here(void);
+
 static void track_headers(void)
 {
+    {                                           /* the arranger strip's own header */
+        SDL_Rect hr = {L.left, L.top + L.ruler, L.head, L.arr};
+        fill(hr, tone(PANEL, 0.92f));
+        line(L.left, hr.y + hr.h - 1, L.left + L.head, hr.y + hr.h - 1, LINE);
+        text(L.left + 12, hr.y + (hr.h - font_h) / 2, "SECTIONS", DIM);
+        SDL_Rect sa = {L.left + L.head - 32, hr.y + 2, 22, hr.h - 4};
+        tip(sa, "A new section at the playhead's bar (Intro, Verse, Chorus...). Or drag along the strip");
+        if (button(sa, "+", 0)) sec_add_here();
+    }
     fill((SDL_Rect){L.left, L.top, L.head, L.ruler}, PANEL);
     text(L.left + 12, L.top + (L.ruler - font_h) / 2, "TRACKS", DIM);
     SDL_Rect add = {L.left + L.head - 32, L.top + 4, 22, L.ruler - 8};
@@ -8248,6 +8753,253 @@ static void time_scale(SDL_Rect r)
     }
 }
 
+
+/* ---- the arranger strip: the song's sections (intro, verse, chorus...) above the tracks.
+ * Click one to go there; drag it to move it (and everything in it); drag its right end to change
+ * its length; drag along the empty strip to make one; double-click to rename; right-click for more. */
+
+static SDL_Rect sec_rect_[MAX_SECTIONS];
+
+static Col sec_col(const char *name)            /* the same name, the same colour: every Chorus matches */
+{
+    unsigned h = 5381;
+    for (const char *q = name; *q; q++)
+        if (isalpha((unsigned char)*q)) h = h * 33 + (unsigned)tolower((unsigned char)*q);
+    return TRACK_COL[h % 12];
+}
+
+static int sec_at_bar(int bar)
+{
+    for (int i = 0; i < P.nsections; i++)
+        if (bar >= P.sections[i].bar && bar < P.sections[i].bar + P.sections[i].bars) return i;
+    return -1;
+}
+
+static int sec_room(int bar)                    /* bars free from `bar` until the next section */
+{
+    int room = 100000;
+    for (int i = 0; i < P.nsections; i++)
+        if (P.sections[i].bar > bar && P.sections[i].bar - bar < room) room = P.sections[i].bar - bar;
+    return room;
+}
+
+static void sec_sort(void)
+{
+    for (int i = 1; i < P.nsections; i++)
+        for (int j = i; j > 0 && P.sections[j - 1].bar > P.sections[j].bar; j--) {
+            Section t = P.sections[j];
+            P.sections[j] = P.sections[j - 1];
+            P.sections[j - 1] = t;
+        }
+}
+
+static int sec_add(int bar, int bars, const char *name)
+{
+    if (bar < 0 || sec_at_bar(bar) >= 0) return -1;
+    if (P.nsections >= MAX_SECTIONS) {
+        status("A song can have %d sections", MAX_SECTIONS);
+        return -1;
+    }
+    int room = sec_room(bar);
+    if (bars > room) bars = room;
+    if (bars < 1) return -1;
+    if (!name) {                                /* the usual order of a song */
+        static const char *const ORDER[] = {"Intro", "Verse", "Chorus", "Verse", "Chorus", "Bridge", "Chorus", "Outro"};
+        int before = 0;
+        for (int i = 0; i < P.nsections; i++) before += P.sections[i].bar < bar;
+        name = ORDER[before < 8 ? before : 7];
+    }
+    Section sc = {bar, bars, ""};
+    snprintf(sc.name, sizeof sc.name, "%s", name);
+    P.sections[P.nsections++] = sc;
+    sec_sort();
+    for (int i = 0; i < P.nsections; i++)
+        if (P.sections[i].bar == bar) return i;
+    return -1;
+}
+
+static void sec_add_here(void)
+{
+    int bar = (int)floor(meter_bars(&P, P.playhead) + 1e-9);
+    if (sec_at_bar(bar) >= 0) {                 /* inside one: the bar after the last */
+        int last = 0;
+        for (int i = 0; i < P.nsections; i++)
+            if (P.sections[i].bar + P.sections[i].bars > last) last = P.sections[i].bar + P.sections[i].bars;
+        bar = last;
+    }
+    int i = sec_add(bar, 4, NULL);
+    if (i >= 0) status("\"%s\" from bar %d, %d bars. Double-click to rename it, drag it to move it", P.sections[i].name,
+                       P.sections[i].bar + 1, P.sections[i].bars);
+}
+
+static void sec_jump(int dir)                   /* to the next (1) or previous (-1) section's start */
+{
+    if (!P.nsections) {
+        status("No sections yet: + beside SECTIONS makes one");
+        return;
+    }
+    long now = P.playhead;
+    int pick = -1;
+    for (int i = 0; i < P.nsections; i++) {
+        long f = meter_bar_frame(&P, P.sections[i].bar);
+        if (dir > 0 && f > now + 16 && pick < 0) pick = i;
+        if (dir < 0 && f < now - SR / 4) pick = i;   /* a moment in: back to this one's start first */
+    }
+    if (pick < 0) pick = dir > 0 ? P.nsections - 1 : 0;
+    playhead_to(meter_bar_frame(&P, P.sections[pick].bar));
+    status("%s (bar %d)", P.sections[pick].name, P.sections[pick].bar + 1);
+}
+
+static int sec_mouse_bar(int round_it)
+{
+    double b = meter_bars(&P, (long)(x_to_frame_raw(mx) > 0 ? x_to_frame_raw(mx) : 0));
+    int bar = round_it ? (int)floor(b + 0.5) : (int)floor(b);
+    return bar < 0 ? 0 : bar;
+}
+
+/* the boundary a dragged section would go in front of: a section's start or the end of the last */
+static int sec_target(int moving)
+{
+    const Section *m = &P.sections[moving];
+    int best = -1;
+    double bestd = 1e18;
+    double x = mx - (drag.sx - frame_to_x(meter_bar_frame(&P, m->bar)));   /* where its start would be */
+    for (int i = 0; i <= P.nsections; i++) {
+        int b = i < P.nsections ? P.sections[i].bar
+                                : (P.nsections ? P.sections[P.nsections - 1].bar + P.sections[P.nsections - 1].bars : 0);
+        if (b == m->bar || b == m->bar + m->bars) continue;   /* where it is already */
+        double d = fabs(frame_to_x(meter_bar_frame(&P, b)) - x);
+        if (d < bestd) {
+            bestd = d;
+            best = b;
+        }
+    }
+    return best;
+}
+
+static void arranger_strip(void)
+{
+    SDL_Rect strip = {L.tl_x, L.top + L.ruler, L.tl_w, L.arr};
+    fill(strip, tone(PANEL, 0.92f));
+    line(L.tl_x, strip.y + strip.h - 1, W, strip.y + strip.h - 1, LINE);
+    int over = -1, edge = -1;
+    long now = P.playhead;
+    for (int i = 0; i < P.nsections; i++) {
+        const Section *sc = &P.sections[i];
+        int x0 = (int)frame_to_x(meter_bar_frame(&P, sc->bar)), x1 = (int)frame_to_x(meter_bar_frame(&P, sc->bar + sc->bars));
+        SDL_Rect r = {x0, strip.y + 2, x1 - x0 - 1, strip.h - 4};
+        sec_rect_[i] = r;
+        if (r.x + r.w < L.tl_x || r.x > W) continue;
+        Col c = sec_col(sc->name);
+        int here = now >= meter_bar_frame(&P, sc->bar) && now < meter_bar_frame(&P, sc->bar + sc->bars);
+        int dragged = drag.kind == D_SEC && drag.clip == i && abs(mx - drag.sx) > 4;
+        fill(r, dragged ? alpha(c, 90) : wash(c, here ? 0.85f : 0.6f));
+        if (here) outline(r, HEAD);
+        if (sec_renaming == i && tf.buf == P.sections[i].name) {
+            SDL_Rect tr = {r.x, r.y - 2, r.w < 150 ? 150 : r.w, r.h + 4};
+            textfield(tr, P.sections[i].name, sizeof P.sections[i].name, 0, "name");
+        } else {
+            SDL_Rect clipr = {r.x > L.tl_x ? r.x : L.tl_x, r.y, r.x + r.w - (r.x > L.tl_x ? r.x : L.tl_x) - 2, r.h};
+            if (clipr.w > 4) text_clip(clipr, (r.x > L.tl_x ? r.x : L.tl_x) + 5, r.y + (r.h - font_h) / 2, sc->name, DARK);
+        }
+        if (hit(r) && drag.kind == D_NONE) {
+            over = i;
+            if (mx >= r.x + r.w - 5) edge = i;
+            tip(r, "%s: bars %d-%d. Click to go there, drag to move it with everything in it, drag its right end to "
+                   "resize, double-click to rename, right-click for more", sc->name, sc->bar + 1, sc->bar + sc->bars);
+        }
+    }
+    if (sec_renaming >= 0 && (sec_renaming >= P.nsections || tf.buf != P.sections[sec_renaming].name)) {
+        if (sec_renaming < P.nsections && !P.sections[sec_renaming].name[0])
+            snprintf(P.sections[sec_renaming].name, sizeof P.sections[sec_renaming].name, "Section");
+        sec_renaming = -1;
+    }
+    if (!P.nsections && drag.kind != D_SECNEW)
+        text_clip(strip, L.tl_x + 8, strip.y + (strip.h - font_h) / 2,
+                  "Drag here to mark a section (intro, verse, chorus), or press + beside SECTIONS", tone(DIM, 0.8f));
+    if (hit(strip) && drag.kind == D_NONE && over < 0)
+        tip(strip, "Drag along here to mark a section of the song");
+    if (hit(strip) && drag.kind == D_NONE) SDL_SetCursor(edge >= 0 ? cur_resize : cur_arrow);
+
+    /* the mouse */
+    if (hit(strip) && drag.kind == D_NONE && lpress) {
+        lpress = 0;
+        if (over >= 0 && ldouble) {              /* rename */
+            tf_end(1);
+            tf.buf = P.sections[over].name;
+            tf.cap = sizeof P.sections[over].name;
+            tf.path = 0;
+            tf.r = sec_rect_[over];
+            tf_drawn = 1;
+            snprintf(tf.orig, sizeof tf.orig, "%s", tf.buf);
+            SDL_StartTextInput();
+            sec_renaming = over;
+        } else if (edge >= 0) {
+            drag = (typeof(drag)){.kind = D_SECEND, .clip = edge, .sx = mx, .sy = my};
+        } else if (over >= 0) {
+            drag = (typeof(drag)){.kind = D_SEC, .clip = over, .sx = mx, .sy = my, .b = -1};
+        } else {
+            drag = (typeof(drag)){.kind = D_SECNEW, .a = sec_mouse_bar(0), .sx = mx, .sy = my};
+        }
+    }
+    if (hit(strip) && drag.kind == D_NONE && rpress && over >= 0) {
+        rpress = 0;
+        cm_open_section(over);
+    }
+    /* drags in progress */
+    if (drag.kind == D_SECNEW) {
+        int a = (int)drag.a, b = sec_mouse_bar(1);
+        if (b <= a) b = a + 1;
+        int room = sec_room(a);
+        if (b - a > room) b = a + room;
+        int x0 = (int)frame_to_x(meter_bar_frame(&P, a)), x1 = (int)frame_to_x(meter_bar_frame(&P, b));
+        SDL_Rect g = {x0, strip.y + 2, x1 - x0, strip.h - 4};
+        fill(g, alpha(ACCENT, 110));
+        outline(g, ACCENT);
+    } else if (drag.kind == D_SECEND && drag.clip < P.nsections) {
+        Section *sc = &P.sections[drag.clip];
+        int b = sec_mouse_bar(1), room = sec_room(sc->bar);
+        int nb = b - sc->bar < 1 ? 1 : b - sc->bar > room ? room : b - sc->bar;
+        sc->bars = nb;
+    } else if (drag.kind == D_SEC && drag.clip < P.nsections && abs(mx - drag.sx) > 4) {
+        const Section *sc = &P.sections[drag.clip];
+        int t = sec_target(drag.clip);
+        drag.b = t;
+        int w = sec_rect_[drag.clip].w;
+        SDL_Rect g = {mx - (drag.sx - sec_rect_[drag.clip].x), strip.y + 2, w, strip.h - 4};
+        fill(g, alpha(sec_col(sc->name), 200));
+        outline(g, TEXT);
+        text_clip(g, g.x + 5, g.y + (g.h - font_h) / 2, sc->name, DARK);
+        if (t >= 0) {
+            int tx = (int)frame_to_x(meter_bar_frame(&P, t));
+            fill((SDL_Rect){tx - 1, strip.y, 3, L.arr + lanes_h()}, HEAD);
+        }
+        SDL_SetCursor(cur_hand);
+    }
+}
+
+static void arranger_release(void)
+{
+    if (drag.kind == D_SECNEW) {
+        int a = (int)drag.a, b = sec_mouse_bar(1), click = abs(mx - drag.sx) < 4;
+        int i = sec_add(a, click ? 4 : (b > a ? b - a : 1), NULL);
+        if (i >= 0) status("\"%s\" from bar %d, %d bar%s. Double-click to rename it", P.sections[i].name, P.sections[i].bar + 1,
+                           P.sections[i].bars, P.sections[i].bars == 1 ? "" : "s");
+    } else if (drag.kind == D_SECEND && drag.clip < P.nsections) {
+        status("%s: %d bars", P.sections[drag.clip].name, P.sections[drag.clip].bars);
+    } else if (drag.kind == D_SEC && drag.clip < P.nsections) {
+        Section sc = P.sections[drag.clip];
+        if (abs(mx - drag.sx) < 4) {             /* a click: go there */
+            playhead_to(meter_bar_frame(&P, sc.bar));
+            status("%s (bar %d). Ctrl+PageUp and Ctrl+PageDown go to the previous and next section", sc.name, sc.bar + 1);
+        } else if (drag.b >= 0) {
+            song_edit((SongEdit){SE_MOVE, sc.bar, sc.bar + sc.bars, (int)drag.b});
+            int at = (int)drag.b <= sc.bar ? (int)drag.b : (int)drag.b - sc.bars;
+            status("Moved %s, with everything in it, to bar %d. Ctrl+Z puts it back", sc.name, at + 1);
+        }
+    }
+}
+
 static void timeline(void)
 {
     SDL_Rect area = {L.tl_x, L.lanes_y, L.tl_w, lanes_h()};
@@ -8294,6 +9046,7 @@ static void timeline(void)
         }
     }
     time_scale((SDL_Rect){L.tl_x, L.top + 24, L.tl_w, L.ruler - 24});
+    arranger_strip();
     line(L.tl_x, L.top + 24, W, L.top + 24, tone(LINE, 0.8f));
     line(L.tl_x, L.top + L.ruler - 1, W, L.top + L.ruler - 1, LINE);
 
@@ -8813,8 +9566,15 @@ static void bounce_clips(const int *list, int n)
            (double)P.samples[idx].frames / SR, path_base(path));
 }
 
+static void arranger_release(void);
+
 static void end_drag(void)
 {
+    if (drag.kind == D_SEC || drag.kind == D_SECNEW || drag.kind == D_SECEND) {
+        arranger_release();
+        drag.kind = D_NONE;
+        return;
+    }
     if (drag.kind == D_MOVE && over_library()) {
         group_place(0, 0);                      /* the clips stay where they were */
         bounce_to_library();
@@ -9011,6 +9771,10 @@ static void key(SDL_Keysym k)
             return;
         case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6: case SDLK_7:
             open_panel(k.sym - SDLK_1);
+            return;
+        case SDLK_PAGEUP:
+        case SDLK_PAGEDOWN:
+            sec_jump(k.sym == SDLK_PAGEDOWN ? 1 : -1);
             return;
         case SDLK_COMMA:
             open_panel(RI_SETTINGS);
@@ -11282,6 +12046,14 @@ static int selftest(void)
         tf_key((SDL_Keysym){.sym = SDLK_RETURN});
         frame();
         check(!strcmp(SV.words, "sing a song"), "typing words into the Singer");
+        {                                       /* down to Sing it, as you would */
+            SDL_Rect pr = panel_rect();
+            int over = sv_sing_r.y + sv_sing_r.h + 10 - (pr.y + pr.h);
+            if (over > 0) {
+                sounds_scroll += over;
+                frame();
+            }
+        }
         r = sv_sing_r;
         sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
         check(scratch && scratch == sv_heard, "Sing it sings them");
@@ -11310,6 +12082,8 @@ static int selftest(void)
         note_add(pat, 69, P.clips[c].offset + bf, bf, 0.8f);
         note_add(pat, 71, P.clips[c].offset + 2 * bf, 2 * bf, 0.8f);
         selected = c;
+        sounds_scroll = 0;                      /* back up to the tunes */
+        frame();
         r = sv_tune_r[TUNE_CLIP];
         sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
         frame();
@@ -11317,6 +12091,12 @@ static int selftest(void)
                   fabs(SV.notes[2].len - 2) < 1e-6,
               "From a note clip sings on that clip's notes");
         nc = P.nclips;
+        {
+            SDL_Rect pr = panel_rect();
+            int over = sv_place_r.y + sv_place_r.h + 10 - (pr.y + pr.h);
+            if (over > 0) sounds_scroll += over;
+            frame();
+        }
         r = sv_place_r;
         sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
         check(P.nclips == nc + 1 && P.clips[nc].start == P.clips[c].start && P.clips[nc].track != P.clips[c].track,
@@ -12619,6 +13399,194 @@ static int selftest(void)
         check(ok, "layers save and open again, made the same way");
         new_project();
         make_demo();
+        frame();
+        history_check();
+    }
+
+
+    /* ---- the arranger: named sections, rearranging the song */
+    {
+        new_project();
+        make_demo();
+        LOCK();
+        P.nclips = 0;
+        P.nautos = 0;
+        P.nchanges = 0;
+        P.bpm = 120;
+        P.ts_num = 4;
+        P.ts_den = 4;
+        UNLOCK();
+        view_start = 0;
+        pps = 15;
+        frame();
+        history_check();
+        int s0 = 0;
+        long bar = meter_bar_frame(&P, 1);
+        int ci = sec_add(0, 2, "Intro"), vi = sec_add(2, 2, "Verse"), ki = sec_add(4, 2, "Chorus");
+        int A = clip_add(s0, 0, 0, 0, P.samples[s0].frames < bar / 2 ? P.samples[s0].frames : bar / 2);
+        int B = clip_add(s0, 1, 2 * bar + bar / 2, 0, 100);
+        int C = clip_add(s0, 2, 4 * bar, 0, 100);
+        (void)A, (void)B, (void)C;
+        LOCK();
+        P.changes[P.nchanges++] = (MeterChange){4, 140, 4, 4};   /* the chorus is faster */
+        P.changes[P.nchanges++] = (MeterChange){6, 120, 4, 4};
+        P.autos[P.nautos++] = (AutoPoint){0, AUTO_VOLUME, meter_bar_frame(&P, 4.5), 0.3f};
+        UNLOCK();
+        frame();
+        history_check();
+        int u0 = nundo;
+        check(ci == 0 && vi == 1 && ki == 2 && P.nsections == 3, "sections are added in bar order");
+        SDL_Rect kr = sec_rect_[2];
+        sim(kr.x + 10, kr.y + 5, 1, 0, 0, 0);
+        sim(kr.x + 10, kr.y + 5, 0, 1, 0, 0);
+        check(P.playhead == meter_bar_frame(&P, 4), "clicking a section puts the playhead at its start");
+        key((SDL_Keysym){.sym = SDLK_PAGEUP, .mod = KMOD_CTRL});
+        int prev_ok = P.playhead == meter_bar_frame(&P, 2);
+        key((SDL_Keysym){.sym = SDLK_PAGEDOWN, .mod = KMOD_CTRL});
+        check(prev_ok && P.playhead == meter_bar_frame(&P, 4), "Ctrl+PageUp and Ctrl+PageDown jump between sections");
+        frame();
+        kr = sec_rect_[2];
+        int x0 = (int)frame_to_x(0);
+        sim_drag(kr.x + 10, kr.y + 5, x0 + 10, kr.y + 5, 0);   /* the chorus to the front */
+        frame();
+        history_check();
+        int order = P.nsections == 3 && !strcmp(P.sections[0].name, "Chorus") && P.sections[0].bar == 0 &&
+                    !strcmp(P.sections[1].name, "Intro") && P.sections[1].bar == 2 && !strcmp(P.sections[2].name, "Verse") &&
+                    P.sections[2].bar == 4;
+        int c0 = -1, c1 = -1, c2 = -1;
+        for (int i = 0; i < P.nclips; i++) {
+            if (P.clips[i].track == 0) c0 = i;
+            if (P.clips[i].track == 1) c1 = i;
+            if (P.clips[i].track == 2) c2 = i;
+        }
+        check(order && c2 >= 0 && P.clips[c2].start == 0 && c0 >= 0 && P.clips[c0].start == meter_bar_frame(&P, 2) &&
+                  c1 >= 0 && labs(P.clips[c1].start - (meter_bar_frame(&P, 4) + (meter_bar_frame(&P, 5) - meter_bar_frame(&P, 4)) / 2)) <= 1,
+              "dragging a section moves it and everything in it; what was between moves along");
+        check(P.bpm == 140 && P.nchanges >= 1 && P.changes[0].bar == 2 && P.changes[0].bpm == 120 && P.nautos == 1 &&
+                  fabs(meter_bars(&P, P.autos[0].at) - 0.5) < 1e-3,
+              "the section takes its tempo and its automation with it");
+        check(nundo == u0 + 1, "a move is one undo step");
+        undo_redo(0);
+        check(P.nsections == 3 && !strcmp(P.sections[2].name, "Chorus") && P.bpm == 120 && P.changes[0].bar == 4,
+              "undo puts the song back as it was");
+        int vb = 1;
+        sec_action(CMA_SDUP, vb);                /* copy the verse in after itself */
+        frame();
+        history_check();
+        int verses = 0, b_copies = 0;
+        for (int i = 0; i < P.nsections; i++) verses += !strcmp(P.sections[i].name, "Verse");
+        for (int i = 0; i < P.nclips; i++) b_copies += P.clips[i].track == 1;
+        int chorus_at = -1;
+        for (int i = 0; i < P.nsections; i++)
+            if (!strcmp(P.sections[i].name, "Chorus")) chorus_at = P.sections[i].bar;
+        check(verses == 2 && b_copies == 2 && chorus_at == 6, "Copy it in after itself repeats a section and moves the rest along");
+        sec_action(CMA_SCUT, 2);                  /* and take the copy out again */
+        frame();
+        history_check();
+        verses = b_copies = 0;
+        for (int i = 0; i < P.nsections; i++) verses += !strcmp(P.sections[i].name, "Verse");
+        for (int i = 0; i < P.nclips; i++) b_copies += P.clips[i].track == 1;
+        check(verses == 1 && b_copies == 1 && P.sections[2].bar == 4, "Remove it and its bars takes a section out and closes the gap");
+        int n0 = P.nsections;
+        int xs = (int)frame_to_x(meter_bar_frame(&P, 8)), xe = (int)frame_to_x(meter_bar_frame(&P, 10));
+        sim_drag(xs + 2, kr.y + 5, xe, kr.y + 5, 0);   /* drag along the empty strip: a new one */
+        check(P.nsections == n0 + 1 && P.sections[n0].bar == 8 && P.sections[n0].bars == 2, "dragging along the strip marks a new section");
+        char tp[1100], msg2[256];
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(tp, sizeof tp, "%s/tinydaw-sections-%u.tdaw", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        int ok = project_save(&P, tp, msg2, sizeof msg2) == 0;
+        Project *q = malloc(sizeof *q);
+        ok = ok && project_load(q, tp, msg2, sizeof msg2) == 0;
+        if (ok) {
+            ok = q->nsections == P.nsections && !memcmp(q->sections, P.sections, (size_t)P.nsections * sizeof(Section));
+            project_free(q);
+        }
+        free(q);
+        remove(tp);
+        check(ok, "sections save and open again");
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
+
+    /* ---- the Singer's pitch curve */
+    {
+        VocalSpec t;
+        memset(&t, 0, sizeof t);
+        t.nbend = 3;
+        t.bend_beat[0] = 1, t.bend_semis[0] = 0;
+        t.bend_beat[1] = 2, t.bend_semis[1] = 2;
+        t.bend_beat[2] = 4, t.bend_semis[2] = -2;
+        check(vocal_bend_at(&t, 0.5) == 0 && fabs(vocal_bend_at(&t, 1.5) - 1) < 1e-9 && fabs(vocal_bend_at(&t, 3) - 0) < 1e-9 &&
+                  vocal_bend_at(&t, 9) == -2,
+              "the pitch curve runs in straight lines between its points and holds past the ends");
+        show_panel(RI_SOUNDS);
+        sounds_sub = 2;
+        sv_defaults();
+        snprintf(SV.words, sizeof SV.words, "la la la la");
+        SV.tune = TUNE_UPDOWN;
+        frame();
+        sounds_scroll = 100000;                  /* down to it */
+        frame();
+        frame();
+        SDL_Rect r = sv_curve_r;
+        int on = r.w > 0 && r.y + r.h < H && r.y > L.top;
+        sv_make_notes();
+        double nb = SV.notes[1].start + SV.notes[1].len / 2, endb = SV.notes[3].start + SV.notes[3].len + 0.25;
+        int px = r.x + (int)(nb / endb * r.w);
+        sim(px - 8, r.y + 10, 1, 0, 0, 0);        /* draw high over the second note */
+        sim(px + 8, r.y + 10, 0, 0, 0, 0);
+        sim(px + 8, r.y + 10, 0, 1, 0, 0);
+        double up = vocal_bend_at(&SV, nb);
+        check(on && SV.nbend >= 2 && up > 1, "drawing above a note bends it up");
+        sim(px, r.y + 10, 0, 0, 1, 0);            /* right-click rubs it out */
+        int left = 0;
+        for (int i = 0; i < SV.nbend; i++) left += fabs(SV.bend_beat[i] - nb) < 0.05;
+        check(left == 0, "right-click rubs out the bend there");
+        SDL_Rect sb = sv_bend_r[0];
+        sim(sb.x + 5, sb.y + 5, 1, 1, 0, 0);       /* Scoops */
+        double at_start = vocal_bend_at(&SV, SV.notes[2].start), later = vocal_bend_at(&SV, SV.notes[2].start + 0.2);
+        check(at_start < -1 && fabs(later) < 1e-6, "Scoops start each note low and bring it up to pitch");
+        sb = sv_bend_r[3];
+        sim(sb.x + 5, sb.y + 5, 1, 1, 0, 0);       /* Flat */
+        check(SV.nbend == 0, "Flat takes the bends away");
+        if (speech_available(NULL, 0)) {          /* and it really is sung bent */
+            char err[200];
+            long n0, n1;
+            sv_make_notes();
+            float *a = render_vocal(&SV, &n0, err, sizeof err);
+            sv_bend_preset(BEND_FALL, SV.nnotes < 4 ? SV.nnotes : 4);
+            float *b = render_vocal(&SV, &n1, err, sizeof err);
+            double d = 0, e = 0;
+            for (long i = 0; a && b && i < n0 && i < n1; i++) {
+                d += fabs(a[2 * i] - b[2 * i]);
+                e += fabs(a[2 * i]);
+            }
+            check(a && b && n0 == n1 && d > e * 0.05, "a line with bends is sung differently, at the same length");
+            free(a);
+            free(b);
+            char tp[1100], msg2[256];
+            const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+            snprintf(tp, sizeof tp, "%s/tinydaw-bend-%u.tdaw", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+            int idx = sv_keep(), ok = idx >= 0 && P.samples[idx].voc.nbend == SV.nbend;
+            ok = ok && project_save(&P, tp, msg2, sizeof msg2) == 0;
+            Project *q = malloc(sizeof *q);
+            ok = ok && project_load(q, tp, msg2, sizeof msg2) == 0;
+            if (ok) {
+                const VocalSpec *qv = &q->samples[idx].voc;
+                ok = qv->nbend == SV.nbend;
+                for (int i = 0; ok && i < qv->nbend; i++)
+                    ok = fabsf(qv->bend_beat[i] - SV.bend_beat[i]) < 1e-5f && fabsf(qv->bend_semis[i] - SV.bend_semis[i]) < 1e-5f;
+                project_free(q);
+            }
+            free(q);
+            remove(tp);
+            check(ok, "a sung line keeps its pitch curve in the project");
+        }
+        sounds_scroll = 0;
+        sv_defaults();
         frame();
         history_check();
     }
@@ -16138,6 +17106,12 @@ int main(int argc, char **argv)
             sv_defaults();
             snprintf(SV.words, sizeof SV.words, "%s", getenv("TINYDAW_SHOT_SING"));
             sounds_scroll = getenv("TINYDAW_SHOT_SCROLL") ? atoi(getenv("TINYDAW_SHOT_SCROLL")) : 0;
+            if (getenv("TINYDAW_SHOT_BEND")) {   /* a bend preset drawn in (0 scoops, 1 slides, 2 fall-offs) */
+                char syl[VOCAL_NOTES][40];
+                int ns = vocal_syllables(SV.words, syl, NULL, VOCAL_NOTES);
+                sv_make_notes();
+                sv_bend_preset(atoi(getenv("TINYDAW_SHOT_BEND")), ns < SV.nnotes ? ns : SV.nnotes);
+            }
         }
         if (getenv("TINYDAW_SHOT_GEN")) {        /* "genre,kind,preset,scroll": the Generator */
             int ge = -1, ki = -1, pr = -1, sc = 0;

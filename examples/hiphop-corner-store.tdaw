@@ -105,6 +105,9 @@ end
 sample gen 261818 tape hiss
 gen 4 60 8 0.05 800 800 440 88
 end
+section 0 8 Verse
+section 8 8 Hook
+section 16 8 Verse
 clip 2 3 0 0 130909 0 0 0
 clip 19 6 0 0 261818 0 32727 0
 clip 3 3 130908 0 130909 0 0 0

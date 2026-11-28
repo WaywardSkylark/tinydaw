@@ -106,6 +106,7 @@ void synth_patch_parse(const char *s, SynthPatch *p);
 /* A sung line (the Singer): words sung on notes. Each syllable is spoken by eSpeak NG (a separate
  * free program) and played back through a vocoder at its note's pitch and length. */
 #define VOCAL_NOTES 96
+#define VOCAL_BENDS 256
 typedef struct { int note; double start, len; } VocalNote;   /* MIDI note; start and length in beats */
 enum { VS_ROBOT, VS_TALKBOX, VS_CHOIR, VS_WHISPER, VS_CLEAR, VS_STYLES };
 typedef struct {
@@ -117,6 +118,8 @@ typedef struct {
     int tune, first;        /* how the notes were made, so the Singer can show it again */
     double step;
     int singer;             /* VS_CLEAR: which of CLEAR_SINGERS */
+    int nbend;              /* the pitch curve: semitones off the notes, at beats from the start, */
+    float bend_beat[VOCAL_BENDS], bend_semis[VOCAL_BENDS];   /* in beat order; straight lines between */
 } VocalSpec;
 typedef struct { const char *name, *about, *variant; int high; } ClearSinger;
 extern const ClearSinger CLEAR_SINGERS[];
@@ -287,6 +290,10 @@ typedef struct {
 #define MAX_METER 64
 typedef struct { int bar; double bpm; int num, den; } MeterChange;
 
+/* A named section of the song (the arranger strip): bars [bar, bar + bars), 0-based. */
+#define MAX_SECTIONS 64
+typedef struct { int bar, bars; char name[24]; } Section;
+
 /* The project. The audio thread reads it; the UI changes it only while holding the
  * audio device lock (see LOCK/UNLOCK in main.c). */
 typedef struct {
@@ -319,6 +326,8 @@ typedef struct {
     int nautos;
     DrumPat drums[MAX_DRUMS];
     int ndrums;
+    Section sections[MAX_SECTIONS];         /* in bar order, not overlapping */
+    int nsections;
     Voice voices[MAX_VOICES];
     float bend;             /* live pitch wheel, -1..1 (not saved) */
     float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */
@@ -384,6 +393,7 @@ int sample_generate_synth(Project *p, const SynthSound *s, const char *name);
 int speech_available(char *where, size_t n);            /* 1 when eSpeak NG can be found */
 int vocal_syllables(const char *words, char syl[][40], int *rest_before, int max);
 float *render_vocal(const VocalSpec *v, long *frames, char *err, size_t errlen);
+double vocal_bend_at(const VocalSpec *v, double beat);   /* the pitch curve: semitones; 0 with no points */
 /* Adds a sung line; if it can't be sung (no eSpeak NG), adds silence that keeps the recipe. */
 int sample_generate_vocal(Project *p, const VocalSpec *v, const char *name, char *err, size_t errlen);
 int project_add_track(Project *p, const char *name);   /* new row, or -1 when full */

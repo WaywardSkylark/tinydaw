@@ -123,6 +123,11 @@ end
 sample gen 11612 lead 81
 gen 1 81 0.5 0.28 4 140 440 124
 end
+section 0 4 Intro
+section 4 8 Groove
+section 12 4 Build
+section 16 4 Break
+section 20 12 Drop
 clip 2 2 0 0 92903 0 0 0
 clip 11 5 0 0 92903 0 46452 0
 clip 2 2 92904 0 92903 0 0 0

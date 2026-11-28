@@ -93,6 +93,10 @@ sample synth 144000 Impact
 synth 28 3 0.8 440 0.5 0.5 0.5 0.5 0.5
 patch cutoff=3000 decay=2.5 drive=0.5 filter=1 fsweep=-3 noise=0.6 noise_decay=0.3 pitch_drop=24 pitch_time=0.15 release=0.4 wave=3
 end
+section 0 4 Intro
+section 4 16 Break
+section 20 4 7/8
+section 24 12 Finale
 clip 9 3 0 0 535814 0 0 0 1 60
 clip 11 5 0 0 535814 0 0 0 2 84
 clip 15 7 401860 0 133954 0 66977 0

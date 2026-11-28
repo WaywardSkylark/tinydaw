@@ -115,10 +115,26 @@ tracks down the side (the same tracks, mixer, effects and macros). Each cell is 
 launch it on the next bar: its track plays it round and round instead of the timeline. Click a scene's
 name to launch the whole row (an empty slot leaves its track as it is).
 
+**What plays.** The **Plays** list at the top left of the session decides how the session and the
+timeline share the music:
+
+- **Timeline + session**: a track with a launched slot plays it; every other track plays the timeline.
+  Jam over the song.
+- **Session only**: only launched slots play; the timeline is silent. The session as its own thing.
+- **Timeline only**: the timeline plays as written; launched slots wait (they stay launched for when
+  you switch back). Good for comparing.
+
+Back in the timeline view you can always tell: the **Session** button shows how many tracks the session
+has, and each lane the session is playing says so ("Playing the session: Chorus"; "Stopped in the
+session"; "Silent: the session plays alone").
+
 | To | Do this |
 |---|---|
-| Get going | **From sections** makes a scene for each of the song's sections, each track's slot looping its own part of that section. Every example song works this way |
-| Fill a slot | Drag a sound from the library onto it, or right-click it: **Put the selected clip here** (any clip: audio, notes or drums, with its pitch curve), or **Loop the timeline here** (the section at the playhead) |
+| Get going | The example songs come with their session filled in: a scene for each section. For your own songs, **From sections** does the same: each track's slot loops its own part of that section |
+| Fill a slot | Drag a sound from the library onto it, or drop sound files on it from your file manager (several fill the empty slots after it). Or right-click it: **Paste here**, **Import a sound file here...**, **Put the selected clip here** (any clip: audio, notes or drums, with its pitch curve), **Loop the timeline here** (the section at the playhead) |
+| Copy and paste | Right-click a slot > **Copy**, or Ctrl+C with the pointer on it (Ctrl+X cuts). A copied slot pastes into another slot, onto the timeline (Ctrl+V there, at the playhead) or, as its sound, into the library or a pad. A slot takes whatever was copied last: a slot, clips copied on the timeline, or a sound copied from the library or a pad |
+| Move a slot | Drag it to another slot (with Ctrl: a copy). Delete with the pointer on it clears it |
+| Onto the timeline | Right-click > **Put it on the timeline at the playhead**: one pass of it, as clips |
 | Change a slot | Right-click: **Twice as long**, **Half as long**, **Clear the slot** |
 | Stop a track | The square beside its slots: it plays nothing, not even the timeline |
 | Back to the timeline | The arrow beside its slots, or **All timeline** for every track |
@@ -472,6 +488,7 @@ Linux and `%APPDATA%\tinydaw` on Windows.
 ./tinydaw song.tdaw --export song.flac --bits 24 --rate 96000
 ./tinydaw --demo --save demo.tdaw         # write a project without opening a window
 ./tinydaw song.tdaw --part "bass,style=Walking,sound=Upright bass" --fills "style=Build" --save song.tdaw
+./tinydaw song.tdaw --scenes --save song.tdaw   # fill the session view: a scene for each section
                                           # write parts and fills from the chord track (as Create > Parts)
 ./tinydaw --version
 ```

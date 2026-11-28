@@ -7,6 +7,63 @@ way they are.
 
 ## Unreleased (after 0.8.5)
 
+### 2026-11-28: Session and timeline together or apart; slot copy, paste, import; examples with scenes
+
+Asked for: the session and the timeline playable on their own or together, with the user always aware
+of which, and a visible option for it; easier import, copy and paste of sounds to and from the session;
+the example songs' session view filled in as a demo.
+
+- **What plays** (`P.sess_mode`, live and not saved): SESS_BOTH (a track plays its slot or the timeline),
+  SESS_ONLY_SESSION (only launched slots; the timeline is silent), SESS_ONLY_TIMELINE (the session
+  is set aside but launched slots stay set, for A/B). `add_clips` decides per mode, and range slots
+  read their automation from the source bars only when the session is playing. It's a "Plays:"
+  dropdown first in the session toolbar; the less important toolbar buttons drop off when it's narrow.
+- **Awareness in the timeline view:** the view toggle reads "Session (N)" and lights up when the
+  session has tracks (or "Session (off)" in timeline-only). `session_lane_marks()` covers each affected
+  lane with what's happening there: playing a slot, stopped, silent in session-only, or about to
+  switch.
+- **One clipboard idea for slots:** `last_copy` records which clipboard was used last (a sound from
+  the library or a pad, clips from the timeline, or a slot). Copying a slot fills all three: the slot
+  board, the timeline's clip clipboard (`slot_clips()`: one pass, so Ctrl+V on the timeline pastes it)
+  and the sound clipboard (its sound, for the library or pads). A paste into a slot takes whichever was
+  copied last. Ctrl+C, Ctrl+X, Ctrl+V and Delete work with the pointer on a slot.
+- **Import:** right-click > "Import a sound file here..." (file dialog mode 4, with audio filters on
+  Linux and Windows), or drop files from the file manager onto a slot (`slot_drop_file`: the pointer
+  position comes from the global mouse state, since SDL2's drop event has none; several files fill the
+  empty slots after it, adding a scene if needed). `import_file` now returns the new sound's index.
+- **Drag** a slot to another to move it (Ctrl copies). A click without moving still launches it, now
+  on release (`D_SLOT`). "Put it on the timeline at the playhead" writes one pass as clips.
+- Right-click menus can now have up to 10 items (they had 6).
+- **Examples:** `--scenes` (after any `--part` and `--fills`) runs From sections; `make_examples.py`
+  passes it for every song, so all 16 open with a scene for each section.
+- **Tests:** 8 checks: the three modes (both tracks rendered alone in each), slot to slot and onto the
+  timeline, a library sound into a slot, Ctrl+C/V over slots, drag move and Ctrl copy, one pass onto
+  the timeline, importing a WAV into a slot, and that every example has its scenes.
+
+### 2026-11-28: Session fixes: looping capture, launches at the loop's end, slots outside 4/4
+
+Four bugs reported in the session view:
+
+- **Capture doubled clips while looping.** Every wrap started a new segment over the same bars, and
+  capture wrote them all, so the copies stacked and played twice as loud. Now each segment is cut back
+  by later segments on the same track before anything is written: the newest pass wins.
+- **Captured clips drifted after a wrap.** The reopened segment started wherever the next UI frame caught
+  the playhead, and capture counted passes from there. Segments now carry `at` (the launch frame):
+  after a wrap a segment reopens at `loop_start` with the same `at`, and capture counts passes from
+  `at`, as `add_session` plays them. Each written piece is trimmed to what showed, with its offset
+  moved to match.
+- **A launch in the loop's last bar never fired.** `sess_boundary` gave `loop_end`, which the playhead
+  never reaches (audio_cb wraps first). `sess_queue` now queues those at `loop_start` with
+  `P.sess_q_wrap[t]` set. The audio thread fires a wrap-queued launch only in the block that holds
+  its frame (the blocks before the wrap are past it, so the old rule, "q_at < block end", would have
+  fired it at once).
+- **Clip slots lost whole bars outside 4/4.** `slot_fill_clip` rounded to multiples of 4 quarter
+  notes. It now rounds to the bar length (or, for less than a bar, the beat: 4/den) of the time
+  signature at the clip's start.
+
+Tests: 3 regression checks: a loop capture (no overlap, two bars covered, every piece's offset in step
+with the launch), a launch queued in the last bar of a loop, and slot lengths in 3/4, 7/8 and 6/8.
+
 ### 2026-11-28: Recent projects and a project browser
 
 Asked for: a way to find the dozens of .tdaw files in Music/tinydaw: a browser with a list,

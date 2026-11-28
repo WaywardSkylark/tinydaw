@@ -463,7 +463,7 @@ static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && 
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
        D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER, D_DRUM,
-       D_SEC, D_SECNEW, D_SECEND, D_BEND, D_BENDX, D_CHD, D_CHDNEW, D_CHDEND, D_CBEND, D_CBENDX };
+       D_SEC, D_SECNEW, D_SECEND, D_BEND, D_BENDX, D_CHD, D_CHDNEW, D_CHDEND, D_CBEND, D_CBENDX, D_SLOT };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
 /* Pop-out windows: the clip editor and the mixing console. Each has its own renderer and mouse;
  * a drag belongs to the window it started in (drag_pop, -1 = the main window). */
@@ -1047,6 +1047,8 @@ static void selection_span(long *a, long *b)
 /* the clipboard: clips relative to the earliest one */
 static Clip clipboard[MAX_CLIPS];
 static int nclipboard;
+enum { COPY_NONE, COPY_SOUND, COPY_CLIPS, COPY_SLOT };
+static int last_copy;                   /* what was copied last: a paste into a session slot takes that */
 
 static void copy_selection(void)
 {
@@ -1058,6 +1060,7 @@ static void copy_selection(void)
             clipboard[nclipboard] = P.clips[i];
             clipboard[nclipboard++].start -= a;
         }
+    if (nclipboard) last_copy = COPY_CLIPS;
 }
 
 static int paste_at(long at)
@@ -1349,7 +1352,7 @@ static void toggle_loop(void)
     UNLOCK();
 }
 
-static void import_file(const char *path)
+static int import_file(const char *path)        /* into the library: its index, or -1 */
 {
     char err[200];
     int idx = sample_import(&P, path, err, sizeof err);
@@ -1359,6 +1362,7 @@ static void import_file(const char *path)
         status("Imported %s (%.2f s)", P.samples[idx].name, (double)P.samples[idx].frames / SR);
         lib_scroll = P.nsamples > 6 ? P.nsamples - 6 : 0;
     }
+    return idx;
 }
 
 /* export dialog state: options persist for the session */
@@ -2683,7 +2687,8 @@ static void autosave_tick(void)
 
 static SDL_atomic_t fd_state;           /* 0 idle, 1 open, 2 finished */
 static int fd_saving;
-static int fd_export;                   /* 0 a project, 1 where an export goes, 2 a MIDI file to import, 3 to export to */
+static int fd_export;                   /* 0 a project, 1 where an export goes, 2 a MIDI file to import, 3 to export to,
+                                         * 4 a sound for a session slot */
 static char fd_result[1024];
 #ifndef _WIN32
 static char fd_cmd[4000];
@@ -2717,8 +2722,9 @@ static void win_file_dialog(void)
     o.hwndOwner = fd_owner;
     wchar_t filter[256], ext[16];
     char f8[256];
-    const char *e8 = fd_export == 1 ? EXPORT_FORMATS[EXO.format].ext : fd_export >= 2 ? "mid" : "tdaw";
+    const char *e8 = fd_export == 1 ? EXPORT_FORMATS[EXO.format].ext : fd_export == 4 ? "wav" : fd_export >= 2 ? "mid" : "tdaw";
     if (fd_export == 1) snprintf(f8, sizeof f8, "%s audio (*.%s)|*.%s|All files|*.*|", EXPORT_FORMATS[EXO.format].name, e8, e8);
+    else if (fd_export == 4) snprintf(f8, sizeof f8, "Audio files|*.wav;*.flac;*.ogg;*.mp3;*.aif;*.aiff|All files|*.*|");
     else if (fd_export >= 2) snprintf(f8, sizeof f8, "MIDI files (*.mid)|*.mid;*.midi|All files|*.*|");
     else snprintf(f8, sizeof f8, "tinydaw projects (*.tdaw)|*.tdaw|All files|*.*|");
     int fl = MultiByteToWideChar(CP_UTF8, 0, f8, -1, filter, 255);
@@ -2731,6 +2737,7 @@ static void win_file_dialog(void)
     o.lpstrInitialDir = dir[0] ? dir : NULL;
     o.lpstrDefExt = ext;
     o.lpstrTitle = fd_export == 1 ? L"Export to" : fd_export == 2 ? L"Import a MIDI file" : fd_export == 3 ? L"Export MIDI"
+                 : fd_export == 4 ? L"Import a sound into the slot"
                  : fd_saving ? L"Save project" : L"Open project";
     o.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
               (fd_saving ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
@@ -2947,10 +2954,61 @@ static void export_take_path(const char *path)
     snprintf(export_dir, sizeof export_dir, "%.899s", dirname_of(path));
 }
 
+static int slot_import_t = -1, slot_import_s = -1;   /* the slot a chosen sound goes into */
+static void slot_import_path(int t, int s, const char *path);
+
+/* the system's Open dialog for a sound to put in a session slot */
+static void slot_import_dialog(int t, int s)
+{
+    if (SDL_AtomicGet(&fd_state) != 0) return;
+    slot_import_t = t;
+    slot_import_s = s;
+    char start[1300];
+    if (!export_dir[0]) {
+        user_dir("music", export_dir, sizeof export_dir);
+        if (!dir_writable(export_dir) && !getcwd(export_dir, sizeof export_dir)) snprintf(export_dir, sizeof export_dir, ".");
+    }
+    snprintf(start, sizeof start, "%s/", export_dir);
+    fd_saving = 0;
+#ifdef _WIN32
+    snprintf(fd_start, sizeof fd_start, "%s", start);
+    SDL_SysWMinfo wm;
+    SDL_VERSION(&wm.version);
+    fd_owner = SDL_GetWindowWMInfo(win, &wm) ? wm.info.win.window : NULL;
+#else
+    char q[2700];
+    shell_quote(q, sizeof q, start);
+    if (have_program("zenity")) {
+        snprintf(fd_cmd, sizeof fd_cmd,
+                 "zenity --file-selection --title='Import a sound into the slot' --filename=%s "
+                 "--file-filter='Audio files | *.wav *.flac *.ogg *.mp3 *.aif *.aiff *.WAV *.FLAC *.OGG *.MP3' "
+                 "--file-filter='All files | *' 2>/dev/null", q);
+    } else if (have_program("kdialog")) {
+        snprintf(fd_cmd, sizeof fd_cmd, "kdialog --getopenfilename %s '*.wav *.flac *.ogg *.mp3 *.aif *.aiff' 2>/dev/null", q);
+    } else {
+        status("No file dialog available (install zenity): drop a sound file on the slot instead");
+        return;
+    }
+#endif
+    fd_export = 4;
+    SDL_AtomicSet(&fd_state, 1);
+    SDL_Thread *th = SDL_CreateThread(fd_thread, "filedialog", NULL);
+    if (th) SDL_DetachThread(th);
+    else {
+        SDL_AtomicSet(&fd_state, 0);
+        fd_export = 0;
+    }
+}
+
 static void file_dialog_poll(void)
 {
     if (SDL_AtomicGet(&fd_state) != 2) return;
     SDL_AtomicSet(&fd_state, 0);
+    if (fd_export == 4) {                   /* a sound for a session slot */
+        fd_export = 0;
+        if (fd_result[0]) slot_import_path(slot_import_t, slot_import_s, fd_result);
+        return;
+    }
     if (fd_export >= 2) {                   /* a MIDI file */
         int k = fd_export;
         fd_export = 0;
@@ -6892,8 +6950,8 @@ enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR, CMA_PIN, CMA_SAVE, CMA_EDIT,
        CMA_CCHG, CMA_CHEAR, CMA_CDUP, CMA_CKEY, CMA_CDEL, CMA_CDETECT, CMA_CPART, CMA_CCLEAR };
 static struct {
     int open, kind, idx, n;
-    int act[6], enabled[6];
-    char label[6][80];
+    int act[10], enabled[10];
+    char label[10][80];
     SDL_Rect box;
 } cm;
 static int lib_flash = -1;              /* a sound just pasted into the library: lit for a moment */
@@ -6906,6 +6964,7 @@ static void sound_copy(int kind, int idx)
     sclip.has = 1;
     sclip.sample = s;
     sclip.from_pad = kind == CM_PAD;
+    last_copy = COPY_SOUND;
     if (kind == CM_PAD) sclip.pad = P.pads[idx];
     status("Copied \"%s\": right-click a pad, the instrument or the library and Paste", P.samples[s].name);
 }
@@ -10057,6 +10116,7 @@ static void piano_roll(void)
 static void sec_add_here(void);
 static void chord_header(void);
 static void session_header(void);
+static void session_lane_marks(void);
 static int session_view;
 
 static void track_headers(void)
@@ -10075,9 +10135,18 @@ static void track_headers(void)
     fill((SDL_Rect){L.left, L.top, L.head, L.ruler}, PANEL);
     {                                           /* the timeline, or the session view (where "TRACKS" was) */
         SDL_Rect vb = {L.left + 8, L.top + 8, L.head - 32 - 8 - 6, L.ruler - 16};
+        int live = 0;                           /* tracks the session has (playing a slot, or stopped) */
+        for (int t = 0; t < P.ntracks; t++) live += P.sess_play[t] != SESS_TIMELINE || P.sess_q[t] != SESS_NONE;
+        int busy = live > 0 || P.sess_mode != SESS_BOTH;
+        char vl[40];
+        if (session_view) snprintf(vl, sizeof vl, "Timeline view");
+        else if (live && P.sess_mode != SESS_ONLY_TIMELINE) snprintf(vl, sizeof vl, "Session (%d)", live);
+        else snprintf(vl, sizeof vl, P.sess_mode == SESS_ONLY_TIMELINE && live ? "Session (off)" : "Session view");
         tip(vb, session_view ? "Back to the timeline (Tab). + beside it adds a track"
-                             : "The session view: scenes of slots to launch live (Tab). + beside it adds a track");
-        if (button(vb, session_view ? "Timeline view" : "Session view", session_view)) session_view = !session_view;
+            : busy ? "The session has tracks: the number playing or stopped there, or (off) when Plays is timeline only. "
+                     "Their lanes say so. Tab to see the session and choose what plays"
+                   : "The session view: scenes of slots to launch live (Tab). + beside it adds a track");
+        if (button(vb, vl, session_view || busy)) session_view = !session_view;
     }
     SDL_Rect add = {L.left + L.head - 32, L.top + 4, 22, L.ruler - 8};
     if (button2(add, "+", 0, P.ntracks < MAX_TRACKS)) {
@@ -10647,13 +10716,13 @@ static void cm_open_list(int kind, int idx, const char *const *labels, const int
     cm.kind = kind;
     cm.idx = idx;
     int w = 0;
-    for (int k = 0; k < n && k < 6; k++) {
+    for (int k = 0; k < n && k < 10; k++) {
         snprintf(cm.label[k], sizeof cm.label[k], "%s", labels[k]);
         cm.act[k] = acts[k];
         cm.enabled[k] = enabled ? enabled[k] : 1;
         w = text_w(labels[k]) > w ? text_w(labels[k]) : w;
     }
-    cm.n = n < 6 ? n : 6;
+    cm.n = n < 10 ? n : 10;
     w += 28;
     int h = cm.n * (font_h + 12) + 8;
     cm.box = (SDL_Rect){mx + 2, my + 2, w, h};
@@ -11468,8 +11537,9 @@ static int sess_renaming = -1;                  /* the scene whose name is being
 static SDL_Rect sess_cell_[MAX_TRACKS][MAX_SCENES], sess_scene_r[MAX_SCENES], sess_stop_r[MAX_TRACKS], sess_back_r[MAX_TRACKS];
 static int sess_menu_t, sess_menu_s;
 
-/* what was played, for Capture: a slot on a track over [from, to) of the timeline */
-typedef struct { int track; Slot slot; long from, to; } SessSeg;
+/* what was played, for Capture: a slot on a track over [from, to) of the timeline, its passes counted
+ * from `at`, when it was launched (as add_session plays them) */
+typedef struct { int track; Slot slot; long from, to, at; } SessSeg;
 static SessSeg sess_log[2048];
 static int sess_nlog, sess_open_seg[MAX_TRACKS], sess_seen[MAX_TRACKS];
 static long sess_last_head;
@@ -11486,9 +11556,13 @@ static void sess_queue(int t, int what)          /* a scene, SESS_STOPPED or SES
     if (t < 0 || t >= P.ntracks) return;
     if (what >= 0 && (what >= P.nscenes || P.slots[t][what].kind == SLOT_EMPTY)) return;
     long at = sess_boundary();
+    /* looping, with the next boundary at or past the loop's end: the playhead never gets there (it wraps
+     * first), so the launch waits for the loop's start instead */
+    int wrap = P.playing && P.loop && P.loop_end > P.loop_start && P.playhead < P.loop_end && at >= P.loop_end;
     LOCK();
     P.sess_q[t] = what;
-    P.sess_q_at[t] = at;
+    P.sess_q_at[t] = wrap ? P.loop_start : at;
+    P.sess_q_wrap[t] = wrap;
     UNLOCK();
 }
 
@@ -11588,7 +11662,10 @@ static void slot_fill_clip(int t, int s, const Clip *c, const char *name)
     sl->clip.track = t;
     sl->clip.start = 0;
     double beats = meter_beats(&P, c->start + c->length) - meter_beats(&P, c->start);
-    double q = beats >= 4 ? 4 : beats >= 1 ? 1 : 0.25;          /* whole bars, beats, or 16ths */
+    int num, den;                                /* whole bars or beats of the time signature where it starts */
+    meter_at(&P, c->start, NULL, &num, &den, NULL, NULL, NULL);
+    double bar = num * 4.0 / den, beat = 4.0 / den;
+    double q = beats >= bar - 1e-6 ? bar : beats >= beat - 1e-6 ? beat : 0.25;
     sl->beats = round(beats / q) * q;
     if (sl->beats < 0.25) sl->beats = 0.25;
     snprintf(sl->name, sizeof sl->name, "%.23s", name);
@@ -11606,6 +11683,172 @@ static void sess_drop_sound(int sample)          /* a library sound dropped on a
                 status("\"%s\" in %s on track %d: click it to launch it", P.samples[sample].name, P.scene_names[s], t + 1);
                 return;
             }
+}
+
+/* ---- copy and paste: a slot copies into all three clipboards (slots; the timeline's clips, so Ctrl+V
+ * there pastes it; and sounds, so the library, a pad or the instrument can take its sound), and a paste
+ * into a slot takes whatever was copied last */
+
+static Slot slot_board;
+static int slot_board_has;
+
+static int slot_clips(int t, const Slot *sl, Clip *out, int max)   /* what a slot plays once, from 0 */
+{
+    int n = 0;
+    if (sl->kind == SLOT_CLIP && max > 0) {
+        out[0] = sl->clip;
+        out[0].track = t;
+        out[0].start = 0;
+        long L = slot_frames(&P, sl, P.playhead);
+        long room = out[0].pattern ? L : P.samples[out[0].sample].frames - out[0].offset;
+        out[0].length = room < L ? room : L;
+        n = out[0].length > 0;
+    } else if (sl->kind == SLOT_RANGE) {
+        long a = meter_bar_frame(&P, sl->bar), z = a + slot_frames(&P, sl, a);
+        for (int c = 0; c < P.nclips && n < max; c++) {
+            Clip x = P.clips[c];
+            if (x.track != t || x.start >= z || x.start + x.length <= a) continue;
+            if (x.start < a) {
+                x.offset += a - x.start;
+                x.length -= a - x.start;
+                x.start = a;
+                x.fade_in = 0;
+            }
+            if (x.start + x.length > z) x.length = z - x.start;
+            x.start -= a;
+            out[n++] = x;
+        }
+    }
+    return n;
+}
+
+static void slot_copy(int t, int s)
+{
+    const Slot *sl = &P.slots[t][s];
+    if (sl->kind == SLOT_EMPTY) return;
+    slot_board = *sl;
+    slot_board_has = 1;
+    nclipboard = slot_clips(t, sl, clipboard, MAX_CLIPS);
+    if (nclipboard) {
+        sclip.has = 1;
+        sclip.sample = sample_base(&P, clipboard[0].sample);
+        sclip.from_pad = 0;
+    }
+    last_copy = COPY_SLOT;
+    status("Copied \"%s\": paste it into a slot, onto the timeline (Ctrl+V there), or its sound into the library or a pad",
+           sl->name);
+}
+
+static int slot_can_paste(void)
+{
+    return (last_copy == COPY_SLOT && slot_board_has) || (last_copy == COPY_CLIPS && nclipboard) ||
+           (last_copy == COPY_SOUND && sclip.has && sclip.sample >= 0 && sclip.sample < P.nsamples);
+}
+
+static void slot_paste(int t, int s)
+{
+    if (t < 0 || t >= P.ntracks || s < 0 || s >= P.nscenes) return;
+    char nm[48];
+    if (last_copy == COPY_SLOT && slot_board_has) {
+        LOCK();
+        P.slots[t][s] = slot_board;
+        UNLOCK();
+        status(slot_board.kind == SLOT_RANGE && t != sess_menu_t ? "Pasted \"%s\" (it loops the same bars of this track)"
+                                                                 : "Pasted \"%s\"", slot_board.name);
+    } else if (last_copy == COPY_CLIPS && nclipboard) {
+        Clip c = clipboard[0];
+        c.start = 0;
+        snprintf(nm, sizeof nm, "%s", P.samples[sample_base(&P, c.sample)].name);
+        if (c.pattern < 0) {
+            const DrumPat *d = drum_find_c(&P, -c.pattern);
+            if (d) snprintf(nm, sizeof nm, "%s", d->name);
+        }
+        LOCK();
+        slot_fill_clip(t, s, &c, nm);
+        UNLOCK();
+        status(nclipboard > 1 ? "Pasted the first of the %d copied clips" : "Pasted the copied clip", nclipboard);
+    } else if (last_copy == COPY_SOUND && sclip.has && sclip.sample >= 0 && sclip.sample < P.nsamples) {
+        int sm = sclip_library_sound();
+        if (sm < 0) return;
+        Clip c = {sm, t, 0, 0, P.samples[sm].frames, 0, 0, 0, 0, 0, 0};
+        LOCK();
+        slot_fill_clip(t, s, &c, P.samples[sm].name);
+        UNLOCK();
+        status("\"%s\" in the slot", P.samples[sm].name);
+    } else {
+        status("Nothing copied yet: copy a slot, a clip (Ctrl+C) or a sound first");
+    }
+}
+
+static void slot_clear(int t, int s)
+{
+    LOCK();
+    if (P.sess_play[t] == s) P.sess_play[t] = SESS_TIMELINE;
+    if (P.sess_q[t] == s) P.sess_q[t] = SESS_NONE;
+    memset(&P.slots[t][s], 0, sizeof(Slot));
+    UNLOCK();
+}
+
+static void slot_to_timeline(int t, int s)      /* one pass of it on the timeline at the playhead */
+{
+    static Clip tmp[256];
+    int n = slot_clips(t, &P.slots[t][s], tmp, 256);
+    long at = snap(P.playhead);
+    sel_clear();
+    for (int k = 0; k < n; k++) {
+        int c = clip_add(tmp[k].sample, t, at + tmp[k].start, tmp[k].offset, tmp[k].length);
+        if (c < 0) break;
+        LOCK();
+        P.clips[c] = tmp[k];
+        P.clips[c].start = at + tmp[k].start;
+        UNLOCK();
+        csel[c] = 1;
+        selected = c;
+    }
+    status("\"%s\" on track %d's timeline at the playhead: %d clip%s", P.slots[t][s].name, t + 1, n, n == 1 ? "" : "s");
+}
+
+static int slot_under_mouse(int *t, int *s)
+{
+    if (!session_view) return 0;
+    for (int a = 0; a < P.ntracks; a++)
+        for (int b = 0; b < P.nscenes; b++)
+            if (sess_cell_[a][b].w > 0 && hit(sess_cell_[a][b]) && mx >= L.tl_x + 58) {
+                *t = a;
+                *s = b;
+                return 1;
+            }
+    return 0;
+}
+
+static void slot_import_path(int t, int s, const char *path)   /* a sound file, into the library and the slot */
+{
+    if (t < 0 || t >= P.ntracks || s < 0 || s >= P.nscenes) return;
+    int idx = import_file(path);
+    if (idx < 0) return;
+    Clip c = {idx, t, 0, 0, P.samples[idx].frames, 0, 0, 0, 0, 0, 0};
+    LOCK();
+    slot_fill_clip(t, s, &c, P.samples[idx].name);
+    UNLOCK();
+    status("Imported \"%s\" into %s on track %d: click it to launch it", P.samples[idx].name, P.scene_names[s], t + 1);
+}
+
+/* files dropped from outside on the session: the slot under the pointer, then the empty ones after it */
+static int slot_drop_file(const char *path)
+{
+    int t, s;
+    if (!session_view) return 0;
+    int gx, gy, wx, wy;                         /* (the pointer may not have moved over the window yet) */
+    SDL_GetGlobalMouseState(&gx, &gy);
+    SDL_GetWindowPosition(win, &wx, &wy);
+    mx = (int)floorf((gx - wx) / ui_user);
+    my = (int)floorf((gy - wy) / ui_user);
+    if (!slot_under_mouse(&t, &s)) return 0;
+    while (s < P.nscenes && P.slots[t][s].kind != SLOT_EMPTY) s++;
+    if (s >= P.nscenes) s = sess_add_scene(NULL);
+    if (s < 0) return 0;
+    slot_import_path(t, s, path);
+    return 1;
 }
 
 /* ---- what was played, for Capture */
@@ -11629,11 +11872,12 @@ static void sess_track(void)                    /* each frame: notice launches, 
     for (int t = 0; t < P.ntracks; t++) {
         int now = P.playing ? P.sess_play[t] : SESS_STOPPED;
         if (wrapped && sess_open_seg[t] >= 0) {   /* the loop went round: what played to its end, then again */
-            long end = P.loop_end > P.loop_start ? P.loop_end : sess_last_head;
-            int sc = sess_log[sess_open_seg[t]].slot.kind ? sess_seen[t] : -1;
+            int looping = P.loop && P.loop_end > P.loop_start;
+            long end = looping ? P.loop_end : sess_last_head, again = looping && head >= P.loop_start ? P.loop_start : head;
+            SessSeg prev = sess_log[sess_open_seg[t]];
             sess_close(t, end);
-            if (sc >= 0 && now == sc && sess_nlog < 2048) {
-                sess_log[sess_nlog] = (SessSeg){t, P.slots[t][sc], head, head};
+            if (sess_seen[t] >= 0 && now == sess_seen[t] && sess_nlog < 2048) {   /* from the loop's start, same launch */
+                sess_log[sess_nlog] = (SessSeg){t, prev.slot, again, head, prev.at};
                 sess_open_seg[t] = sess_nlog++;
             }
         }
@@ -11643,7 +11887,7 @@ static void sess_track(void)                    /* each frame: notice launches, 
         }
         sess_close(t, now >= 0 ? P.sess_at[t] : head);
         if (now >= 0 && now < P.nscenes && sess_nlog < 2048) {
-            sess_log[sess_nlog] = (SessSeg){t, P.slots[t][now], P.sess_at[t], head};
+            sess_log[sess_nlog] = (SessSeg){t, P.slots[t][now], P.sess_at[t], head, P.sess_at[t]};
             sess_open_seg[t] = sess_nlog++;
         }
         sess_seen[t] = now;
@@ -11665,32 +11909,74 @@ static int sess_capture(void)
     for (int i = 0; i < sess_nlog; i++) {         /* first what to write (a looped stretch is read before it's replaced) */
         const SessSeg *g = &sess_log[i];
         if (g->to - g->from < SR / 100) continue;
-        long L = slot_frames(&P, &g->slot, g->from);
+        long L = slot_frames(&P, &g->slot, g->at);
         if (L < 64) continue;
-        for (long pass = g->from; pass < g->to && nmade < MAX_CLIPS; pass += L) {
-            if (g->slot.kind == SLOT_CLIP) {
-                Clip c = g->slot.clip;
-                c.track = g->track;
-                c.start = pass;
-                long room = c.pattern ? L : P.samples[c.sample].frames - c.offset;
-                c.length = room < L ? room : L;
-                if (c.start + c.length > g->to) c.length = g->to - c.start;
-                if (c.length >= SR / 50) made[nmade++] = c;      /* (not a sliver where it stopped) */
-            } else {
-                long a = meter_bar_frame(&P, g->slot.bar), z = a + L;
-                for (int ci = 0; ci < P.nclips && nmade < MAX_CLIPS; ci++) {
-                    Clip c = P.clips[ci];
-                    if (c.track != g->track || c.start >= z || c.start + c.length <= a) continue;
-                    if (c.start < a) {
-                        c.offset += a - c.start;
-                        c.length -= a - c.start;
-                        c.start = a;
+        /* where it still shows: its stretch less what later segments on the track played over (looping
+         * goes over the same bars again, and the newest pass is what you heard last) */
+        long iv[64][2];
+        int niv = 1;
+        iv[0][0] = g->from, iv[0][1] = g->to;
+        for (int j = i + 1; j < sess_nlog && niv; j++) {
+            const SessSeg *h = &sess_log[j];
+            if (h->track != g->track || h->to - h->from < SR / 100) continue;
+            long cut[64][2];
+            int nc = 0;
+            for (int k = 0; k < niv; k++) {
+                long a = iv[k][0], b = iv[k][1];
+                if (h->to <= a || h->from >= b) {
+                    if (nc < 64) cut[nc][0] = a, cut[nc][1] = b, nc++;
+                    continue;
+                }
+                if (h->from > a && nc < 64) cut[nc][0] = a, cut[nc][1] = h->from, nc++;
+                if (h->to < b && nc < 64) cut[nc][0] = h->to, cut[nc][1] = b, nc++;
+            }
+            memcpy(iv, cut, sizeof(long) * 2 * (size_t)nc);
+            niv = nc;
+        }
+        for (int k = 0; k < niv; k++) {
+            long lo = iv[k][0], hi = iv[k][1];
+            if (hi - lo < SR / 50) continue;
+            /* the passes as they played: counted from the launch, whatever the loop did */
+            for (long pass = g->at + (long)floor((double)(lo - g->at) / L) * L; pass < hi && nmade < MAX_CLIPS; pass += L) {
+                Clip src[256];
+                int ns = 0;
+                if (g->slot.kind == SLOT_CLIP) {
+                    Clip c = g->slot.clip;
+                    c.track = g->track;
+                    c.start = pass;
+                    long room = c.pattern ? L : P.samples[c.sample].frames - c.offset;
+                    c.length = room < L ? room : L;
+                    src[ns++] = c;
+                } else {
+                    long a = meter_bar_frame(&P, g->slot.bar), z = a + L;
+                    for (int ci = 0; ci < P.nclips && ns < 256; ci++) {
+                        Clip c = P.clips[ci];
+                        if (c.track != g->track || c.start >= z || c.start + c.length <= a) continue;
+                        if (c.start < a) {
+                            c.offset += a - c.start;
+                            c.length -= a - c.start;
+                            c.start = a;
+                            c.fade_in = 0;
+                        }
+                        if (c.start + c.length > z) c.length = z - c.start;
+                        c.start += pass - a;
+                        src[ns++] = c;
                     }
-                    if (c.start + c.length > z) c.length = z - c.start;
-                    c.start += pass - a;
-                    if (c.start >= g->to) continue;
-                    if (c.start + c.length > g->to) c.length = g->to - c.start;
-                    if (c.length >= SR / 50) made[nmade++] = c;
+                }
+                for (int m2 = 0; m2 < ns && nmade < MAX_CLIPS; m2++) {   /* each trimmed to what showed */
+                    Clip c = src[m2];
+                    if (c.start < lo) {
+                        long cut = lo - c.start;
+                        c.start = lo;
+                        c.offset += cut;
+                        c.length -= cut;
+                        c.fade_in = 0;
+                    }
+                    if (c.start + c.length > hi) {
+                        c.length = hi - c.start;
+                        c.fade_out = 0;
+                    }
+                    if (c.length >= SR / 50) made[nmade++] = c;   /* (not a sliver where it stopped) */
                 }
             }
         }
@@ -11738,7 +12024,7 @@ static void sess_forget(void)                   /* a new or opened song: nothing
 /* ---- menus */
 
 enum { SMA_PUT = 100, SMA_SECTION, SMA_LONGER, SMA_SHORTER, SMA_CLEAR, SMA_RENAME_S, SMA_LAUNCH_S, SMA_INSERT_S,
-       SMA_REMOVE_S, SMA_CAPTURE };
+       SMA_REMOVE_S, SMA_CAPTURE, SMA_COPY, SMA_PASTE, SMA_IMPORT, SMA_TO_TIMELINE };
 
 static void sess_rename_scene(int s)
 {
@@ -11802,13 +12088,12 @@ static void sess_action(int act)
         }
         break;
     case SMA_CLEAR:
-        if (sl) {
-            LOCK();
-            if (P.sess_play[t] == s) P.sess_play[t] = SESS_TIMELINE;
-            memset(sl, 0, sizeof *sl);
-            UNLOCK();
-        }
+        if (sl) slot_clear(t, s);
         break;
+    case SMA_COPY: slot_copy(t, s); break;
+    case SMA_PASTE: slot_paste(t, s); break;
+    case SMA_IMPORT: slot_import_dialog(t, s); break;
+    case SMA_TO_TIMELINE: slot_to_timeline(t, s); break;
     case SMA_RENAME_S: sess_rename_scene(s); break;
     case SMA_LAUNCH_S: sess_launch_scene(s); break;
     case SMA_INSERT_S: {
@@ -11830,6 +12115,59 @@ static void sess_action(int act)
     }
     case SMA_REMOVE_S: sess_remove_scene(s); break;
     case SMA_CAPTURE: sess_capture(); break;
+    }
+}
+
+static void slot_release(void)                  /* a slot let go: a click launches it, a drag moves or copies it */
+{
+    int ft = drag.clip / MAX_SCENES, fs = drag.clip % MAX_SCENES, t, s;
+    if (ft >= P.ntracks || fs >= P.nscenes) return;
+    if (abs(mx - drag.sx) + abs(my - drag.sy) <= 4) {
+        sess_launch(ft, fs);
+        return;
+    }
+    if (!slot_under_mouse(&t, &s) || (t == ft && s == fs)) return;
+    int copy = (mods & KMOD_CTRL) != 0;
+    Slot moved = P.slots[ft][fs];
+    if (!copy) slot_clear(ft, fs);
+    LOCK();
+    P.slots[t][s] = moved;
+    UNLOCK();
+    status("%s \"%s\" to %s on track %d", copy ? "Copied" : "Moved", moved.name, P.scene_names[s], t + 1);
+}
+
+/* In the timeline view, what the session is doing to each track, over its lane: so it's never a mystery
+ * why a lane's clips aren't what's playing. */
+static void session_lane_marks(void)
+{
+    if (P.sess_mode == SESS_ONLY_TIMELINE) return;
+    for (int t = 0; t < P.ntracks; t++) {
+        int sp = P.sess_play[t], q = P.sess_q[t];
+        const char *what = NULL;
+        char buf[120];
+        if (sp >= 0 && sp < P.nscenes) {
+            if (strcmp(P.slots[t][sp].name, P.scene_names[sp]))
+                snprintf(buf, sizeof buf, "Playing the session: %s (%s). Tab to see it", P.slots[t][sp].name, P.scene_names[sp]);
+            else snprintf(buf, sizeof buf, "Playing the session: %s. Tab to see it", P.slots[t][sp].name);
+            what = buf;
+        } else if (sp == SESS_STOPPED) {
+            what = "Stopped in the session: silent. Tab, then the arrow beside its slots, brings the timeline back";
+        } else if (P.sess_mode == SESS_ONLY_SESSION && P.playing) {
+            what = "Silent: the session plays alone (Tab: Plays)";
+        } else if (q != SESS_NONE && q >= 0 && q < P.nscenes) {
+            snprintf(buf, sizeof buf, "Going over to the session: %s, on the next %s", P.slots[t][q].name,
+                     sess_quant == 1 ? "beat" : "bar");
+            what = buf;
+        }
+        if (!what) continue;
+        SDL_Rect r = {L.tl_x, track_y(t), L.tl_w, L.lane_h};
+        fill(r, alpha(BG, 150));
+        Col c = sp >= 0 ? TRACK_COL[t] : DIM;
+        fill((SDL_Rect){r.x, r.y, 3, r.h}, c);
+        SDL_Rect lab = {r.x + 8, r.y + (r.h - font_h - 6) / 2, text_w(what) + 12, font_h + 6};
+        if (lab.w > r.w - 16) lab.w = r.w - 16;
+        fill(lab, alpha(PANEL, 230));
+        text_clip(lab, lab.x + 6, lab.y + 3, what, sp >= 0 ? TEXT : DIM);
     }
 }
 
@@ -11857,26 +12195,49 @@ static void session_grid(void)
     sess_scroll = sess_scroll < 0 ? 0 : sess_scroll;
     char buf[96];
 
-    /* the toolbar */
+    /* the toolbar: what plays, when launches start, capture; then the rest, as far as there's room */
     SDL_Rect tb = {L.tl_x, L.top, L.tl_w, L.ruler};
     fill(tb, PANEL);
     int x = L.tl_x + 8, y = L.top + (L.ruler - 28) / 2;
+    static const char *const MODES[SESS_MODES] = {"Plays: timeline + session", "Plays: session only", "Plays: timeline only"};
+    int mode = P.sess_mode;
+    int mw = text_w(MODES[0]) + 40;
+    if (dropdown((SDL_Rect){x, y, mw, 28}, "", MODES, SESS_MODES, &mode, 0)) {
+        LOCK();
+        P.sess_mode = mode;
+        UNLOCK();
+        static const char *const SAY[SESS_MODES] = {
+            "Timeline + session: tracks with a launched slot play it, the others play the timeline",
+            "Session only: just the launched slots play; the timeline is silent",
+            "Timeline only: the timeline plays as written; launched slots wait (they're kept)"};
+        status("%s", SAY[mode]);
+    }
+    tip((SDL_Rect){x, y, mw, 28}, "What plays: launched slots with the timeline on the other tracks, the session alone, or "
+                                  "the timeline alone (the slots stay launched)");
+    x += mw + 6;
     static const char *const Q[3] = {"Launch: next bar", "Launch: next beat", "Launch: at once"};
-    dropdown((SDL_Rect){x, y, 170, 28}, "", Q, 3, &sess_quant, 0);
-    tip((SDL_Rect){x, y, 170, 28}, "When a launched slot starts: on the next bar, the next beat, or straight away");
-    x += 176;
-    if (button((SDL_Rect){x, y, 80, 28}, "Stop all", 0)) sess_all(SESS_STOPPED);
-    tip((SDL_Rect){x, y, 80, 28}, "Every track stops on the next bar (the timeline stays silent too)");
-    x += 84;
-    if (button((SDL_Rect){x, y, 100, 28}, "All timeline", 0)) sess_all(SESS_TIMELINE);
-    tip((SDL_Rect){x, y, 100, 28}, "Every track goes back to playing the timeline");
-    x += 104;
+    dropdown((SDL_Rect){x, y, 160, 28}, "", Q, 3, &sess_quant, 0);
+    tip((SDL_Rect){x, y, 160, 28}, "When a launched slot starts: on the next bar, the next beat, or straight away");
+    x += 166;
     snprintf(buf, sizeof buf, sess_nlog ? "Capture (%d)" : "Capture", sess_nlog);
     if (button((SDL_Rect){x, y, 110, 28}, buf, sess_nlog > 0)) sess_capture();
     tip((SDL_Rect){x, y, 110, 28}, "Write everything you've launched onto the timeline, where it played");
-    x += 114;
-    if (x + 130 < W && button((SDL_Rect){x, y, 130, 28}, "From sections", 0)) sess_from_sections();
-    if (x + 130 < W) tip((SDL_Rect){x, y, 130, 28}, "A scene for each of the song's sections, each track looping its part");
+    x += 116;
+    struct { const char *label; int w; const char *tipt; } more[3] = {
+        {"Stop all", 80, "Every track stops on the next bar (the timeline stays silent too)"},
+        {"All timeline", 104, "Every track goes back to playing the timeline"},
+        {"From sections", 126, "A scene for each of the song's sections, each track looping its part"}};
+    for (int k = 0; k < 3; k++) {
+        if (x + more[k].w > W - 4) break;
+        SDL_Rect b = {x, y, more[k].w, 28};
+        tip(b, "%s", more[k].tipt);
+        if (button(b, more[k].label, 0)) {
+            if (k == 0) sess_all(SESS_STOPPED);
+            else if (k == 1) sess_all(SESS_TIMELINE);
+            else sess_from_sections();
+        }
+        x += more[k].w + 4;
+    }
 
     /* the scene headers */
     SDL_Rect sh = {L.tl_x, L.top + L.ruler, L.tl_w, L.arr + L.chd};
@@ -11955,7 +12316,10 @@ static void session_grid(void)
                 int drop = drag.kind == D_LIB && hit(r) && hit(clip_r);
                 fill(r, drop ? alpha(ACCENT, 120) : hov ? PANEL2 : tone(PANEL, 0.95f));
                 outline(r, tone(LINE, 0.8f));
-                if (hov) tip(r, "An empty slot: drop a sound here, or right-click to put the selected clip or the timeline here");
+                int moving = drag.kind == D_SLOT && hit(r) && hit(clip_r) && abs(mx - drag.sx) + abs(my - drag.sy) > 4;
+                if (moving) outline(r, ACCENT);
+                if (hov) tip(r, "An empty slot: drop a sound on it (from the library or your files), or right-click to paste "
+                                "or import one");
             } else {
                 Col c = TRACK_COL[t];
                 fill(r, playing ? wash(c, 0.9f) : wash(c, hov ? 0.6f : 0.45f));
@@ -11984,26 +12348,47 @@ static void session_grid(void)
                     }
                 }
                 if (hov)
-                    tip(r, "%s: click to launch it on track %d (the next %s). Right-click for more", sl->name, t + 1,
+                    tip(r, "%s: click to launch it on track %d (the next %s), drag it to another slot to move it (Ctrl: "
+                           "copy). Right-click to copy, paste, import or put it on the timeline", sl->name, t + 1,
                         sess_quant == 0 ? "bar" : sess_quant == 1 ? "beat" : "moment");
             }
-            if (hov && lpress && sl->kind != SLOT_EMPTY) {
+            if (hov && lpress && sl->kind != SLOT_EMPTY) {   /* a click launches it; a drag moves it (Ctrl: copies) */
                 lpress = 0;
-                sess_launch(t, s);
+                drag = (typeof(drag)){.kind = D_SLOT, .clip = t * MAX_SCENES + s, .sx = mx, .sy = my};
             } else if (hov && rpress) {
                 rpress = 0;
                 sess_menu_t = t;
                 sess_menu_s = s;
-                int has_sel = selected >= 0 && selected < P.nclips;
-                const char *LB[6] = {"Put the selected clip here", "Loop the timeline here (the section at the playhead)",
-                                     "Twice as long", "Half as long", "Clear the slot", "Rename the scene"};
-                int AC[6] = {SMA_PUT, SMA_SECTION, SMA_LONGER, SMA_SHORTER, SMA_CLEAR, SMA_RENAME_S};
-                int en[6] = {has_sel, 1, sl->kind != SLOT_EMPTY, sl->kind != SLOT_EMPTY, sl->kind != SLOT_EMPTY, 1};
-                cm_open_list(CM_SESS, s, LB, AC, en, 6);
+                int has_sel = selected >= 0 && selected < P.nclips, paste = slot_can_paste();
+                if (sl->kind != SLOT_EMPTY) {
+                    const char *LB[9] = {"Copy", "Paste here", "Put it on the timeline at the playhead", "Twice as long",
+                                         "Half as long", "Import a sound file here...", "Put the selected clip here",
+                                         "Clear the slot", "Rename the scene"};
+                    int AC[9] = {SMA_COPY, SMA_PASTE, SMA_TO_TIMELINE, SMA_LONGER, SMA_SHORTER, SMA_IMPORT, SMA_PUT,
+                                 SMA_CLEAR, SMA_RENAME_S};
+                    int en[9] = {1, paste, 1, 1, 1, 1, has_sel, 1, 1};
+                    cm_open_list(CM_SESS, s, LB, AC, en, 9);
+                } else {
+                    const char *LB[5] = {"Paste here", "Import a sound file here...", "Put the selected clip here",
+                                         "Loop the timeline here (the section at the playhead)", "Rename the scene"};
+                    int AC[5] = {SMA_PASTE, SMA_IMPORT, SMA_PUT, SMA_SECTION, SMA_RENAME_S};
+                    int en[5] = {paste, 1, has_sel, 1, 1};
+                    cm_open_list(CM_SESS, s, LB, AC, en, 5);
+                }
             }
         }
         SDL_RenderSetClipRect(ren, NULL);
         line(L.tl_x, ty + th - 1, W, ty + th - 1, tone(LINE, 0.7f));
+    }
+    if (drag.kind == D_SLOT && abs(mx - drag.sx) + abs(my - drag.sy) > 4) {   /* a slot being dragged */
+        int ft = drag.clip / MAX_SCENES, fs = drag.clip % MAX_SCENES;
+        if (ft < P.ntracks && fs < P.nscenes) {
+            SDL_Rect g = {mx - 50, my - 12, 100, 24};
+            fill(g, alpha(TRACK_COL[ft], 200));
+            outline(g, TEXT);
+            text_clip(g, g.x + 6, g.y + (g.h - font_h) / 2, P.slots[ft][fs].name, DARK);
+            SDL_SetCursor(cur_hand);
+        }
     }
     if (hit(clip_r) && wheel_y && drag.kind == D_NONE && P.nscenes) {   /* the wheel scrolls the scenes */
         sess_scroll -= wheel_y * 60;
@@ -12582,6 +12967,7 @@ static void bounce_clips(const int *list, int n)
 static void arranger_release(void);
 
 static void chord_release(void);
+static void slot_release(void);
 
 static void end_drag(void)
 {
@@ -12592,6 +12978,11 @@ static void end_drag(void)
     }
     if (drag.kind == D_CHD || drag.kind == D_CHDNEW || drag.kind == D_CHDEND) {
         chord_release();
+        drag.kind = D_NONE;
+        return;
+    }
+    if (drag.kind == D_SLOT) {
+        slot_release();
         drag.kind = D_NONE;
         return;
     }
@@ -12852,6 +13243,10 @@ static void key(SDL_Keysym k)
             status("All %d clips selected", P.nclips);
             return;
         case SDLK_c:
+            if (slot_under_mouse(&hk, &hi)) {    /* over a session slot */
+                slot_copy(hk, hi);
+                return;
+            }
             if (sound_under_mouse(&hk, &hi) && !(hk == CM_LIB && hi < 0)) {   /* over a sound or pad: copy it */
                 sound_copy(hk, hi);
                 return;
@@ -12862,12 +13257,21 @@ static void key(SDL_Keysym k)
             }
             return;
         case SDLK_x:
+            if (slot_under_mouse(&hk, &hi) && P.slots[hk][hi].kind != SLOT_EMPTY) {
+                slot_copy(hk, hi);
+                slot_clear(hk, hi);
+                return;
+            }
             if (sel_count()) {
                 copy_selection();
                 status("Cut %d clip%s", delete_selection(), nclipboard == 1 ? "" : "s");
             }
             return;
         case SDLK_v:
+            if (slot_under_mouse(&hk, &hi)) {
+                slot_paste(hk, hi);
+                return;
+            }
             if (sclip.has && sound_under_mouse(&hk, &hi)) {
                 sound_paste(hk, hi);
                 return;
@@ -12893,7 +13297,12 @@ static void key(SDL_Keysym k)
         break;
     case SDLK_DELETE:
     case SDLK_BACKSPACE:
-        if (chd_sel >= 0 && chd_sel < P.nchords && my >= L.top + L.ruler + L.arr && my < L.lanes_y && mx >= L.tl_x) {
+        if (slot_under_mouse(&hk, &hi) && P.slots[hk][hi].kind != SLOT_EMPTY) {
+            char nm[24];
+            memcpy(nm, P.slots[hk][hi].name, sizeof nm);
+            slot_clear(hk, hi);
+            status("Cleared \"%s\". Ctrl+Z puts it back", nm);
+        } else if (chd_sel >= 0 && chd_sel < P.nchords && my >= L.top + L.ruler + L.arr && my < L.lanes_y && mx >= L.tl_x) {
             char nm[32];
             chord_label(&P, &P.chords[chd_sel], nm, sizeof nm);
             chord_remove(&P, chd_sel);
@@ -14322,12 +14731,13 @@ static int selftest(void)
     {
         examples_scan();
         check(nexamples == 16, "the sixteen example songs are found next to the program");
-        int good = 0, harm = 0, chip_keys = 0;
+        int good = 0, harm = 0, chip_keys = 0, scenes = 0;
         for (int i = 0; i < nexamples; i++) {
             Project *q = malloc(sizeof *q);
             int old_rate = g_rate;
             if (project_load(q, example_path[i], msg, sizeof msg) == 0) {
                 harm += q->nchords >= 3 || strstr(example_path[i], "experimental");
+                scenes += q->nscenes >= 3 && q->nscenes == q->nsections;
                 if (strstr(example_path[i], "chiptune")) {
                     int kr, ks, r0, s0, r1, s1;
                     key_at_bar(q, 25, &kr, &ks);
@@ -14353,6 +14763,7 @@ static int selftest(void)
         }
         check(good == nexamples && good > 0, "each example opens, runs about a minute and is playing sound mid-song");
         check(harm == nexamples, "the example songs have their chords on the chord track");
+        check(scenes == nexamples, "the example songs come with their session filled in: a scene for each section");
         check(chip_keys, "Chiptune changes key for the second level and the boss, and comes home for the win");
         if (nexamples) {
             int pick = 0;                       /* the one the tests after this were written against */
@@ -17542,6 +17953,227 @@ static int selftest(void)
         history_check();
     }
 
+    /* ---- the session with the loop on, and outside 4/4 */
+    {
+        new_project();
+        LOCK();
+        P.nclips = P.nnotes = P.nautos = P.nchanges = P.ndrums = 0;
+        P.bpm = 120;
+        P.ts_num = P.ts_den = 4;
+        P.playing = 0;
+        UNLOCK();
+        long bar = meter_bar_frame(&P, 1);
+        int hi = gen(WAVE_SINE, 69, 4, 0.5, 0, 0);
+        clip_add(hi, 1, 0, 0, bar);
+        sess_add_scene(NULL);
+        slot_fill_clip(0, 0, &P.clips[0], "A4");
+        frame();
+        history_check();
+        sess_forget();
+        LOCK();                                  /* looping bars 1-2, the slot launched at the start */
+        P.loop = 1;
+        P.loop_start = 0;
+        P.loop_end = 2 * bar;
+        P.sess_play[0] = 0;
+        P.sess_at[0] = 0;
+        P.playhead = 0;
+        P.playing = 1;
+        UNLOCK();
+        frame();
+        LOCK();
+        P.playhead = bar * 19 / 10;
+        UNLOCK();
+        frame();
+        LOCK();
+        P.playhead = bar * 3 / 10;               /* gone round (the UI catches it a little after the loop's start) */
+        UNLOCK();
+        frame();
+        LOCK();
+        P.playhead = bar * 3 / 2;
+        UNLOCK();
+        frame();
+        LOCK();
+        P.playing = 0;
+        UNLOCK();
+        frame();
+        history_check();
+        sess_capture();
+        long cov = 0;
+        int overlap = 0, n0 = 0, aligned = 1;
+        for (int a = 0; a < P.nclips; a++) {
+            const Clip *x = &P.clips[a];
+            if (x->track != 0) continue;
+            n0++;
+            cov += x->length;
+            /* in step with the launch: each piece plays its pass from where that pass is */
+            aligned &= x->offset == (x->start % bar);
+            for (int b = a + 1; b < P.nclips; b++) {
+                const Clip *y = &P.clips[b];
+                if (y->track == 0 && x->start < y->start + y->length && y->start < x->start + x->length) overlap = 1;
+            }
+        }
+        check(n0 >= 2 && !overlap && labs(cov - 2 * bar) < SR / 50 && aligned,
+              "captured while looping: one copy where passes overlap (the newest), in step with the launch, no drift");
+        undo_redo(0);
+        /* a launch queued in the loop's last bar waits for the loop to come round */
+        LOCK();
+        P.sess_play[0] = SESS_TIMELINE;
+        P.playhead = bar * 3 / 2;
+        P.playing = 1;
+        UNLOCK();
+        sess_quant = 0;
+        sess_queue(0, 0);
+        int queued_ok = P.sess_q[0] == 0 && P.sess_q_at[0] == 0 && P.sess_q_wrap[0];
+        Mixer *m = mixer_new();
+        float *b = calloc(2048 * 2, sizeof(float));
+        mixer_run(m, &P, bar * 3 / 2, 1, b, 1024, -1, 1);
+        int waited = P.sess_q[0] == 0 && P.sess_play[0] == SESS_TIMELINE;
+        mixer_run(m, &P, 0, 1, b, 1024, -1, 1);   /* round the loop */
+        check(queued_ok && waited && P.sess_play[0] == 0 && P.sess_at[0] == 0 && P.sess_q[0] == SESS_NONE,
+              "a launch in the loop's last bar waits for the loop's start, then plays from there");
+        free(b);
+        mixer_free(m);
+        LOCK();
+        P.playing = 0;
+        P.loop = 0;
+        P.sess_play[0] = SESS_TIMELINE;
+        UNLOCK();
+        /* slot lengths in whole bars of the time signature where the clip starts */
+        static const int TSN[3] = {3, 7, 6}, TSD[3] = {4, 8, 8}, BARS[3] = {2, 1, 2};
+        static const double WANT[3] = {6, 3.5, 6};
+        int rounding = 1;
+        for (int k = 0; k < 3; k++) {
+            LOCK();
+            P.ts_num = TSN[k];
+            P.ts_den = TSD[k];
+            UNLOCK();
+            Clip c = P.clips[0];
+            c.start = 0;
+            c.length = meter_bar_frame(&P, BARS[k]);
+            slot_fill_clip(0, 0, &c, "x");
+            rounding &= fabs(P.slots[0][0].beats - WANT[k]) < 1e-9;
+        }
+        check(rounding, "a clip put in a slot keeps whole bars outside 4/4 (2 bars of 3/4, a bar of 7/8, 2 bars of 6/8)");
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
+    /* ---- the session: what plays (both, session only, timeline only), and copy, paste, import, drag */
+    {
+        new_project();
+        LOCK();
+        P.nclips = P.nnotes = P.nautos = P.nchanges = P.ndrums = 0;
+        P.bpm = 120;
+        P.ts_num = P.ts_den = 4;
+        P.playing = 0;
+        UNLOCK();
+        long bar = meter_bar_frame(&P, 1);
+        int lo = gen(WAVE_SINE, 57, 4, 0.5, 0, 0), hi = gen(WAVE_SINE, 69, 4, 0.5, 0, 0);
+        clip_add(lo, 0, 0, 0, bar);              /* the timeline: A3 on track 1, A4 on track 2 */
+        clip_add(hi, 1, 0, 0, bar);
+        sess_add_scene(NULL);
+        Clip c = P.clips[1];
+        slot_fill_clip(0, 0, &c, "A4");          /* track 1's slot plays A4 */
+        LOCK();
+        P.sess_play[0] = 0;
+        P.sess_at[0] = 0;
+        UNLOCK();
+        Mixer *m = mixer_new();
+        long n = bar / 2;
+        float *b = calloc((size_t)n * 2, sizeof(float));
+        double rms[SESS_MODES][2];
+        for (int md = 0; md < SESS_MODES; md++) {
+            P.sess_mode = md;
+            for (int t = 0; t < 2; t++) {
+                memset(b, 0, sizeof(float) * 2 * (size_t)n);
+                mixer_run(m, &P, bar / 4, 1, b, (int)n, t, 1);
+                rms[md][t] = test_rms(b, 0, n, 2);
+            }
+        }
+        P.sess_mode = SESS_BOTH;
+        check(rms[SESS_BOTH][0] > 0.01 && rms[SESS_BOTH][1] > 0.01 && rms[SESS_ONLY_SESSION][0] > 0.01 &&
+                  rms[SESS_ONLY_SESSION][1] < 1e-6 && rms[SESS_ONLY_TIMELINE][0] > 0.01 && rms[SESS_ONLY_TIMELINE][1] > 0.01,
+              "what plays: both (each track the slot or the timeline), the session alone, or the timeline alone");
+        free(b);
+        mixer_free(m);
+        LOCK();
+        P.sess_play[0] = SESS_TIMELINE;
+        UNLOCK();
+        frame();
+        history_check();
+        /* copy and paste */
+        slot_copy(0, 0);
+        sess_add_scene(NULL);
+        slot_paste(1, 1);
+        int same = P.slots[1][1].kind == SLOT_CLIP && P.slots[1][1].clip.sample == hi && fabs(P.slots[1][1].beats - 4) < 1e-9;
+        int nb = P.nclips;
+        LOCK();
+        P.playhead = 2 * bar;
+        UNLOCK();
+        key((SDL_Keysym){.sym = SDLK_v, .mod = KMOD_CTRL});   /* (the pointer's on the timeline: the copy goes there) */
+        int on_tl = P.nclips == nb + 1 && P.clips[nb].sample == hi && P.clips[nb].start == 2 * bar && P.clips[nb].track == 0;
+        check(same && on_tl, "a copied slot pastes into another slot, and onto the timeline with Ctrl+V");
+        sound_copy(CM_LIB, lo);
+        slot_paste(1, 0);
+        check(P.slots[1][0].kind == SLOT_CLIP && P.slots[1][0].clip.sample == lo && P.slots[1][0].clip.pattern == 0,
+              "a sound copied from the library pastes into a slot");
+        frame();
+        history_check();
+        for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+        session_view = 1;
+        frame();
+        SDL_Rect a = sess_cell_[1][0], z = sess_cell_[0][1];
+        sim(a.x + a.w / 2, a.y + a.h / 2, 0, 0, 0, 0);
+        key((SDL_Keysym){.sym = SDLK_c, .mod = KMOD_CTRL});
+        sim(z.x + z.w / 2, z.y + z.h / 2, 0, 0, 0, 0);
+        key((SDL_Keysym){.sym = SDLK_v, .mod = KMOD_CTRL});
+        check(P.slots[0][1].kind == SLOT_CLIP && P.slots[0][1].clip.sample == lo, "Ctrl+C and Ctrl+V with the pointer over slots");
+        frame();
+        sim_drag(z.x + z.w / 2, z.y + z.h / 2, a.x + a.w / 2, a.y + a.h / 2, 0);   /* drag onto a filled slot: moved there */
+        int moved = P.slots[0][1].kind == SLOT_EMPTY && P.slots[1][0].kind == SLOT_CLIP && P.slots[1][0].clip.sample == lo;
+        frame();
+        a = sess_cell_[1][0];
+        z = sess_cell_[0][1];
+        sim_drag(a.x + a.w / 2, a.y + a.h / 2, z.x + z.w / 2, z.y + z.h / 2, KMOD_CTRL);
+        check(moved && P.slots[1][0].kind == SLOT_CLIP && P.slots[0][1].kind == SLOT_CLIP && P.slots[0][1].clip.sample == lo,
+              "dragging a slot moves it; with Ctrl it copies it");
+        sess_menu_t = 0;
+        sess_menu_s = 1;
+        nb = P.nclips;
+        LOCK();
+        P.playhead = 3 * bar;
+        UNLOCK();
+        sess_action(SMA_TO_TIMELINE);
+        check(P.nclips == nb + 1 && P.clips[nb].start == 3 * bar && P.clips[nb].sample == lo, "a slot goes onto the timeline at the playhead");
+        char wp[1100], err[200];
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(wp, sizeof wp, "%s/tinydaw-slot-%u.wav", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        int wrote = sample_write_wav(&P.samples[hi], wp, err, sizeof err) == 0;
+        int ns = P.nsamples;
+        slot_import_path(1, 1, wp);
+        remove(wp);
+        check(wrote && P.nsamples == ns + 1 && P.slots[1][1].kind == SLOT_CLIP && P.slots[1][1].clip.sample == ns,
+              "a sound file imported into a slot goes into the library and the slot");
+        frame();
+        history_check();
+        session_view = 0;
+        LOCK();
+        P.sess_play[0] = 0;
+        P.sess_at[0] = 0;
+        UNLOCK();
+        frame();
+        frame();
+        LOCK();
+        P.sess_play[0] = SESS_TIMELINE;
+        UNLOCK();
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
     /* ---- the Singer's pitch curve */
     {
         VocalSpec t;
@@ -20669,7 +21301,10 @@ static void frame(void)
         } else {
             track_headers();
             if (session_view) session_grid();
-            else timeline();
+            else {
+                timeline();
+                session_lane_marks();
+            }
         }
         rail();
         if (theory_open) theory_pane();
@@ -20917,7 +21552,7 @@ int main(int argc, char **argv)
     const char *export_path = NULL, *shot = NULL, *save_path = NULL;
     int demo = 0, test = 0, format_given = 0;
     const char *beat_arg = NULL;
-    int has_parts = 0;
+    int has_parts = 0, want_scenes = 0;
     project_init(&P);
     export_defaults(&EXO);
 
@@ -20929,6 +21564,7 @@ int main(int argc, char **argv)
         "                         \"bass,style=Walking,busy=0.5,seed=3,sound=Upright bass,bars=5-13,track=Bass\"\n"
         "                         (chords, bass or melody; also octave=-1..1, gain=dB, bend=vibrato...)\n"
         "  --fills SPEC           drum fills, like \"style=Build,len=0.6,where=sections,track=Drums\"\n"
+        "  --scenes               fill the session view: a scene for each section\n"
         "                         (where: sections, 4 or 8 bars)\n"
         "  --project-rate HZ      engine rate: 44100 48000 88200 96000 176400 192000\n"
         "  --version              print the version\n"
@@ -20954,6 +21590,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--selftest")) test = 1;
         else if (!strcmp(a, "--beat")) beat_arg = v;
         else if (!strcmp(a, "--part") || !strcmp(a, "--fills")) has_parts = 1;
+        else if (!strcmp(a, "--scenes")) want_scenes = 1;
         else if (!strcmp(a, "--export")) export_path = v;
         else if (!strcmp(a, "--save")) save_path = v;
         else if (!strcmp(a, "--screenshot")) shot = v;
@@ -21033,6 +21670,15 @@ int main(int argc, char **argv)
             if (cli_spec(argv[i + 1], !strcmp(argv[i], "--fills")) != 0) return 1;
             i++;
         }
+    if (want_scenes) {                  /* the session view: a scene for each section */
+        if (!P.nsections) {
+            fprintf(stderr, "tinydaw: --scenes: the project has no sections to make scenes from\n");
+            return 1;
+        }
+        P.nscenes = 0;
+        sess_from_sections();
+        printf("%s\n", status_msg);
+    }
     for (int i = 1; i < argc; i++) {
         int takes = 0;
         for (size_t k = 0; k < sizeof with_value / sizeof *with_value; k++) takes |= !strcmp(argv[i], with_value[k]);
@@ -21224,8 +21870,8 @@ int main(int argc, char **argv)
             browse_tab = atoi(getenv("TINYDAW_SHOT_BROWSE"));
             browse_scan();
         }
-        if (getenv("TINYDAW_SHOT_SESSION")) {    /* the session view, scenes from sections, two slots playing */
-            session_view = 1;
+        if (getenv("TINYDAW_SHOT_SESSION")) {    /* scenes from sections, slots playing: 1 the session view, 2 the timeline */
+            session_view = atoi(getenv("TINYDAW_SHOT_SESSION")) != 2;
             for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
             if (!P.nscenes) sess_from_sections();
             P.playing = 1;
@@ -21517,7 +22163,7 @@ int main(int argc, char **argv)
                 if (n > 5 && !strcmp(e.drop.file + n - 5, ".tdaw")) request(ACT_OPEN_PATH, e.drop.file);
                 else if ((n > 4 && !strcasecmp(e.drop.file + n - 4, ".mid")) || (n > 5 && !strcasecmp(e.drop.file + n - 5, ".midi")))
                     midi_import(e.drop.file);
-                else import_file(e.drop.file);
+                else if (!slot_drop_file(e.drop.file)) import_file(e.drop.file);   /* on a slot: into it */
                 SDL_free(e.drop.file);
                 break;
             }

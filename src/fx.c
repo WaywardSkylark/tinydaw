@@ -486,6 +486,7 @@ void session_reset(Project *p)
         p->sess_play[t] = SESS_TIMELINE;
         p->sess_q[t] = SESS_NONE;
         p->sess_at[t] = p->sess_q_at[t] = 0;
+        p->sess_q_wrap[t] = 0;
     }
 }
 
@@ -534,13 +535,14 @@ static void add_session(Mixer *m, const Project *p, int t, long start, int n)
 
 static void add_clips(Mixer *m, const Project *p, long start, int n, int live)
 {
-    for (int c = 0; c < p->nclips; c++) {
+    int session = live && p->sess_mode != SESS_ONLY_TIMELINE, timeline = !live || p->sess_mode != SESS_ONLY_SESSION;
+    for (int c = 0; c < p->nclips && timeline; c++) {
         const Clip *cl = &p->clips[c];
         if (cl->track < 0 || cl->track >= p->ntracks) continue;
-        if (live && p->sess_play[cl->track] != SESS_TIMELINE) continue;   /* the track is playing the session */
+        if (session && p->sess_play[cl->track] != SESS_TIMELINE) continue;   /* the track is playing the session */
         add_clip(m, p, cl, start, n);
     }
-    for (int t = 0; live && t < p->ntracks; t++)
+    for (int t = 0; session && t < p->ntracks; t++)
         if (p->sess_play[t] >= 0) add_session(m, p, t, start, n);
 }
 
@@ -770,12 +772,18 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
         float *o = out + 2 * done;
         for (int t = 0; t < p->ntracks; t++) memset(m->trk[t], 0, sizeof(float) * 2 * n);
         if (clips && voices)                     /* live: queued launches switch on time */
-            for (int t = 0; t < p->ntracks; t++)
-                if (p->sess_q[t] != SESS_NONE && p->sess_q_at[t] < start + done + n) {
-                    p->sess_play[t] = p->sess_q[t];
-                    p->sess_at[t] = p->sess_q_at[t];
-                    p->sess_q[t] = SESS_NONE;
-                }
+            for (int t = 0; t < p->ntracks; t++) {
+                if (p->sess_q[t] == SESS_NONE) continue;
+                long q = p->sess_q_at[t], b0 = start + done, b1 = b0 + n;
+                /* one waiting for the loop to come round switches only in the block that holds the loop's
+                 * start (the blocks before the wrap are past it); any other switches once its time comes */
+                int fire = p->sess_q_wrap[t] ? q >= b0 && q < b1 : q < b1;
+                if (!fire) continue;
+                p->sess_play[t] = p->sess_q[t];
+                p->sess_at[t] = q;
+                p->sess_q[t] = SESS_NONE;
+                p->sess_q_wrap[t] = 0;
+            }
         if (clips) add_clips(m, p, start + done, n, voices);
         if (voices) add_voices(m, p, n);
 
@@ -795,7 +803,7 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
         for (int t = 0; t < p->ntracks; t++) {
             Track eff;                           /* the track as its automation has it now */
             long when = start + done;
-            if (voices && clips && p->sess_play[t] >= 0 && p->sess_play[t] < p->nscenes &&
+            if (voices && clips && p->sess_mode != SESS_ONLY_TIMELINE && p->sess_play[t] >= 0 && p->sess_play[t] < p->nscenes &&
                 p->slots[t][p->sess_play[t]].kind == SLOT_RANGE) {   /* looping the timeline: its automation too */
                 const Slot *sl = &p->slots[t][p->sess_play[t]];
                 long L = slot_frames(p, sl, p->sess_at[t]), into = when - p->sess_at[t];

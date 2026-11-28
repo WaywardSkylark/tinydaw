@@ -353,6 +353,9 @@ typedef struct {
     int bar;                /* SLOT_RANGE: the track's timeline from this bar (0-based), `beats` long */
 } Slot;
 enum { SESS_TIMELINE = -1, SESS_STOPPED = -2, SESS_NONE = -3 };
+/* what plays live: tracks with a launched slot play it and the rest the timeline (both), only the
+ * launched slots (the timeline silent), or only the timeline (the session set aside, its slots kept) */
+enum { SESS_BOTH, SESS_ONLY_SESSION, SESS_ONLY_TIMELINE, SESS_MODES };
 
 /* The project. The audio thread reads it; the UI changes it only while holding the
  * audio device lock (see LOCK/UNLOCK in main.c). */
@@ -403,6 +406,8 @@ typedef struct {
      * and what it switches to at sess_q_at (SESS_NONE: nothing queued). The audio thread makes the switch. */
     int sess_play[MAX_TRACKS], sess_q[MAX_TRACKS];
     long sess_at[MAX_TRACKS], sess_q_at[MAX_TRACKS];
+    int sess_q_wrap[MAX_TRACKS];            /* queued for the loop's start: switch only once the loop has gone round */
+    int sess_mode;                          /* SESS_BOTH, SESS_ONLY_SESSION or SESS_ONLY_TIMELINE (not saved) */
     Voice voices[MAX_VOICES];
     float bend;             /* live pitch wheel, -1..1 (not saved) */
     float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */

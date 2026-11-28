@@ -1,79 +1,82 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Techno: Concrete Hours
 rate 48000
 bpm 130
 a4 440
-master 0.8
+master 0.800000012
+change 24 133 4 4
 loop 1 2126769 2473235
 playhead 0
-fx 5 0.5 0.4 0.6 1 0.85 0.3 0.75 0 140 2
 instrument 7 43 4
-change 24 133 4 4
-key 7 1
-harmony 32 32 7 1 -1
-harmony 64 32 7 1 -1
-harmony 96 32 7 1 -1
+fx 5 0.5 0.400000006 0.600000024 1 0.850000024 0.300000012 0.75 0 140 2
 dynamics 1 -22 4 6 110 7 1 -1
-track 0.9 0 0 Kick
-trackfx 0 0 1200 0.2 0 0 0 0.3 0 0 0
-track 0.65 0 0 Drums
-trackfx 0 0 1200 0.2 0 -1 2 0 0 0.15 0
-track 0.7 0 0 Rumble
-trackfx 0 1 300 0.2 0 0 0 0.4 0 0.2 0.8
+track 0.899999976 0 0 Kick
+trackfx 0 0 1200 0.200000003 0 0 0 0.300000012 0 0 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.649999976 0 0 Drums
+trackfx 0 0 1200 0.200000003 0 -1 2 0 0 0.150000006 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.699999988 0 0 Rumble
+trackfx 0 1 300 0.200000003 0 0 0 0.400000006 0 0.200000003 0.800000012
+trackdyn 1 0 -18 3 10 120 0
 track 0.5 0 0 Stab
-trackfx 0.2 2 400 0.2 0 0 0 0 0.45 0.4 0.4
+trackfx 0.200000003 2 400 0.200000003 0 0 0 0 0.449999988 0.400000006 0.400000006
+trackdyn 1 0 -18 3 10 120 0
 track 0.5 0 0 Acid
-trackfx -0.15 1 600 0.75 0 0 0 0.5 0.25 0 0.5
-track 0.6 0 0 Robot
-trackfx 0 0 1200 0.2 0 0 0 0 0.5 0.4 0
+trackfx -0.150000006 1 600 0.75 0 0 0 0.5 0.25 0 0.5
+trackdyn 1 0 -18 3 10 120 0
+track 0.600000024 0 0 Robot
+trackfx 0 0 1200 0.200000003 0 0 0 0 0.5 0.400000006 0
+trackdyn 1 0 -18 3 10 120 0
 track 0.5 0 0 FX
-trackfx 0 0 1200 0.2 0 0 0 0 0 0.6 0
+trackfx 0 0 1200 0.200000003 0 0 0 0 0 0.600000024 0
+trackdyn 1 0 -18 3 10 120 0
 sample synth 24000 Industrial kick
 synth 33 0.5 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch decay=0.35 drive=0.8 noise=0.15 noise_decay=0.01 pitch_drop=36 pitch_time=0.04 release=0.05 wave=3
+patch wave=3 noise=0.15 noise_decay=0.01 pitch_drop=36 pitch_time=0.04 decay=0.35 release=0.05 drive=0.8
 layers 3 2 8 9 0 10 11 0 0 12 0 0 0 0
 end
 sample synth 21600 Clap
 synth 60 0.45 0.8 440 0.45 0.5 0.6 0.6 0.5
-patch bursts=4 cutoff=1400 decay=0.25 filter=3 noise=1 noise_decay=0.12 noosc=1 release=0.1 reso=0.3
+patch noosc=1 bursts=4 filter=3 noise=1 noise_decay=0.12 cutoff=1400 reso=0.3 decay=0.25 release=0.1
 layers 3 2 13 14 1 15 16 1 1 17 1 1 1 1
 end
 sample synth 4800 Hat
 synth 60 0.1 0.8 440 0.4 0.4 0.5 0.6 0.5
-patch cutoff=8000 decay=0.045 filter=2 noise=1 noosc=1 release=0.02 reso=0.25
+patch noosc=1 filter=2 noise=1 cutoff=8000 reso=0.25 decay=0.045 release=0.02
 layers 3 2 18 19 2 20 21 2 2 22 2 2 2 2
 end
 sample synth 14400 Open hat
 synth 60 0.3 0.8 440 0.45 0.5 0.5 0.5 0.5
-patch cutoff=7500 decay=0.28 filter=2 noise=1 noosc=1 release=0.05 reso=0.2
+patch noosc=1 filter=2 noise=1 cutoff=7500 reso=0.2 decay=0.28 release=0.05
 layers 3 2 23 24 3 25 26 3 3 27 3 3 3 3
 end
 sample synth 7200 Rim
 synth 76 0.15 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch cutoff=1800 decay=0.04 filter=3 noise=0.4 noise_decay=0.015 release=0.02 reso=0.3 wave=2
+patch wave=2 filter=3 noise=0.4 noise_decay=0.015 cutoff=1800 reso=0.3 decay=0.04 release=0.02
 layers 3 2 28 29 4 30 31 4 4 32 4 4 4 4
 end
 sample synth 24000 Rumble
 synth 33 0.5 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.002 cutoff=280 decay=0.45 drive=0.65 filter=1 noise=0.05 release=0.25 reso=0.3 sustain=0.3 wave=3
+patch wave=3 filter=1 noise=0.05 cutoff=280 reso=0.3 attack=0.002 decay=0.45 sustain=0.3 release=0.25 drive=0.65
 layers 3 2 33 34 5 35 36 5 5 37 5 5 5 5
 end
 sample synth 28800 Hypnotic stab
 synth 48 0.6 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.001 cutoff=850 decay=0.2 fdecay=0.12 fenv=2.5 filter=1 pw=0.3 release=0.1 reso=0.6 wave=1
+patch wave=1 filter=1 pw=0.3 cutoff=850 reso=0.6 fenv=2.5 fdecay=0.12 attack=0.001 decay=0.2 release=0.1
 layers 3 2 38 39 6 40 41 6 6 42 6 6 6 6
 end
 sample synth 19200 Acid line
 synth 36 0.4 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.002 cutoff=450 decay=0.3 drive=0.4 fdecay=0.18 fenv=3 filter=1 release=0.05 reso=0.85 sustain=0.5
+patch filter=1 cutoff=450 reso=0.85 fenv=3 fdecay=0.18 attack=0.002 decay=0.3 sustain=0.5 release=0.05 drive=0.4
 layers 3 2 43 44 7 45 46 7 7 47 7 7 7 7
 end
 sample layer 24000 Industrial kick v1 r1
 layer 0 0 3 0
 hidden
 end
-sample layer 24000 Industrial kick v1 r2
+sample layer 23931 Industrial kick v1 r2
 layer 0 0 3 1
 hidden
 end
@@ -81,11 +84,11 @@ sample layer 24000 Industrial kick v2 r1
 layer 0 1 3 0
 hidden
 end
-sample layer 24000 Industrial kick v2 r2
+sample layer 23931 Industrial kick v2 r2
 layer 0 1 3 1
 hidden
 end
-sample layer 24000 Industrial kick v3 r2
+sample layer 23931 Industrial kick v3 r2
 layer 0 2 3 1
 hidden
 end
@@ -93,7 +96,7 @@ sample layer 21600 Clap v1 r1
 layer 1 0 3 0
 hidden
 end
-sample layer 21600 Clap v1 r2
+sample layer 21538 Clap v1 r2
 layer 1 0 3 1
 hidden
 end
@@ -101,11 +104,11 @@ sample layer 21600 Clap v2 r1
 layer 1 1 3 0
 hidden
 end
-sample layer 21600 Clap v2 r2
+sample layer 21538 Clap v2 r2
 layer 1 1 3 1
 hidden
 end
-sample layer 21600 Clap v3 r2
+sample layer 21538 Clap v3 r2
 layer 1 2 3 1
 hidden
 end
@@ -113,7 +116,7 @@ sample layer 4800 Hat v1 r1
 layer 2 0 3 0
 hidden
 end
-sample layer 4800 Hat v1 r2
+sample layer 4787 Hat v1 r2
 layer 2 0 3 1
 hidden
 end
@@ -121,11 +124,11 @@ sample layer 4800 Hat v2 r1
 layer 2 1 3 0
 hidden
 end
-sample layer 4800 Hat v2 r2
+sample layer 4787 Hat v2 r2
 layer 2 1 3 1
 hidden
 end
-sample layer 4800 Hat v3 r2
+sample layer 4787 Hat v3 r2
 layer 2 2 3 1
 hidden
 end
@@ -133,7 +136,7 @@ sample layer 14400 Open hat v1 r1
 layer 3 0 3 0
 hidden
 end
-sample layer 14400 Open hat v1 r2
+sample layer 14359 Open hat v1 r2
 layer 3 0 3 1
 hidden
 end
@@ -141,11 +144,11 @@ sample layer 14400 Open hat v2 r1
 layer 3 1 3 0
 hidden
 end
-sample layer 14400 Open hat v2 r2
+sample layer 14359 Open hat v2 r2
 layer 3 1 3 1
 hidden
 end
-sample layer 14400 Open hat v3 r2
+sample layer 14359 Open hat v3 r2
 layer 3 2 3 1
 hidden
 end
@@ -153,7 +156,7 @@ sample layer 7200 Rim v1 r1
 layer 4 0 3 0
 hidden
 end
-sample layer 7200 Rim v1 r2
+sample layer 7180 Rim v1 r2
 layer 4 0 3 1
 hidden
 end
@@ -161,11 +164,11 @@ sample layer 7200 Rim v2 r1
 layer 4 1 3 0
 hidden
 end
-sample layer 7200 Rim v2 r2
+sample layer 7180 Rim v2 r2
 layer 4 1 3 1
 hidden
 end
-sample layer 7200 Rim v3 r2
+sample layer 7180 Rim v3 r2
 layer 4 2 3 1
 hidden
 end
@@ -173,7 +176,7 @@ sample layer 24000 Rumble v1 r1
 layer 5 0 3 0
 hidden
 end
-sample layer 24000 Rumble v1 r2
+sample layer 23931 Rumble v1 r2
 layer 5 0 3 1
 hidden
 end
@@ -181,11 +184,11 @@ sample layer 24000 Rumble v2 r1
 layer 5 1 3 0
 hidden
 end
-sample layer 24000 Rumble v2 r2
+sample layer 23931 Rumble v2 r2
 layer 5 1 3 1
 hidden
 end
-sample layer 24000 Rumble v3 r2
+sample layer 23931 Rumble v3 r2
 layer 5 2 3 1
 hidden
 end
@@ -193,7 +196,7 @@ sample layer 28800 Hypnotic stab v1 r1
 layer 6 0 3 0
 hidden
 end
-sample layer 28800 Hypnotic stab v1 r2
+sample layer 28717 Hypnotic stab v1 r2
 layer 6 0 3 1
 hidden
 end
@@ -201,11 +204,11 @@ sample layer 28800 Hypnotic stab v2 r1
 layer 6 1 3 0
 hidden
 end
-sample layer 28800 Hypnotic stab v2 r2
+sample layer 28717 Hypnotic stab v2 r2
 layer 6 1 3 1
 hidden
 end
-sample layer 28800 Hypnotic stab v3 r2
+sample layer 28717 Hypnotic stab v3 r2
 layer 6 2 3 1
 hidden
 end
@@ -213,7 +216,7 @@ sample layer 19200 Acid line v1 r1
 layer 7 0 3 0
 hidden
 end
-sample layer 19200 Acid line v1 r2
+sample layer 19145 Acid line v1 r2
 layer 7 0 3 1
 hidden
 end
@@ -221,21 +224,21 @@ sample layer 19200 Acid line v2 r1
 layer 7 1 3 0
 hidden
 end
-sample layer 19200 Acid line v2 r2
+sample layer 19145 Acid line v2 r2
 layer 7 1 3 1
 hidden
 end
-sample layer 19200 Acid line v3 r2
+sample layer 19145 Acid line v3 r2
 layer 7 2 3 1
 hidden
 end
 sample synth 96000 Laser sweep
 synth 48 2 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.3 cutoff=200 detune=10 filter=1 fsweep=5 release=0.3 reso=0.8 sustain=1 voices=3 width=0.6
+patch voices=3 filter=1 detune=10 width=0.6 cutoff=200 reso=0.8 fsweep=5 attack=0.3 sustain=1 release=0.3
 end
 sample synth 144000 Impact
 synth 28 3 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch cutoff=3000 decay=2.5 drive=0.5 filter=1 fsweep=-3 noise=0.6 noise_decay=0.3 pitch_drop=24 pitch_time=0.15 release=0.4 wave=3
+patch wave=3 filter=1 noise=0.6 noise_decay=0.3 pitch_drop=24 pitch_time=0.15 cutoff=3000 fsweep=-3 decay=2.5 release=0.4 drive=0.5
 end
 sample vocal 95076 Sung: keep moving
 vocal 0 0 0 0 0.8 440 130 6 60 0.5 2
@@ -245,20 +248,19 @@ vnote 55 0.5 0.5
 vnote 58 1 1.5
 vnote 55 3 0.75
 vbend 0 0
-vbend 0.4 0
+vbend 0.400000006 0
 vbend 0.5 -5
-vbend 0.95 0
+vbend 0.949999988 0
 vbend 1 0
 vbend 2 0
-vbend 2.4 3
+vbend 2.4000001 3
 vbend 3 0
-vbend 3.4 0
-vbend 3.7 -12
+vbend 3.4000001 0
+vbend 3.70000005 -12
 end
-section 0 8 Intro
-section 8 8 Groove
-section 16 8 Breakdown
-section 24 8 Peak
+sample file 24000 saw A2 1b
+path /home/ap/Music/tinydaw/Saved sounds/saw A2 1b.wav
+end
 drum 1 0 16 1 0 Four to the floor
 drow 0 0 1 127:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100
 drum 2 1 16 2 0 Intro hats
@@ -276,6 +278,38 @@ drow 3 4 1 100:70 0:100 0:100 100:50 0:100 0:100 100:70 0:100 0:100 100:50 0:100
 drum 5 1 16 2 0 Breakdown
 drow 0 2 1 62:100 0:100 35:40 0:100 62:100 0:100 35:40 0:100 62:100 0:100 35:40 0:100 62:100 0:100 35:40 0:100
 drow 1 4 1 100:60 0:100 0:100 0:100 0:100 0:100 100:60 0:100 0:100 0:100 0:100 0:100 100:60 0:100 0:100 0:100
+section 0 8 Intro
+section 8 8 Groove
+section 16 8 Breakdown
+section 24 8 Peak
+scene 0 Intro
+scene 1 Groove
+scene 2 Breakdown
+scene 3 Peak
+slot 0 0 2 31.9999965 0 0 0 0 0 0 0 0 Intro
+slot 0 1 2 31.9999965 8 0 0 0 0 0 0 0 Groove
+slot 0 3 2 32.0000307 24 0 0 0 0 0 0 0 Peak
+slot 1 0 2 31.9999965 0 0 0 0 0 0 0 0 Intro
+slot 1 1 2 31.9999965 8 0 0 0 0 0 0 0 Groove
+slot 1 2 2 31.9999965 16 0 0 0 0 0 0 0 Breakdown
+slot 1 3 2 32.0000307 24 0 0 0 0 0 0 0 Peak
+slot 2 1 2 31.9999965 8 0 0 0 0 0 0 0 Groove
+slot 2 3 2 32.0000307 24 0 0 0 0 0 0 0 Peak
+slot 3 1 2 31.9999965 8 0 0 0 0 0 0 0 Groove
+slot 3 2 2 31.9999965 16 0 0 0 0 0 0 0 Breakdown
+slot 3 3 2 32.0000307 24 0 0 0 0 0 0 0 Peak
+slot 4 2 2 31.9999965 16 0 0 0 0 0 0 0 Breakdown
+slot 4 3 2 32.0000307 24 0 0 0 0 0 0 0 Peak
+slot 5 1 2 31.9999965 8 0 0 0 0 0 0 0 Groove
+slot 5 2 2 31.9999965 16 0 0 0 0 0 0 0 Breakdown
+slot 5 3 2 32.0000307 24 0 0 0 0 0 0 0 Peak
+slot 6 1 2 31.9999965 8 0 0 0 0 0 0 0 Groove
+slot 6 2 2 31.9999965 16 0 0 0 0 0 0 0 Breakdown
+slot 6 3 2 32.0000307 24 0 0 0 0 0 0 0 Peak
+key 7 1
+harmony 32 32 7 1 -1
+harmony 64 32 7 1 -1
+harmony 96 32 7 1 -1
 clip 0 0 0 0 1417846 0 0 0 -1 60
 clip 2 1 0 0 708923 0 0 0 -2 60
 clip 1 1 708923 0 708923 0 0 0 -3 60
@@ -1145,21 +1179,26 @@ note 30 46 151579 4764 0.5
 note 30 43 156993 4764 0.5
 note 30 58 162406 4764 1
 note 30 41 167820 4764 0.5
-auto 3 2 708923 0.39203042
-auto 3 2 1417846 0.625020421
-auto 4 2 1417846 0.365636671
-auto 4 2 2038154 0.592717083
-auto 4 2 2126769 0.492373752
-auto 4 2 2646468 0.799313336
-auto 4 2 2819702 0.534019997
-pad 0 0 0 0.9 0 0 0
-pad 1 1 0 0.8 0 1 0
-pad 2 2 0 0.7 0 1 0
-pad 3 3 0 0.7 0 1 0
-pad 4 4 0 0.8 0 1 0
-pad 5 5 0 0.9 0 2 0
-pad 6 6 0 0.8 0 3 0
-pad 7 7 0 0.8 0 4 0
-pad 8 50 0 0.8 0 5 0
-pad 9 48 0 0.8 0 6 0
-pad 10 49 0 0.9 0 6 0
+auto 3 2 708923 0.39203
+auto 3 2 1417846 0.62502
+auto 4 2 1417846 0.365637
+auto 4 2 2038154 0.592717
+auto 4 2 2126769 0.492374
+auto 4 2 2646468 0.799313
+auto 4 2 2819702 0.53402
+pad 0 0 0 0.899999976 0 0 0
+pad 1 1 0 0.800000012 0 1 0
+pad 2 2 0 0.699999988 0 1 0
+pad 3 3 0 0.699999988 0 1 0
+pad 4 4 0 0.800000012 0 1 0
+pad 5 5 0 0.899999976 0 2 0
+pad 6 6 0 0.800000012 0 3 0
+pad 7 7 0 0.800000012 0 4 0
+pad 8 50 0 0.800000012 0 5 0
+pad 9 48 0 0.800000012 0 6 0
+pad 10 49 0 0.899999976 0 6 0
+pad 11 -1 0 0.800000012 0 0 0
+pad 12 -1 0 0.800000012 0 0 0
+pad 13 -1 0 0.800000012 0 0 0
+pad 14 -1 0 0.800000012 0 0 0
+pad 15 -1 0 0.800000012 0 0 0

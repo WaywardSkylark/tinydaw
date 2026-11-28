@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Jazz: Blue Lamp
 rate 48000
 bpm 132
@@ -233,6 +233,29 @@ section 4 8 Head
 section 12 8 Solo
 section 20 8 Head
 section 28 8 Out (Db)
+scene 0 Intro
+scene 1 Head
+scene 2 Solo
+scene 3 Head
+scene 4 Out (Db)
+slot 0 0 2 16.0000042 0 0 0 0 0 0 0 0 Intro
+slot 0 1 2 32.0000083 4 0 0 0 0 0 0 0 Head
+slot 0 2 2 32.0000083 12 0 0 0 0 0 0 0 Solo
+slot 0 3 2 31.9999625 20 0 0 0 0 0 0 0 Head
+slot 0 4 2 32.0000083 28 0 0 0 0 0 0 0 Out (Db)
+slot 1 1 2 32.0000083 4 0 0 0 0 0 0 0 Head
+slot 1 2 2 32.0000083 12 0 0 0 0 0 0 0 Solo
+slot 1 3 2 31.9999625 20 0 0 0 0 0 0 0 Head
+slot 1 4 2 32.0000083 28 0 0 0 0 0 0 0 Out (Db)
+slot 2 0 2 16.0000042 0 0 0 0 0 0 0 0 Intro
+slot 2 1 2 32.0000083 4 0 0 0 0 0 0 0 Head
+slot 2 2 2 32.0000083 12 0 0 0 0 0 0 0 Solo
+slot 2 3 2 31.9999625 20 0 0 0 0 0 0 0 Head
+slot 2 4 2 32.0000083 28 0 0 0 0 0 0 0 Out (Db)
+slot 3 1 2 32.0000083 4 0 0 0 0 0 0 0 Head
+slot 3 2 2 32.0000083 12 0 0 0 0 0 0 0 Solo
+slot 3 3 2 31.9999625 20 0 0 0 0 0 0 0 Head
+slot 3 4 2 32.0000083 28 0 0 0 0 0 0 0 Out (Db)
 key 10 0
 keychange 28 1 0
 harmony 0 4 10 6 -1

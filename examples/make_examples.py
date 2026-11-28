@@ -1721,11 +1721,11 @@ if __name__ == "__main__":
                        ("afrobeats-golden-hour", afrobeats())):
         path = os.path.join(HERE, name + ".tdaw")
         song.write(path)
-        if song.cli:                                 # the parts and fills, written by tinydaw from the chord track
-            r = subprocess.run([tinydaw, path] + song.cli + ["--save", path], capture_output=True, text=True)
-            if r.returncode:
-                raise SystemExit("%s: %s" % (name, r.stderr.strip()))
-            lines = open(path).read().split("\n")       # tinydaw's save has no title: put it back
-            lines = [ln for ln in lines if not ln.startswith(("title ", "saved-by "))]
-            lines[1:1] = ["saved-by tinydaw %s (examples/make_examples.py)" % VERSION, "title %s" % song.title]
-            open(path, "w").write("\n".join(lines))
+        # tinydaw writes the parts and fills from the chord track, and a session scene for each section
+        r = subprocess.run([tinydaw, path] + song.cli + ["--scenes", "--save", path], capture_output=True, text=True)
+        if r.returncode:
+            raise SystemExit("%s: %s" % (name, r.stderr.strip()))
+        lines = open(path).read().split("\n")       # tinydaw's save has no title: put it back
+        lines = [ln for ln in lines if not ln.startswith(("title ", "saved-by "))]
+        lines[1:1] = ["saved-by tinydaw %s (examples/make_examples.py)" % VERSION, "title %s" % song.title]
+        open(path, "w").write("\n".join(lines))

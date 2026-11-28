@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Experimental: Tidal Clockwork
 rate 48000
 bpm 108
@@ -213,6 +213,32 @@ section 0 8 Clockwork (5/4)
 section 8 8 Tide (7/8)
 section 16 8 Waltz (6/8)
 section 24 8 Home
+scene 0 Clockwork (5/4)
+scene 1 Tide (7/8)
+scene 2 Waltz (6/8)
+scene 3 Home
+slot 0 0 2 40.0000125 0 0 0 0 0 0 0 0 Clockwork (5/4)
+slot 0 1 2 27.999975 8 0 0 0 0 0 0 0 Tide (7/8)
+slot 0 2 2 24 16 0 0 0 0 0 0 0 Waltz (6/8)
+slot 0 3 2 32.000025 24 0 0 0 0 0 0 0 Home
+slot 1 0 2 40.0000125 0 0 0 0 0 0 0 0 Clockwork (5/4)
+slot 1 1 2 27.999975 8 0 0 0 0 0 0 0 Tide (7/8)
+slot 1 2 2 24 16 0 0 0 0 0 0 0 Waltz (6/8)
+slot 1 3 2 32.000025 24 0 0 0 0 0 0 0 Home
+slot 2 0 2 40.0000125 0 0 0 0 0 0 0 0 Clockwork (5/4)
+slot 2 1 2 27.999975 8 0 0 0 0 0 0 0 Tide (7/8)
+slot 2 2 2 24 16 0 0 0 0 0 0 0 Waltz (6/8)
+slot 2 3 2 32.000025 24 0 0 0 0 0 0 0 Home
+slot 3 1 2 27.999975 8 0 0 0 0 0 0 0 Tide (7/8)
+slot 3 2 2 24 16 0 0 0 0 0 0 0 Waltz (6/8)
+slot 3 3 2 32.000025 24 0 0 0 0 0 0 0 Home
+slot 4 0 2 40.0000125 0 0 0 0 0 0 0 0 Clockwork (5/4)
+slot 4 1 2 27.999975 8 0 0 0 0 0 0 0 Tide (7/8)
+slot 4 2 2 24 16 0 0 0 0 0 0 0 Waltz (6/8)
+slot 4 3 2 32.000025 24 0 0 0 0 0 0 0 Home
+slot 5 0 2 40.0000125 0 0 0 0 0 0 0 0 Clockwork (5/4)
+slot 5 1 2 27.999975 8 0 0 0 0 0 0 0 Tide (7/8)
+slot 5 2 2 24 16 0 0 0 0 0 0 0 Waltz (6/8)
 key 2 4
 keychange 8 6 6
 keychange 24 2 4

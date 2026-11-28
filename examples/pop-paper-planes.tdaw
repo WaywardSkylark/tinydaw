@@ -1,110 +1,87 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Pop: Paper Planes
 rate 48000
 bpm 118
 a4 440
-master 0.8
+master 0.800000012
 loop 1 1171525 1952542
 playhead 0
-fx 3 0.35 0.6 0.55 1 0.7 0.4 0.75 0 170 2
 instrument 4 60 3
-harmony 0 4 0 0 -1
-harmony 4 4 7 0 -1
-harmony 8 4 9 1 -1
-harmony 12 4 5 0 -1
-harmony 16 4 0 0 -1
-harmony 20 4 7 0 -1
-harmony 24 4 9 1 -1
-harmony 28 4 5 0 -1
-harmony 32 4 0 0 -1
-harmony 36 4 7 0 -1
-harmony 40 4 9 1 -1
-harmony 44 4 5 0 -1
-harmony 48 4 0 0 -1
-harmony 52 4 7 0 -1
-harmony 56 4 9 1 -1
-harmony 60 4 5 0 -1
-harmony 64 4 0 0 -1
-harmony 68 4 7 0 -1
-harmony 72 4 9 1 -1
-harmony 76 4 5 0 -1
-harmony 80 4 0 0 -1
-harmony 84 4 7 0 -1
-harmony 88 4 9 1 -1
-harmony 92 4 5 0 -1
-harmony 96 4 0 0 -1
-harmony 100 4 7 0 -1
-harmony 104 4 9 1 -1
-harmony 108 4 5 0 -1
-harmony 112 4 0 0 -1
-harmony 116 4 7 0 -1
-harmony 120 4 9 1 -1
-harmony 124 4 5 0 -1
+fx 3 0.349999994 0.600000024 0.550000012 1 0.699999988 0.400000006 0.75 0 170 2
 dynamics 1 -18 2.5 15 180 3 1 -1
-track 0.85 0 0 Kick
-trackfx 0 0 1200 0.2 0 0 0 0 0 0 0
-track 0.65 0 0 Drums
-trackfx 0 0 1200 0.2 0 0 1 0 0 0.2 0
-track 0.7 0 0 Bass
-trackfx 0 1 1200 0.2 0 0 0 0 0 0 0.5
-track 0.6 0 0 Piano
-trackfx -0.15 0 1200 0.2 -2 0 1 0 0 0.3 0
-track 0.45 0 0 Pluck
-trackfx 0.3 0 1200 0.2 0 0 0 0 0.4 0.25 0.3
-track 0.45 0 0 Supersaw
-trackfx 0 1 6000 0.2 0 0 0 0 0 0.4 0.6
-track 0.85 0 0 Vocal
-trackfx 0 0 1200 0.2 0 0 0 0 0.15 0.3 0
+track 0.850000024 0 0 Kick
+trackfx 0 0 1200 0.200000003 0 0 0 0 0 0 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.649999976 0 0 Drums
+trackfx 0 0 1200 0.200000003 0 0 1 0 0 0.200000003 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.699999988 0 0 Bass
+trackfx 0 1 1200 0.200000003 0 0 0 0 0 0 0.5
+trackdyn 1 0 -18 3 10 120 0
+track 0.600000024 0 0 Piano
+trackfx -0.150000006 0 1200 0.200000003 -2 0 1 0 0 0.300000012 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.449999988 0 0 Pluck
+trackfx 0.300000012 0 1200 0.200000003 0 0 0 0 0.400000006 0.25 0.300000012
+trackdyn 1 0 -18 3 10 120 0
+track 0.449999988 0 0 Supersaw
+trackfx 0 1 6000 0.200000003 0 0 0 0 0 0.400000006 0.600000024
+trackdyn 1 0 -18 3 10 120 0
+track 0.850000024 0 0 Vocal
+trackfx 0 0 1200 0.200000003 0 0 0 0 0.150000006 0.300000012 0
+trackdyn 1 0 -18 3 10 120 0
 track 0.5 0 0 Harmony
-trackfx 0.2 0 1200 0.2 0 0 0 0 0 0.4 0
+trackfx 0.200000003 0 1200 0.200000003 0 0 0 0 0 0.400000006 0
+trackdyn 1 0 -18 3 10 120 0
 track 0.5 0 0 FX
-trackfx 0 0 1200 0.2 0 0 0 0 0 0.5 0
+trackfx 0 0 1200 0.200000003 0 0 0 0 0 0.5 0
+trackdyn 1 0 -18 3 10 120 0
 sample synth 21600 Kick
 synth 33 0.45 0.8 440 0.5 0.5 0.5 0.35 0.5
-patch decay=0.3 drive=0.2 noise=0.12 noise_decay=0.006 pitch_drop=30 pitch_time=0.035 release=0.04 wave=3
+patch wave=3 noise=0.12 noise_decay=0.006 pitch_drop=30 pitch_time=0.035 decay=0.3 release=0.04 drive=0.2
 layers 3 2 8 9 0 10 11 0 0 12 0 0 0 0
 end
 sample synth 9600 Snap
 synth 60 0.2 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch cutoff=2200 decay=0.08 filter=3 noise=1 noise_decay=0.03 noosc=1 release=0.04 reso=0.4
+patch noosc=1 filter=3 noise=1 noise_decay=0.03 cutoff=2200 reso=0.4 decay=0.08 release=0.04
 layers 3 2 13 14 1 15 16 1 1 17 1 1 1 1
 end
 sample synth 21600 Clap
 synth 60 0.45 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch bursts=4 cutoff=1400 decay=0.25 filter=3 noise=1 noise_decay=0.12 noosc=1 release=0.1 reso=0.3
+patch noosc=1 bursts=4 filter=3 noise=1 noise_decay=0.12 cutoff=1400 reso=0.3 decay=0.25 release=0.1
 layers 3 2 18 19 2 20 21 2 2 22 2 2 2 2
 end
 sample synth 4800 Hat
 synth 60 0.1 0.8 440 0.55 0.45 0.5 0.3 0.5
-patch cutoff=8000 decay=0.045 filter=2 noise=1 noosc=1 release=0.02 reso=0.25
+patch noosc=1 filter=2 noise=1 cutoff=8000 reso=0.25 decay=0.045 release=0.02
 layers 3 2 23 24 3 25 26 3 3 27 3 3 3 3
 end
 sample synth 96000 Bright piano
 synth 60 2 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.001 decay=1.6 fm=2 fm_decay=0.3 fm_ratio=1 mix2=0.3 release=0.3 semi2=12 wave=3 wave2=3
+patch wave=3 wave2=3 semi2=12 mix2=0.3 fm=2 fm_ratio=1 fm_decay=0.3 attack=0.001 decay=1.6 release=0.3
 layers 3 2 28 29 4 30 31 4 4 32 4 4 4 4
 end
 sample synth 28800 Pluck
 synth 72 0.6 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.001 cutoff=2000 decay=0.3 fdecay=0.1 fenv=2 filter=1 mix2=0.3 release=0.2 semi2=12 wave=2
+patch wave=2 filter=1 semi2=12 mix2=0.3 cutoff=2000 fenv=2 fdecay=0.1 attack=0.001 decay=0.3 release=0.2
 layers 3 2 33 34 5 35 36 5 5 37 5 5 5 5
 end
 sample synth 96000 Supersaw
 synth 60 2 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.01 cutoff=6000 decay=0.2 detune=25 filter=1 release=0.4 sustain=0.8 voices=7 width=1
+patch voices=7 filter=1 detune=25 width=1 cutoff=6000 attack=0.01 decay=0.2 sustain=0.8 release=0.4
 layers 3 2 38 39 6 40 41 6 6 42 6 6 6 6
 end
 sample synth 38400 Bass
 synth 36 0.8 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.02 cutoff=500 decay=0.5 filter=1 mix2=0.3 release=0.2 sustain=0.7 wave=3 wave2=2
+patch wave=3 wave2=2 filter=1 mix2=0.3 cutoff=500 attack=0.02 decay=0.5 sustain=0.7 release=0.2
 layers 3 2 43 44 7 45 46 7 7 47 7 7 7 7
 end
 sample layer 21600 Kick v1 r1
 layer 0 0 3 0
 hidden
 end
-sample layer 21600 Kick v1 r2
+sample layer 21538 Kick v1 r2
 layer 0 0 3 1
 hidden
 end
@@ -112,11 +89,11 @@ sample layer 21600 Kick v2 r1
 layer 0 1 3 0
 hidden
 end
-sample layer 21600 Kick v2 r2
+sample layer 21538 Kick v2 r2
 layer 0 1 3 1
 hidden
 end
-sample layer 21600 Kick v3 r2
+sample layer 21538 Kick v3 r2
 layer 0 2 3 1
 hidden
 end
@@ -124,7 +101,7 @@ sample layer 9600 Snap v1 r1
 layer 1 0 3 0
 hidden
 end
-sample layer 9600 Snap v1 r2
+sample layer 9573 Snap v1 r2
 layer 1 0 3 1
 hidden
 end
@@ -132,11 +109,11 @@ sample layer 9600 Snap v2 r1
 layer 1 1 3 0
 hidden
 end
-sample layer 9600 Snap v2 r2
+sample layer 9573 Snap v2 r2
 layer 1 1 3 1
 hidden
 end
-sample layer 9600 Snap v3 r2
+sample layer 9573 Snap v3 r2
 layer 1 2 3 1
 hidden
 end
@@ -144,7 +121,7 @@ sample layer 21600 Clap v1 r1
 layer 2 0 3 0
 hidden
 end
-sample layer 21600 Clap v1 r2
+sample layer 21538 Clap v1 r2
 layer 2 0 3 1
 hidden
 end
@@ -152,11 +129,11 @@ sample layer 21600 Clap v2 r1
 layer 2 1 3 0
 hidden
 end
-sample layer 21600 Clap v2 r2
+sample layer 21538 Clap v2 r2
 layer 2 1 3 1
 hidden
 end
-sample layer 21600 Clap v3 r2
+sample layer 21538 Clap v3 r2
 layer 2 2 3 1
 hidden
 end
@@ -164,7 +141,7 @@ sample layer 4800 Hat v1 r1
 layer 3 0 3 0
 hidden
 end
-sample layer 4800 Hat v1 r2
+sample layer 4787 Hat v1 r2
 layer 3 0 3 1
 hidden
 end
@@ -172,11 +149,11 @@ sample layer 4800 Hat v2 r1
 layer 3 1 3 0
 hidden
 end
-sample layer 4800 Hat v2 r2
+sample layer 4787 Hat v2 r2
 layer 3 1 3 1
 hidden
 end
-sample layer 4800 Hat v3 r2
+sample layer 4787 Hat v3 r2
 layer 3 2 3 1
 hidden
 end
@@ -184,7 +161,7 @@ sample layer 96000 Bright piano v1 r1
 layer 4 0 3 0
 hidden
 end
-sample layer 96000 Bright piano v1 r2
+sample layer 95724 Bright piano v1 r2
 layer 4 0 3 1
 hidden
 end
@@ -192,11 +169,11 @@ sample layer 96000 Bright piano v2 r1
 layer 4 1 3 0
 hidden
 end
-sample layer 96000 Bright piano v2 r2
+sample layer 95724 Bright piano v2 r2
 layer 4 1 3 1
 hidden
 end
-sample layer 96000 Bright piano v3 r2
+sample layer 95724 Bright piano v3 r2
 layer 4 2 3 1
 hidden
 end
@@ -204,7 +181,7 @@ sample layer 28800 Pluck v1 r1
 layer 5 0 3 0
 hidden
 end
-sample layer 28800 Pluck v1 r2
+sample layer 28717 Pluck v1 r2
 layer 5 0 3 1
 hidden
 end
@@ -212,11 +189,11 @@ sample layer 28800 Pluck v2 r1
 layer 5 1 3 0
 hidden
 end
-sample layer 28800 Pluck v2 r2
+sample layer 28717 Pluck v2 r2
 layer 5 1 3 1
 hidden
 end
-sample layer 28800 Pluck v3 r2
+sample layer 28717 Pluck v3 r2
 layer 5 2 3 1
 hidden
 end
@@ -224,7 +201,7 @@ sample layer 96000 Supersaw v1 r1
 layer 6 0 3 0
 hidden
 end
-sample layer 96000 Supersaw v1 r2
+sample layer 95724 Supersaw v1 r2
 layer 6 0 3 1
 hidden
 end
@@ -232,11 +209,11 @@ sample layer 96000 Supersaw v2 r1
 layer 6 1 3 0
 hidden
 end
-sample layer 96000 Supersaw v2 r2
+sample layer 95724 Supersaw v2 r2
 layer 6 1 3 1
 hidden
 end
-sample layer 96000 Supersaw v3 r2
+sample layer 95724 Supersaw v3 r2
 layer 6 2 3 1
 hidden
 end
@@ -244,7 +221,7 @@ sample layer 38400 Bass v1 r1
 layer 7 0 3 0
 hidden
 end
-sample layer 38400 Bass v1 r2
+sample layer 38290 Bass v1 r2
 layer 7 0 3 1
 hidden
 end
@@ -252,21 +229,21 @@ sample layer 38400 Bass v2 r1
 layer 7 1 3 0
 hidden
 end
-sample layer 38400 Bass v2 r2
+sample layer 38290 Bass v2 r2
 layer 7 1 3 1
 hidden
 end
-sample layer 38400 Bass v3 r2
+sample layer 38290 Bass v3 r2
 layer 7 2 3 1
 hidden
 end
 sample synth 192000 Riser
 synth 48 4 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=3 cutoff=300 detune=20 filter=1 fsweep=4 noise=0.5 psweep=24 release=0.1 sustain=1 voices=5 width=1
+patch voices=5 filter=1 detune=20 width=1 noise=0.5 psweep=24 cutoff=300 fsweep=4 attack=3 sustain=1 release=0.1
 end
 sample synth 144000 Impact
 synth 28 3 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch cutoff=3000 decay=2.5 drive=0.5 filter=1 fsweep=-3 noise=0.6 noise_decay=0.3 pitch_drop=24 pitch_time=0.15 release=0.4 wave=3
+patch wave=3 filter=1 noise=0.6 noise_decay=0.3 pitch_drop=24 pitch_time=0.15 cutoff=3000 fsweep=-3 decay=2.5 release=0.4 drive=0.5
 end
 sample vocal 753355 Sung: verse
 vocal 4 1 0 0.4 0.8 440 118 6 60 0.5 0
@@ -301,68 +278,68 @@ vnote 64 26 0.475
 vnote 62 26.5 0.475
 vnote 62 27 0.95
 vnote 60 28 2.375
-vbend -0.002 0
+vbend -0.00200000009 0
 vbend 0 -1
-vbend 0.15 0
-vbend 0.8167 0
-vbend 0.973 3
-vbend 1.8167 0
-vbend 1.973 2
-vbend 2.3167 0
-vbend 2.473 -2
-vbend 2.8167 0
-vbend 2.973 -3
+vbend 0.150000006 0
+vbend 0.816699982 0
+vbend 0.97299999 3
+vbend 1.81669998 0
+vbend 1.97300005 2
+vbend 2.31669998 0
+vbend 2.47300005 -2
+vbend 2.81669998 0
+vbend 2.97300005 -3
 vbend 3.75 0
-vbend 3.948 -2
-vbend 5.075 0
-vbend 5.423 -2
-vbend 5.427 0
-vbend 7.998 0
+vbend 3.94799995 -2
+vbend 5.07499981 0
+vbend 5.42299986 -2
+vbend 5.42700005 0
+vbend 7.99800014 0
 vbend 8 -1
-vbend 8.15 0
-vbend 8.3167 0
-vbend 8.473 2
-vbend 8.8167 0
-vbend 8.973 2
+vbend 8.14999962 0
+vbend 8.31669998 0
+vbend 8.47299957 2
+vbend 8.81669998 0
+vbend 8.97299957 2
 vbend 10.3167 0
-vbend 10.473 -2
+vbend 10.4729996 -2
 vbend 10.8167 0
-vbend 10.973 -2
+vbend 10.9729996 -2
 vbend 11.75 0
 vbend 11.948 2
-vbend 14.025 0
-vbend 14.373 -2
-vbend 14.377 0
-vbend 15.998 0
+vbend 14.0249996 0
+vbend 14.3730001 -2
+vbend 14.3769999 0
+vbend 15.9980001 0
 vbend 16 -1
-vbend 16.15 0
+vbend 16.1499996 0
 vbend 16.8167 0
-vbend 16.973 3
+vbend 16.9729996 3
 vbend 17.8167 0
-vbend 17.973 2
+vbend 17.9729996 2
 vbend 18.3167 0
-vbend 18.473 3
+vbend 18.4729996 3
 vbend 18.8167 0
-vbend 18.973 -1
+vbend 18.9729996 -1
 vbend 19.75 0
 vbend 19.948 -4
-vbend 21.075 0
-vbend 21.423 -2
+vbend 21.0750008 0
+vbend 21.4230003 -2
 vbend 21.427 0
-vbend 23.998 0
+vbend 23.9979992 0
 vbend 24 -1
-vbend 24.15 0
+vbend 24.1499996 0
 vbend 24.3167 0
-vbend 24.473 -2
+vbend 24.4729996 -2
 vbend 24.8167 0
-vbend 24.973 -3
+vbend 24.9729996 -3
 vbend 26.3167 0
-vbend 26.473 -2
+vbend 26.4729996 -2
 vbend 27.75 0
 vbend 27.948 -2
-vbend 30.025 0
-vbend 30.373 -2
-vbend 30.377 0
+vbend 30.0249996 0
+vbend 30.3729992 -2
+vbend 30.3770008 0
 end
 sample vocal 777152 Sung: chorus
 vocal 4 1 0 0.45 0.8 440 118 6 60 0.5 1
@@ -395,66 +372,66 @@ vnote 76 27 0.475
 vnote 74 27.5 0.475
 vnote 72 28 0.475
 vnote 72 28.5 2.85
-vbend -0.002 0
+vbend -0.00200000009 0
 vbend 0 -1.2
-vbend 0.15 0
-vbend 0.3167 0
-vbend 0.473 -1
-vbend 0.8167 0
-vbend 0.973 1
-vbend 2.998 0
+vbend 0.150000006 0
+vbend 0.316700011 0
+vbend 0.47299999 -1
+vbend 0.816699982 0
+vbend 0.97299999 1
+vbend 2.99799991 0
 vbend 3 -1.2
-vbend 3.15 0
-vbend 3.3167 0
-vbend 3.473 2
-vbend 3.8167 0
-vbend 3.973 2
-vbend 4.3167 0
-vbend 4.473 1
-vbend 7.998 0
+vbend 3.1500001 0
+vbend 3.31669998 0
+vbend 3.47300005 2
+vbend 3.81669998 0
+vbend 3.97300005 2
+vbend 4.31669998 0
+vbend 4.47300005 1
+vbend 7.99800014 0
 vbend 8 -1.2
-vbend 8.15 0
-vbend 8.3167 0
-vbend 8.473 -1
-vbend 8.8167 0
-vbend 8.973 1
-vbend 10.998 0
+vbend 8.14999962 0
+vbend 8.31669998 0
+vbend 8.47299957 -1
+vbend 8.81669998 0
+vbend 8.97299957 1
+vbend 10.9980001 0
 vbend 11 -1.2
-vbend 11.15 0
+vbend 11.1499996 0
 vbend 11.3167 0
-vbend 11.473 -2
+vbend 11.4729996 -2
 vbend 11.8167 0
-vbend 11.973 -2
-vbend 15.998 0
+vbend 11.9729996 -2
+vbend 15.9980001 0
 vbend 16 -1.2
-vbend 16.15 0
+vbend 16.1499996 0
 vbend 16.3167 0
-vbend 16.473 -1
+vbend 16.4729996 -1
 vbend 16.8167 0
-vbend 16.973 1
-vbend 18.998 0
+vbend 16.9729996 1
+vbend 18.9979992 0
 vbend 19 -1.2
-vbend 19.15 0
+vbend 19.1499996 0
 vbend 19.3167 0
-vbend 19.473 2
+vbend 19.4729996 2
 vbend 19.8167 0
-vbend 19.973 2
+vbend 19.9729996 2
 vbend 20.3167 0
-vbend 20.473 1
-vbend 23.998 0
+vbend 20.4729996 1
+vbend 23.9979992 0
 vbend 24 -1.2
-vbend 24.15 0
+vbend 24.1499996 0
 vbend 24.3167 0
-vbend 24.473 -1
+vbend 24.4729996 -1
 vbend 24.8167 0
-vbend 24.973 1
-vbend 26.998 0
+vbend 24.9729996 1
+vbend 26.9979992 0
 vbend 27 -1.2
-vbend 27.15 0
+vbend 27.1499996 0
 vbend 27.3167 0
-vbend 27.473 -2
+vbend 27.4729996 -2
 vbend 27.8167 0
-vbend 27.973 -2
+vbend 27.9729996 -2
 end
 sample vocal 777152 Sung: chorus low
 vocal 4 0 0 0.35 0.8 440 118 6 60 0.5 2
@@ -487,48 +464,46 @@ vnote 60 27 0.475
 vnote 59 27.5 0.475
 vnote 57 28 0.475
 vnote 57 28.5 2.85
-vbend 0.3167 0
-vbend 0.473 -2
-vbend 0.8167 0
-vbend 0.973 2
-vbend 3.3167 0
-vbend 3.473 1
-vbend 3.8167 0
-vbend 3.973 2
-vbend 4.3167 0
-vbend 4.473 2
-vbend 8.3167 0
-vbend 8.473 -2
-vbend 8.8167 0
-vbend 8.973 2
+vbend 0.316700011 0
+vbend 0.47299999 -2
+vbend 0.816699982 0
+vbend 0.97299999 2
+vbend 3.31669998 0
+vbend 3.47300005 1
+vbend 3.81669998 0
+vbend 3.97300005 2
+vbend 4.31669998 0
+vbend 4.47300005 2
+vbend 8.31669998 0
+vbend 8.47299957 -2
+vbend 8.81669998 0
+vbend 8.97299957 2
 vbend 11.3167 0
-vbend 11.473 -1
+vbend 11.4729996 -1
 vbend 11.8167 0
-vbend 11.973 -2
+vbend 11.9729996 -2
 vbend 16.3167 0
-vbend 16.473 -2
+vbend 16.4729996 -2
 vbend 16.8167 0
-vbend 16.973 2
+vbend 16.9729996 2
 vbend 19.3167 0
-vbend 19.473 1
+vbend 19.4729996 1
 vbend 19.8167 0
-vbend 19.973 2
+vbend 19.9729996 2
 vbend 20.3167 0
-vbend 20.473 2
+vbend 20.4729996 2
 vbend 24.3167 0
-vbend 24.473 -2
+vbend 24.4729996 -2
 vbend 24.8167 0
-vbend 24.973 2
+vbend 24.9729996 2
 vbend 27.3167 0
-vbend 27.473 -1
+vbend 27.4729996 -1
 vbend 27.8167 0
-vbend 27.973 -2
+vbend 27.9729996 -2
 end
-section 0 4 Intro
-section 4 8 Verse
-section 12 8 Chorus
-section 20 4 Break
-section 24 8 Chorus
+sample file 24000 saw A2 1b
+path /home/ap/Music/tinydaw/Saved sounds/saw A2 1b.wav
+end
 drum 1 0 16 1 0 Verse kick
 drow 0 0 1 127:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 62:100 0:100 0:100 0:100 0:100 0:100
 drum 2 1 16 2 0 Verse
@@ -542,6 +517,77 @@ drow 1 1 1 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 0:100 0:100 0
 drow 2 3 1 100:100 0:100 100:100 0:100 100:100 0:100 100:100 0:100 100:100 0:100 100:100 0:100 100:100 0:100 100:50 62:100 100:100 0:100 100:100 0:100 100:100 0:100 100:100 0:100 100:100 0:100 100:100 0:100 100:100 62:100 100:50 62:100
 drum 5 1 16 1 0 Break claps
 drow 0 2 1 0:100 0:100 0:100 0:100 100:70 0:100 0:100 0:100 0:100 0:100 0:100 0:100 100:70 0:100 0:100 0:100
+section 0 4 Intro
+section 4 8 Verse
+section 12 8 Chorus
+section 20 4 Break
+section 24 8 Chorus
+scene 0 Intro
+scene 1 Verse
+scene 2 Chorus
+scene 3 Break
+scene 4 Chorus
+slot 0 1 2 32.0000021 4 0 0 0 0 0 0 0 Verse
+slot 0 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 0 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 1 1 2 32.0000021 4 0 0 0 0 0 0 0 Verse
+slot 1 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 1 3 2 16.0000215 20 0 0 0 0 0 0 0 Break
+slot 1 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 2 1 2 32.0000021 4 0 0 0 0 0 0 0 Verse
+slot 2 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 2 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 3 0 2 15.9999806 0 0 0 0 0 0 0 0 Intro
+slot 3 1 2 32.0000021 4 0 0 0 0 0 0 0 Verse
+slot 3 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 3 3 2 16.0000215 20 0 0 0 0 0 0 0 Break
+slot 3 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 4 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 4 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 5 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 5 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 6 1 2 32.0000021 4 0 0 0 0 0 0 0 Verse
+slot 6 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 6 3 2 16.0000215 20 0 0 0 0 0 0 0 Break
+slot 6 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 7 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 7 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+slot 8 1 2 32.0000021 4 0 0 0 0 0 0 0 Verse
+slot 8 2 2 32.0000021 12 0 0 0 0 0 0 0 Chorus
+slot 8 3 2 16.0000215 20 0 0 0 0 0 0 0 Break
+slot 8 4 2 32.0000021 24 0 0 0 0 0 0 0 Chorus
+harmony 0 4 0 0 -1
+harmony 4 4 7 0 -1
+harmony 8 4 9 1 -1
+harmony 12 4 5 0 -1
+harmony 16 4 0 0 -1
+harmony 20 4 7 0 -1
+harmony 24 4 9 1 -1
+harmony 28 4 5 0 -1
+harmony 32 4 0 0 -1
+harmony 36 4 7 0 -1
+harmony 40 4 9 1 -1
+harmony 44 4 5 0 -1
+harmony 48 4 0 0 -1
+harmony 52 4 7 0 -1
+harmony 56 4 9 1 -1
+harmony 60 4 5 0 -1
+harmony 64 4 0 0 -1
+harmony 68 4 7 0 -1
+harmony 72 4 9 1 -1
+harmony 76 4 5 0 -1
+harmony 80 4 0 0 -1
+harmony 84 4 7 0 -1
+harmony 88 4 9 1 -1
+harmony 92 4 5 0 -1
+harmony 96 4 0 0 -1
+harmony 100 4 7 0 -1
+harmony 104 4 9 1 -1
+harmony 108 4 5 0 -1
+harmony 112 4 0 0 -1
+harmony 116 4 7 0 -1
+harmony 120 4 9 1 -1
+harmony 124 4 5 0 -1
 clip 4 3 0 0 97627 0 0 0 1 60
 clip 4 3 97627 0 97627 0 0 0 2 60
 clip 4 3 195254 0 97627 0 0 0 3 60
@@ -1495,15 +1541,19 @@ note 88 72 48813 9763 0.8
 note 88 77 61017 9762 0.5
 note 88 81 73220 9763 0.8
 note 88 84 85423 9763 0.5
-pad 0 0 0 0.9 0 0 0
-pad 1 1 0 0.9 0 1 0
-pad 2 2 0 0.8 0 1 0
-pad 3 3 0 0.7 0 1 0
-pad 4 4 1 0.8 0 3 0
-pad 5 5 0 0.7 0 4 0
-pad 6 6 1 0.7 0 5 0
-pad 7 7 0 0.9 0 2 0
-pad 8 50 0 0.8 0 6 0
-pad 9 51 0 0.8 0 6 0
-pad 10 52 0 0.7 0 7 0
-pad 11 48 0 0.8 0 8 0
+pad 0 0 0 0.899999976 0 0 0
+pad 1 1 0 0.899999976 0 1 0
+pad 2 2 0 0.800000012 0 1 0
+pad 3 3 0 0.699999988 0 1 0
+pad 4 4 1 0.800000012 0 3 0
+pad 5 5 0 0.699999988 0 4 0
+pad 6 6 1 0.699999988 0 5 0
+pad 7 7 0 0.899999976 0 2 0
+pad 8 50 0 0.800000012 0 6 0
+pad 9 51 0 0.800000012 0 6 0
+pad 10 52 0 0.699999988 0 7 0
+pad 11 48 0 0.800000012 0 8 0
+pad 12 -1 0 0.800000012 0 0 0
+pad 13 -1 0 0.800000012 0 0 0
+pad 14 -1 0 0.800000012 0 0 0
+pad 15 -1 0 0.800000012 0 0 0

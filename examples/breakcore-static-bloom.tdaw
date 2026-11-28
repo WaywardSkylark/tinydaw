@@ -1,17 +1,288 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Breakcore: Static Bloom
 rate 48000
 bpm 86
 a4 440
-master 0.8
-loop 0 0 0
-playhead 0
-fx 3 0.45 0.55 0.6 1 0.8 0.35 0.8 0 120 2
-instrument 30 72 4
+master 0.800000012
 change 4 172 4 4
 change 20 172 7 8
 change 24 186 4 4
+loop 0 0 0
+playhead 0
+instrument 30 72 4
+fx 3 0.449999988 0.550000012 0.600000024 1 0.800000012 0.349999994 0.800000012 0 120 2
+dynamics 1 -22 4 6 110 7 1 -1
+track 0.850000024 0 0 Kick
+trackfx 0 0 1200 0.200000003 0 0 0 0.25 0 0 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.75 0 0 Drums
+trackfx 0 0 1200 0.200000003 0 1 2 0 0 0.119999997 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.620000005 0 0 Pad
+trackfx 0 1 900 0.200000003 0 0 0 0 0 0.5 0.600000024
+trackdyn 1 0 -18 3 10 120 0
+track 0.600000024 0 0 Reese
+trackfx 0 1 900 0.300000012 0 0 0 0.300000012 0 0 0.699999988
+trackdyn 1 0 -18 3 10 120 0
+track 0.449999988 0 0 Bell
+trackfx -0.200000003 0 1200 0.200000003 0 0 0 0 0.400000006 0.400000006 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.550000012 0 0 Voices
+trackfx 0.150000006 0 1200 0.200000003 0 0 0 0 0.300000012 0.25 0
+trackdyn 1 0 -18 3 10 120 0
+track 0.600000024 0 0 FX
+trackfx 0 0 1200 0.200000003 0 0 0 0 0 0.349999994 0
+trackdyn 1 0 -18 3 10 120 0
+sample synth 19200 Break kick
+synth 31 0.4 0.8 440 0.6 0.35 0.6 0.6 0.5
+patch wave=3 filter=1 noise=0.2 noise_decay=0.008 pitch_drop=28 pitch_time=0.03 cutoff=3500 decay=0.26 release=0.05 drive=0.3
+layers 3 2 4 5 0 6 7 0 0 8 0 0 0 0
+end
+sample synth 12000 Break snare
+synth 58 0.25 0.8 440 0.65 0.4 0.5 0.65 0.5
+patch wave=2 noise=0.9 noise_decay=0.1 pitch_drop=5 pitch_time=0.02 decay=0.1 release=0.05 drive=0.3
+layers 3 2 9 10 1 11 12 1 1 13 1 1 1 1
+end
+sample synth 5760 Hat
+synth 60 0.12 0.8 440 0.6 0.4 0.5 0.5 0.5
+patch noosc=1 filter=2 noise=1 cutoff=8000 reso=0.25 decay=0.045 release=0.02
+layers 3 2 14 15 2 16 17 2 2 18 2 2 2 2
+end
+sample synth 16800 Open hat
+synth 60 0.35 0.8 440 0.5 0.5 0.5 0.5 0.5
+patch noosc=1 filter=2 noise=1 cutoff=7500 reso=0.2 decay=0.28 release=0.05
+layers 3 2 19 20 3 21 22 3 3 23 3 3 3 3
+end
+sample layer 19200 Break kick v1 r1
+layer 0 0 3 0
+hidden
+end
+sample layer 19145 Break kick v1 r2
+layer 0 0 3 1
+hidden
+end
+sample layer 19200 Break kick v2 r1
+layer 0 1 3 0
+hidden
+end
+sample layer 19145 Break kick v2 r2
+layer 0 1 3 1
+hidden
+end
+sample layer 19145 Break kick v3 r2
+layer 0 2 3 1
+hidden
+end
+sample layer 12000 Break snare v1 r1
+layer 1 0 3 0
+hidden
+end
+sample layer 11966 Break snare v1 r2
+layer 1 0 3 1
+hidden
+end
+sample layer 12000 Break snare v2 r1
+layer 1 1 3 0
+hidden
+end
+sample layer 11966 Break snare v2 r2
+layer 1 1 3 1
+hidden
+end
+sample layer 11966 Break snare v3 r2
+layer 1 2 3 1
+hidden
+end
+sample layer 5760 Hat v1 r1
+layer 2 0 3 0
+hidden
+end
+sample layer 5744 Hat v1 r2
+layer 2 0 3 1
+hidden
+end
+sample layer 5760 Hat v2 r1
+layer 2 1 3 0
+hidden
+end
+sample layer 5744 Hat v2 r2
+layer 2 1 3 1
+hidden
+end
+sample layer 5744 Hat v3 r2
+layer 2 2 3 1
+hidden
+end
+sample layer 16800 Open hat v1 r1
+layer 3 0 3 0
+hidden
+end
+sample layer 16752 Open hat v1 r2
+layer 3 0 3 1
+hidden
+end
+sample layer 16800 Open hat v2 r1
+layer 3 1 3 0
+hidden
+end
+sample layer 16752 Open hat v2 r2
+layer 3 1 3 1
+hidden
+end
+sample layer 16752 Open hat v3 r2
+layer 3 2 3 1
+hidden
+end
+sample variant 12000 Snare +3
+variant 1 3 0 1
+end
+sample variant 12000 Snare +5
+variant 1 5 0 1
+end
+sample variant 12000 Snare +7
+variant 1 7 0 1
+end
+sample variant 12000 Snare +12
+variant 1 12 0 1
+end
+sample synth 288000 Bloom pad
+synth 60 6 0.8 440 0.45 0.6 0.7 0.4 0.55
+patch wave2=3 voices=6 filter=1 semi2=19 mix2=0.3 detune=15 width=1 lfo_hz=0.2 cutoff=2400 wobble=0.5 attack=1.5 decay=1 sustain=0.9 release=2.5
+end
+sample synth 96000 Reese
+synth 33 2 0.8 440 0.5 0.45 0.65 0.7 0.6
+patch voices=3 filter=1 detune=18 width=0.5 lfo_hz=0.3 cutoff=650 reso=0.3 wobble=0.5 attack=0.01 sustain=1 release=0.12 drive=0.4
+layers 3 2 31 32 29 33 34 29 29 35 29 29 29 29
+end
+sample synth 144000 Glass bell
+synth 84 3 0.8 440 0.5 0.5 0.5 0.5 0.5
+patch wave=3 fm=1.5 fm_ratio=2.76 fm_decay=2 attack=0.002 decay=3 release=1
+layers 3 2 36 37 30 38 39 30 30 40 30 30 30 30
+end
+sample layer 96000 Reese v1 r1
+layer 29 0 3 0
+hidden
+end
+sample layer 95724 Reese v1 r2
+layer 29 0 3 1
+hidden
+end
+sample layer 96000 Reese v2 r1
+layer 29 1 3 0
+hidden
+end
+sample layer 95724 Reese v2 r2
+layer 29 1 3 1
+hidden
+end
+sample layer 95724 Reese v3 r2
+layer 29 2 3 1
+hidden
+end
+sample layer 144000 Glass bell v1 r1
+layer 30 0 3 0
+hidden
+end
+sample layer 143585 Glass bell v1 r2
+layer 30 0 3 1
+hidden
+end
+sample layer 144000 Glass bell v2 r1
+layer 30 1 3 0
+hidden
+end
+sample layer 143585 Glass bell v2 r2
+layer 30 1 3 1
+hidden
+end
+sample layer 143585 Glass bell v3 r2
+layer 30 2 3 1
+hidden
+end
+sample synth 19200 Vocal chop
+synth 72 0.4 0.8 440 0.5 0.5 0.5 0.5 0.5
+patch voices=2 vowel=4 vowel2=3 detune=6 width=0.5 attack=0.005 decay=0.25 sustain=0.2 release=0.1
+end
+sample synth 16800 Laser zap
+synth 60 0.35 0.8 440 0.5 0.5 0.5 0.5 0.5
+patch wave=1 pitch_drop=36 pitch_time=0.08 decay=0.3 release=0.05 crush=0.3
+end
+sample synth 240000 Riser
+synth 48 5 0.8 440 0.5 0.5 0.5 0.5 0.5
+patch voices=5 filter=1 detune=20 width=1 noise=0.5 psweep=24 cutoff=300 fsweep=4 attack=3 sustain=1 release=0.1
+end
+sample synth 144000 Impact
+synth 28 3 0.8 440 0.5 0.5 0.5 0.5 0.5
+patch wave=3 filter=1 noise=0.6 noise_decay=0.3 pitch_drop=24 pitch_time=0.15 cutoff=3000 fsweep=-3 decay=2.5 release=0.4 drive=0.5
+end
+sample vocal 162697 Sung: static bloom
+vocal 0 1 0 0.1 0.8 440 86 6 60 0.5 2
+words Stat-ic, bloom a-gain
+vnote 63 0 0.5
+vnote 63 0.5 0.5
+vnote 70 1 1
+vnote 66 2.5 0.5
+vnote 68 3 1.5
+vbend 0 0
+vbend 0.449999988 0
+vbend 0.5 7
+vbend 0.949999988 0
+vbend 1 -3
+vbend 1.29999995 0
+vbend 2.4000001 0
+vbend 2.9000001 2
+vbend 3 0
+vbend 4 0
+vbend 4.5 12
+end
+sample file 24000 saw A2 1b
+path /home/ap/Music/tinydaw/Saved sounds/saw A2 1b.wav
+end
+drum 1 0 32 1 0 Break A kick
+drow 0 0 1 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 127:100 127:100 0:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100
+drum 2 1 32 2 0 Break A
+drow 0 1 1 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:100 0:50 35:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:60 0:100 127:100 0:100 0:100 0:100 0:100 127:100 0:100
+drow 1 2 1 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100
+drum 3 0 32 1 0 Break B kick
+drow 0 0 1 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 100:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100
+drum 4 1 32 2 0 Break B
+drow 0 1 1 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 35:60 127:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:50 0:100 35:60 0:100 0:100 127:100 0:100 0:100 127:100
+drow 1 2 1 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100
+drum 5 0 32 1 0 Break C kick
+drow 0 0 1 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 127:100 127:100 0:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 100:100 0:100 0:100 0:100 100:100 0:100
+drum 6 1 32 2 0 Break C
+drow 0 1 1 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:100 0:50 35:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:60 0:100 127:100 0:100 0:100 35:40 127:100 35:50 127:100
+drow 1 2 1 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 100:100
+section 0 4 Intro
+section 4 16 Break
+section 20 4 7/8
+section 24 12 Finale
+scene 0 Intro
+scene 1 Break
+scene 2 7/8
+scene 3 Finale
+slot 0 1 2 64.0000056 4 0 0 0 0 0 0 0 Break
+slot 0 2 2 13.9999639 20 0 0 0 0 0 0 0 7/8
+slot 0 3 2 48.0000102 24 0 0 0 0 0 0 0 Finale
+slot 1 1 2 64.0000056 4 0 0 0 0 0 0 0 Break
+slot 1 2 2 13.9999639 20 0 0 0 0 0 0 0 7/8
+slot 1 3 2 48.0000102 24 0 0 0 0 0 0 0 Finale
+slot 2 0 2 16.0000028 0 0 0 0 0 0 0 0 Intro
+slot 2 1 2 64.0000056 4 0 0 0 0 0 0 0 Break
+slot 2 2 2 13.9999639 20 0 0 0 0 0 0 0 7/8
+slot 2 3 2 48.0000102 24 0 0 0 0 0 0 0 Finale
+slot 3 1 2 64.0000056 4 0 0 0 0 0 0 0 Break
+slot 3 2 2 13.9999639 20 0 0 0 0 0 0 0 7/8
+slot 3 3 2 48.0000102 24 0 0 0 0 0 0 0 Finale
+slot 4 0 2 16.0000028 0 0 0 0 0 0 0 0 Intro
+slot 5 1 2 64.0000056 4 0 0 0 0 0 0 0 Break
+slot 5 2 2 13.9999639 20 0 0 0 0 0 0 0 7/8
+slot 5 3 2 48.0000102 24 0 0 0 0 0 0 0 Finale
+slot 6 0 2 16.0000028 0 0 0 0 0 0 0 0 Intro
+slot 6 1 2 64.0000056 4 0 0 0 0 0 0 0 Break
+slot 6 2 2 13.9999639 20 0 0 0 0 0 0 0 7/8
+slot 6 3 2 48.0000102 24 0 0 0 0 0 0 0 Finale
 key 3 1
 harmony 0 4 3 4 -1
 harmony 4 4 11 6 -1
@@ -49,242 +320,6 @@ harmony 126 4 3 4 -1
 harmony 130 4 11 6 -1
 harmony 134 4 6 6 -1
 harmony 138 4 1 13 -1
-dynamics 1 -22 4 6 110 7 1 -1
-track 0.85 0 0 Kick
-trackfx 0 0 1200 0.2 0 0 0 0.25 0 0 0
-track 0.75 0 0 Drums
-trackfx 0 0 1200 0.2 0 1 2 0 0 0.12 0
-track 0.62 0 0 Pad
-trackfx 0 1 900 0.2 0 0 0 0 0 0.5 0.6
-track 0.6 0 0 Reese
-trackfx 0 1 900 0.3 0 0 0 0.3 0 0 0.7
-track 0.45 0 0 Bell
-trackfx -0.2 0 1200 0.2 0 0 0 0 0.4 0.4 0
-track 0.55 0 0 Voices
-trackfx 0.15 0 1200 0.2 0 0 0 0 0.3 0.25 0
-track 0.6 0 0 FX
-trackfx 0 0 1200 0.2 0 0 0 0 0 0.35 0
-sample synth 19200 Break kick
-synth 31 0.4 0.8 440 0.6 0.35 0.6 0.6 0.5
-patch cutoff=3500 decay=0.26 drive=0.3 filter=1 noise=0.2 noise_decay=0.008 pitch_drop=28 pitch_time=0.03 release=0.05 wave=3
-layers 3 2 4 5 0 6 7 0 0 8 0 0 0 0
-end
-sample synth 12000 Break snare
-synth 58 0.25 0.8 440 0.65 0.4 0.5 0.65 0.5
-patch decay=0.1 drive=0.3 noise=0.9 noise_decay=0.1 pitch_drop=5 pitch_time=0.02 release=0.05 wave=2
-layers 3 2 9 10 1 11 12 1 1 13 1 1 1 1
-end
-sample synth 5760 Hat
-synth 60 0.12 0.8 440 0.6 0.4 0.5 0.5 0.5
-patch cutoff=8000 decay=0.045 filter=2 noise=1 noosc=1 release=0.02 reso=0.25
-layers 3 2 14 15 2 16 17 2 2 18 2 2 2 2
-end
-sample synth 16800 Open hat
-synth 60 0.35 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch cutoff=7500 decay=0.28 filter=2 noise=1 noosc=1 release=0.05 reso=0.2
-layers 3 2 19 20 3 21 22 3 3 23 3 3 3 3
-end
-sample layer 19200 Break kick v1 r1
-layer 0 0 3 0
-hidden
-end
-sample layer 19200 Break kick v1 r2
-layer 0 0 3 1
-hidden
-end
-sample layer 19200 Break kick v2 r1
-layer 0 1 3 0
-hidden
-end
-sample layer 19200 Break kick v2 r2
-layer 0 1 3 1
-hidden
-end
-sample layer 19200 Break kick v3 r2
-layer 0 2 3 1
-hidden
-end
-sample layer 12000 Break snare v1 r1
-layer 1 0 3 0
-hidden
-end
-sample layer 12000 Break snare v1 r2
-layer 1 0 3 1
-hidden
-end
-sample layer 12000 Break snare v2 r1
-layer 1 1 3 0
-hidden
-end
-sample layer 12000 Break snare v2 r2
-layer 1 1 3 1
-hidden
-end
-sample layer 12000 Break snare v3 r2
-layer 1 2 3 1
-hidden
-end
-sample layer 5760 Hat v1 r1
-layer 2 0 3 0
-hidden
-end
-sample layer 5760 Hat v1 r2
-layer 2 0 3 1
-hidden
-end
-sample layer 5760 Hat v2 r1
-layer 2 1 3 0
-hidden
-end
-sample layer 5760 Hat v2 r2
-layer 2 1 3 1
-hidden
-end
-sample layer 5760 Hat v3 r2
-layer 2 2 3 1
-hidden
-end
-sample layer 16800 Open hat v1 r1
-layer 3 0 3 0
-hidden
-end
-sample layer 16800 Open hat v1 r2
-layer 3 0 3 1
-hidden
-end
-sample layer 16800 Open hat v2 r1
-layer 3 1 3 0
-hidden
-end
-sample layer 16800 Open hat v2 r2
-layer 3 1 3 1
-hidden
-end
-sample layer 16800 Open hat v3 r2
-layer 3 2 3 1
-hidden
-end
-sample variant 12000 Snare +3
-variant 1 3 0
-end
-sample variant 12000 Snare +5
-variant 1 5 0
-end
-sample variant 12000 Snare +7
-variant 1 7 0
-end
-sample variant 12000 Snare +12
-variant 1 12 0
-end
-sample synth 288000 Bloom pad
-synth 60 6 0.8 440 0.45 0.6 0.7 0.4 0.55
-patch attack=1.5 cutoff=2400 decay=1 detune=15 filter=1 lfo_hz=0.2 mix2=0.3 release=2.5 semi2=19 sustain=0.9 voices=6 wave2=3 width=1 wobble=0.5
-end
-sample synth 96000 Reese
-synth 33 2 0.8 440 0.5 0.45 0.65 0.7 0.6
-patch attack=0.01 cutoff=650 detune=18 drive=0.4 filter=1 lfo_hz=0.3 release=0.12 reso=0.3 sustain=1 voices=3 width=0.5 wobble=0.5
-layers 3 2 31 32 29 33 34 29 29 35 29 29 29 29
-end
-sample synth 144000 Glass bell
-synth 84 3 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.002 decay=3 fm=1.5 fm_decay=2 fm_ratio=2.76 release=1 wave=3
-layers 3 2 36 37 30 38 39 30 30 40 30 30 30 30
-end
-sample layer 96000 Reese v1 r1
-layer 29 0 3 0
-hidden
-end
-sample layer 96000 Reese v1 r2
-layer 29 0 3 1
-hidden
-end
-sample layer 96000 Reese v2 r1
-layer 29 1 3 0
-hidden
-end
-sample layer 96000 Reese v2 r2
-layer 29 1 3 1
-hidden
-end
-sample layer 96000 Reese v3 r2
-layer 29 2 3 1
-hidden
-end
-sample layer 144000 Glass bell v1 r1
-layer 30 0 3 0
-hidden
-end
-sample layer 144000 Glass bell v1 r2
-layer 30 0 3 1
-hidden
-end
-sample layer 144000 Glass bell v2 r1
-layer 30 1 3 0
-hidden
-end
-sample layer 144000 Glass bell v2 r2
-layer 30 1 3 1
-hidden
-end
-sample layer 144000 Glass bell v3 r2
-layer 30 2 3 1
-hidden
-end
-sample synth 19200 Vocal chop
-synth 72 0.4 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=0.005 decay=0.25 detune=6 release=0.1 sustain=0.2 voices=2 vowel=4 vowel2=3 width=0.5
-end
-sample synth 16800 Laser zap
-synth 60 0.35 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch crush=0.3 decay=0.3 pitch_drop=36 pitch_time=0.08 release=0.05 wave=1
-end
-sample synth 240000 Riser
-synth 48 5 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch attack=3 cutoff=300 detune=20 filter=1 fsweep=4 noise=0.5 psweep=24 release=0.1 sustain=1 voices=5 width=1
-end
-sample synth 144000 Impact
-synth 28 3 0.8 440 0.5 0.5 0.5 0.5 0.5
-patch cutoff=3000 decay=2.5 drive=0.5 filter=1 fsweep=-3 noise=0.6 noise_decay=0.3 pitch_drop=24 pitch_time=0.15 release=0.4 wave=3
-end
-sample vocal 162697 Sung: static bloom
-vocal 0 1 0 0.1 0.8 440 86 6 60 0.5 2
-words Stat-ic, bloom a-gain
-vnote 63 0 0.5
-vnote 63 0.5 0.5
-vnote 70 1 1
-vnote 66 2.5 0.5
-vnote 68 3 1.5
-vbend 0 0
-vbend 0.45 0
-vbend 0.5 7
-vbend 0.95 0
-vbend 1 -3
-vbend 1.3 0
-vbend 2.4 0
-vbend 2.9 2
-vbend 3 0
-vbend 4 0
-vbend 4.5 12
-end
-section 0 4 Intro
-section 4 16 Break
-section 20 4 7/8
-section 24 12 Finale
-drum 1 0 32 1 0 Break A kick
-drow 0 0 1 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 127:100 127:100 0:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100
-drum 2 1 32 2 0 Break A
-drow 0 1 1 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:100 0:50 35:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:60 0:100 127:100 0:100 0:100 0:100 0:100 127:100 0:100
-drow 1 2 1 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100
-drum 3 0 32 1 0 Break B kick
-drow 0 0 1 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 100:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100
-drum 4 1 32 2 0 Break B
-drow 0 1 1 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 35:60 127:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:50 0:100 35:60 0:100 0:100 127:100 0:100 0:100 127:100
-drow 1 2 1 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100 100:100 0:100 35:50 0:100 62:100 0:100 35:50 0:100
-drum 5 0 32 1 0 Break C kick
-drow 0 0 1 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 127:100 127:100 0:100 0:100 0:100 0:100 127:100 0:100 100:100 0:100 0:100 0:100 0:100 0:100 0:100 0:100 100:100 0:100 0:100 0:100 100:100 0:100
-drum 6 1 32 2 0 Break C
-drow 0 1 1 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:100 0:50 35:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 0:100 0:100 0:100 127:100 0:100 0:100 35:60 0:100 127:100 0:100 0:100 35:40 127:100 35:50 127:100
-drow 1 2 1 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 35:100 100:100 35:100 62:50 100:100
 clip 28 2 0 0 535814 0 0 0 1 60
 clip 30 4 0 0 535814 0 0 0 2 84
 clip 43 6 401860 0 133954 0 66977 0
@@ -302,12 +337,12 @@ clip 29 3 669767 0 66977 0 0 0 8 33
 clip 28 2 736744 0 66977 0 0 0 9 60
 clip 29 3 736744 0 66977 0 0 0 10 33
 clip 1 1 786977 0 2093 -12 0 0
-clip 1 1 789070 0 2093 -10.2857143 0 0
-clip 24 1 791163 0 2093 -8.57142857 0 0
-clip 24 1 793256 0 2093 -6.85714286 0 0
-clip 25 1 795349 0 2093 -5.14285714 0 0
-clip 26 1 797442 0 2093 -3.42857143 0 0
-clip 26 1 799535 0 2093 -1.71428571 0 0
+clip 1 1 789070 0 2093 -10.2857141 0 0
+clip 24 1 791163 0 2093 -8.5714283 0 0
+clip 24 1 793256 0 2093 -6.85714293 0 0
+clip 25 1 795349 0 2093 -5.14285707 0 0
+clip 26 1 797442 0 2093 -3.42857146 0 0
+clip 26 1 799535 0 2093 -1.71428573 0 0
 clip 27 1 801628 0 2093 0 0 0
 clip 0 0 803721 0 133953 0 0 0 -1 60
 clip 1 1 803721 0 133953 0 0 0 -2 60
@@ -323,12 +358,12 @@ clip 29 3 937674 0 66977 0 0 0 16 33
 clip 28 2 1004651 0 66977 0 0 0 17 60
 clip 29 3 1004651 0 66977 0 0 0 18 33
 clip 1 1 1054884 0 2093 -12 0 0
-clip 1 1 1056977 0 2093 -10.2857143 0 0
-clip 24 1 1059070 0 2093 -8.57142857 0 0
-clip 24 1 1061163 0 2093 -6.85714286 0 0
-clip 25 1 1063256 0 2093 -5.14285714 0 0
-clip 26 1 1065349 0 2093 -3.42857143 0 0
-clip 26 1 1067442 0 2093 -1.71428571 0 0
+clip 1 1 1056977 0 2093 -10.2857141 0 0
+clip 24 1 1059070 0 2093 -8.5714283 0 0
+clip 24 1 1061163 0 2093 -6.85714293 0 0
+clip 25 1 1063256 0 2093 -5.14285707 0 0
+clip 26 1 1065349 0 2093 -3.42857146 0 0
+clip 26 1 1067442 0 2093 -1.71428573 0 0
 clip 27 1 1069535 0 2093 0 0 0
 clip 0 0 1071628 0 133953 0 0 0 -1 60
 clip 1 1 1071628 0 133953 0 0 0 -2 60
@@ -344,12 +379,12 @@ clip 29 3 1205581 0 66977 0 0 0 24 33
 clip 28 2 1272558 0 66977 0 0 0 25 60
 clip 29 3 1272558 0 66977 0 0 0 26 33
 clip 1 1 1322791 0 2093 -12 0 0
-clip 1 1 1324884 0 2093 -10.2857143 0 0
-clip 24 1 1326977 0 2093 -8.57142857 0 0
-clip 24 1 1329070 0 2093 -6.85714286 0 0
-clip 25 1 1331163 0 2093 -5.14285714 0 0
-clip 26 1 1333256 0 2093 -3.42857143 0 0
-clip 26 1 1335349 0 2093 -1.71428571 0 0
+clip 1 1 1324884 0 2093 -10.2857141 0 0
+clip 24 1 1326977 0 2093 -8.5714283 0 0
+clip 24 1 1329070 0 2093 -6.85714293 0 0
+clip 25 1 1331163 0 2093 -5.14285707 0 0
+clip 26 1 1333256 0 2093 -3.42857146 0 0
+clip 26 1 1335349 0 2093 -1.71428573 0 0
 clip 27 1 1337442 0 2093 0 0 0
 clip 0 0 1339535 0 133953 0 0 0 -1 60
 clip 1 1 1339535 0 133953 0 0 0 -2 60
@@ -366,12 +401,12 @@ clip 29 3 1473488 0 66977 0 0 0 32 33
 clip 28 2 1540465 0 66977 0 0 0 33 60
 clip 29 3 1540465 0 66977 0 0 0 34 33
 clip 1 1 1590698 0 2093 -12 0 0
-clip 1 1 1592791 0 2093 -10.2857143 0 0
-clip 24 1 1594884 0 2093 -8.57142857 0 0
-clip 24 1 1596977 0 2093 -6.85714286 0 0
-clip 25 1 1599070 0 2093 -5.14285714 0 0
-clip 26 1 1601163 0 2093 -3.42857143 0 0
-clip 26 1 1603256 0 2093 -1.71428571 0 0
+clip 1 1 1592791 0 2093 -10.2857141 0 0
+clip 24 1 1594884 0 2093 -8.5714283 0 0
+clip 24 1 1596977 0 2093 -6.85714293 0 0
+clip 25 1 1599070 0 2093 -5.14285707 0 0
+clip 26 1 1601163 0 2093 -3.42857146 0 0
+clip 26 1 1603256 0 2093 -1.71428573 0 0
 clip 27 1 1605349 0 2093 0 0 0
 clip 0 0 1607442 0 58605 0 0 0 -1 60
 clip 1 1 1607442 0 58605 0 0 0 -2 60
@@ -447,12 +482,12 @@ clip 42 6 2515409 0 16800 -6 0 0
 clip 28 2 2523151 0 61935 0 0 0 65 60
 clip 29 3 2523151 0 61935 0 0 0 66 33
 clip 1 1 2569602 0 1936 -12 0 0
-clip 1 1 2571538 0 1935 -10.2857143 0 0
-clip 24 1 2573473 0 1936 -8.57142857 0 0
-clip 24 1 2575409 0 1935 -6.85714286 0 0
-clip 25 1 2577344 0 1936 -5.14285714 0 0
-clip 26 1 2579280 0 1935 -3.42857143 0 0
-clip 26 1 2581215 0 1936 -1.71428571 0 0
+clip 1 1 2571538 0 1935 -10.2857141 0 0
+clip 24 1 2573473 0 1936 -8.5714283 0 0
+clip 24 1 2575409 0 1935 -6.85714293 0 0
+clip 25 1 2577344 0 1936 -5.14285707 0 0
+clip 26 1 2579280 0 1935 -3.42857146 0 0
+clip 26 1 2581215 0 1936 -1.71428573 0 0
 clip 27 1 2583151 0 1935 0 0 0
 clip 28 2 2585086 0 92903 0 0 61935
 note 1 51 0 133953 0.7
@@ -669,47 +704,48 @@ note 65 58 0 61935 0.55
 note 65 61 0 61935 0.55
 note 66 37 0 46451 0.9
 note 66 49 46451 15484 0.55
-auto 2 2 0 0.39203042
-auto 2 2 535814 0.825707085
-auto 2 2 1607442 0.825707085
-auto 2 2 1841860 0.65141417
-auto 3 2 1841860 0.465980003
-auto 3 2 1857344 0.61503268
-auto 3 2 1888312 0.465980003
-auto 3 2 1919280 0.704647784
-auto 3 2 1950248 0.465980003
-auto 3 2 1981215 0.61503268
-auto 3 2 2012183 0.465980003
-auto 3 2 2043151 0.704647784
-auto 3 2 2074119 0.465980003
-auto 3 2 2105086 0.61503268
-auto 3 2 2136054 0.465980003
-auto 3 2 2167022 0.704647784
-auto 3 2 2197989 0.465980003
-auto 3 2 2228957 0.61503268
-auto 3 2 2259925 0.465980003
-auto 3 2 2290893 0.704647784
-auto 3 2 2321860 0.465980003
-auto 3 2 2352828 0.61503268
-auto 3 2 2383796 0.465980003
-auto 3 2 2414764 0.704647784
-auto 3 2 2445731 0.465980003
-auto 3 2 2476699 0.61503268
-auto 3 2 2507667 0.465980003
-auto 3 2 2538635 0.704647784
-auto 3 2 2569602 0.465980003
-pad 0 0 0 0.9 0 0 0
-pad 1 1 0 0.9 0 1 0
-pad 2 2 0 0.7 0 1 0
-pad 3 3 0 0.7 0 1 0
-pad 4 24 0 0.8 0 1 0
-pad 5 25 0 0.8 0 1 0
-pad 6 26 0 0.8 0 1 0
-pad 7 27 0 0.8 0 1 0
-pad 8 41 0 0.8 0 5 0
-pad 9 45 0 0.8 0 5 0
-pad 10 42 0 0.8 0 6 0
-pad 11 44 0 0.9 0 6 0
-pad 12 43 0 0.8 0 6 0
-pad 13 30 0 0.8 0 4 0
-pad 14 28 1 0.7 0 2 0
+auto 2 2 0 0.39203
+auto 2 2 535814 0.825707
+auto 2 2 1607442 0.825707
+auto 2 2 1841860 0.651414
+auto 3 2 1841860 0.46598
+auto 3 2 1857344 0.615033
+auto 3 2 1888312 0.46598
+auto 3 2 1919280 0.704648
+auto 3 2 1950248 0.46598
+auto 3 2 1981215 0.615033
+auto 3 2 2012183 0.46598
+auto 3 2 2043151 0.704648
+auto 3 2 2074119 0.46598
+auto 3 2 2105086 0.615033
+auto 3 2 2136054 0.46598
+auto 3 2 2167022 0.704648
+auto 3 2 2197989 0.46598
+auto 3 2 2228957 0.615033
+auto 3 2 2259925 0.46598
+auto 3 2 2290893 0.704648
+auto 3 2 2321860 0.46598
+auto 3 2 2352828 0.615033
+auto 3 2 2383796 0.46598
+auto 3 2 2414764 0.704648
+auto 3 2 2445731 0.46598
+auto 3 2 2476699 0.615033
+auto 3 2 2507667 0.46598
+auto 3 2 2538635 0.704648
+auto 3 2 2569602 0.46598
+pad 0 0 0 0.899999976 0 0 0
+pad 1 1 0 0.899999976 0 1 0
+pad 2 2 0 0.699999988 0 1 0
+pad 3 3 0 0.699999988 0 1 0
+pad 4 24 0 0.800000012 0 1 0
+pad 5 25 0 0.800000012 0 1 0
+pad 6 26 0 0.800000012 0 1 0
+pad 7 27 0 0.800000012 0 1 0
+pad 8 41 0 0.800000012 0 5 0
+pad 9 45 0 0.800000012 0 5 0
+pad 10 42 0 0.800000012 0 6 0
+pad 11 44 0 0.899999976 0 6 0
+pad 12 43 0 0.800000012 0 6 0
+pad 13 30 0 0.800000012 0 4 0
+pad 14 28 1 0.699999988 0 2 0
+pad 15 -1 0 0.800000012 0 0 0

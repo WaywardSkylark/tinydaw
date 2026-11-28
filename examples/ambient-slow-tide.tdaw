@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Ambient: Slow Tide
 rate 48000
 bpm 70
@@ -170,6 +170,23 @@ drow 1 1 1 0:100 0:100 100:70 0:100 0:100 0:100 100:50 0:100 0:100 0:100 100:70 
 section 0 4 Low water
 section 4 16 Tide
 section 20 4 Ebb
+scene 0 Low water
+scene 1 Tide
+scene 2 Ebb
+slot 0 1 2 64.0000035 4 0 0 0 0 0 0 0 Tide
+slot 1 0 2 16.0000069 0 0 0 0 0 0 0 0 Low water
+slot 1 1 2 64.0000035 4 0 0 0 0 0 0 0 Tide
+slot 1 2 2 15.9999826 20 0 0 0 0 0 0 0 Ebb
+slot 2 0 2 16.0000069 0 0 0 0 0 0 0 0 Low water
+slot 2 1 2 64.0000035 4 0 0 0 0 0 0 0 Tide
+slot 2 2 2 15.9999826 20 0 0 0 0 0 0 0 Ebb
+slot 3 1 2 64.0000035 4 0 0 0 0 0 0 0 Tide
+slot 4 0 2 16.0000069 0 0 0 0 0 0 0 0 Low water
+slot 4 1 2 64.0000035 4 0 0 0 0 0 0 0 Tide
+slot 4 2 2 15.9999826 20 0 0 0 0 0 0 0 Ebb
+slot 5 0 2 16.0000069 0 0 0 0 0 0 0 0 Low water
+slot 5 1 2 64.0000035 4 0 0 0 0 0 0 0 Tide
+slot 5 2 2 15.9999826 20 0 0 0 0 0 0 0 Ebb
 key 4 6
 harmony 0 8 4 6 -1
 harmony 8 8 1 8 -1

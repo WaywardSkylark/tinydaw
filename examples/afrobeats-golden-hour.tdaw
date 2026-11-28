@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Afrobeats: Golden Hour
 rate 48000
 bpm 104
@@ -281,6 +281,25 @@ section 0 4 Intro
 section 4 8 Verse
 section 12 8 Hook
 section 20 8 Hook
+scene 0 Intro
+scene 1 Verse
+scene 2 Hook
+scene 3 Hook
+slot 0 0 2 16.0000028 0 0 0 0 0 0 0 0 Intro
+slot 0 1 2 32.0000056 4 0 0 0 0 0 0 0 Verse
+slot 0 2 2 32.0000056 12 0 0 0 0 0 0 0 Hook
+slot 0 3 2 31.9999694 20 0 0 0 0 0 0 0 Hook
+slot 1 1 2 32.0000056 4 0 0 0 0 0 0 0 Verse
+slot 1 2 2 32.0000056 12 0 0 0 0 0 0 0 Hook
+slot 1 3 2 31.9999694 20 0 0 0 0 0 0 0 Hook
+slot 2 0 2 16.0000028 0 0 0 0 0 0 0 0 Intro
+slot 2 1 2 32.0000056 4 0 0 0 0 0 0 0 Verse
+slot 2 2 2 32.0000056 12 0 0 0 0 0 0 0 Hook
+slot 2 3 2 31.9999694 20 0 0 0 0 0 0 0 Hook
+slot 3 2 2 32.0000056 12 0 0 0 0 0 0 0 Hook
+slot 3 3 2 31.9999694 20 0 0 0 0 0 0 0 Hook
+slot 4 2 2 32.0000056 12 0 0 0 0 0 0 0 Hook
+slot 4 3 2 31.9999694 20 0 0 0 0 0 0 0 Hook
 key 7 0
 harmony 0 4 7 6 -1
 harmony 4 4 4 8 -1

@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.8.0 (examples/make_examples.py)
+saved-by tinydaw 0.8.5 (examples/make_examples.py)
 title Rock: Paper Lanterns
 rate 48000
 bpm 140
@@ -314,6 +314,42 @@ section 12 8 Chorus
 section 20 4 Break
 section 24 8 Chorus (up)
 section 32 1 End
+scene 0 Intro
+scene 1 Verse
+scene 2 Chorus
+scene 3 Break
+scene 4 Chorus (up)
+scene 5 End
+slot 0 0 2 16.0000069 0 0 0 0 0 0 0 0 Intro
+slot 0 1 2 32.0000139 4 0 0 0 0 0 0 0 Verse
+slot 0 2 2 31.9999653 12 0 0 0 0 0 0 0 Chorus
+slot 0 3 2 16.0000069 20 0 0 0 0 0 0 0 Break
+slot 0 4 2 32.0000139 24 0 0 0 0 0 0 0 Chorus (up)
+slot 1 1 2 32.0000139 4 0 0 0 0 0 0 0 Verse
+slot 1 2 2 31.9999653 12 0 0 0 0 0 0 0 Chorus
+slot 1 3 2 16.0000069 20 0 0 0 0 0 0 0 Break
+slot 1 4 2 32.0000139 24 0 0 0 0 0 0 0 Chorus (up)
+slot 1 5 2 4.00001389 32 0 0 0 0 0 0 0 End
+slot 2 0 2 16.0000069 0 0 0 0 0 0 0 0 Intro
+slot 2 1 2 32.0000139 4 0 0 0 0 0 0 0 Verse
+slot 2 2 2 31.9999653 12 0 0 0 0 0 0 0 Chorus
+slot 2 3 2 16.0000069 20 0 0 0 0 0 0 0 Break
+slot 2 4 2 32.0000139 24 0 0 0 0 0 0 0 Chorus (up)
+slot 2 5 2 4.00001389 32 0 0 0 0 0 0 0 End
+slot 3 0 2 16.0000069 0 0 0 0 0 0 0 0 Intro
+slot 3 1 2 32.0000139 4 0 0 0 0 0 0 0 Verse
+slot 3 2 2 31.9999653 12 0 0 0 0 0 0 0 Chorus
+slot 3 3 2 16.0000069 20 0 0 0 0 0 0 0 Break
+slot 3 4 2 32.0000139 24 0 0 0 0 0 0 0 Chorus (up)
+slot 3 5 2 4.00001389 32 0 0 0 0 0 0 0 End
+slot 4 3 2 16.0000069 20 0 0 0 0 0 0 0 Break
+slot 5 2 2 31.9999653 12 0 0 0 0 0 0 0 Chorus
+slot 5 4 2 32.0000139 24 0 0 0 0 0 0 0 Chorus (up)
+slot 6 1 2 32.0000139 4 0 0 0 0 0 0 0 Verse
+slot 6 2 2 31.9999653 12 0 0 0 0 0 0 0 Chorus
+slot 6 3 2 16.0000069 20 0 0 0 0 0 0 0 Break
+slot 6 4 2 32.0000139 24 0 0 0 0 0 0 0 Chorus (up)
+slot 6 5 2 4.00001389 32 0 0 0 0 0 0 0 End
 key 2 0
 keychange 24 4 0
 harmony 0 4 2 0 -1

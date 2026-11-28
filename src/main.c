@@ -490,6 +490,7 @@ static int ed_clip = -1, ed_handle;
 static Clip ed_last, ed_orig;            /* the clip as last seen (to find it again), and at a drag's start */
 #define ED_LIB (-2)                     /* ed_clip: the editor has a library sound, as ed_lib */
 static Clip ed_lib;                     /* the part of it being kept, its gain and fades */
+static SDL_Rect ed_layer_r[4], ed_rr_r[3];   /* (for the self-test) */
 static Clip *ed_c(void);
 static void editor_open_sound(int s);
 static int ed_nclips;
@@ -537,6 +538,8 @@ static SDL_Rect dr_cell[DRUM_ROWS][DRUM_STEPS], dr_head[DRUM_ROWS], dr_add;
 static DrumPat *drum_from_style(int track, int g);
 static int drum_place(DrumPat *d, int bars);
 static void drum_delete(int id);
+static DrumPat *drum_new(int track, const char *name);
+static int hit_sample(const BeatSpec *b, int lane, const char *name);
 static int mixer_open;                  /* the Mixer pane: clip, track and master effects */
 static int vis_open;                    /* the Visualizer pane: spectrum, scope, meters */
 static int show_open;                   /* the full-screen show */
@@ -2929,23 +2932,26 @@ static void rec_push_vel(int pad, int note, int down, int vel)
 }
 static void rec_push(int pad, int note, int down) { rec_push_vel(pad, note, down, 100); }
 
+static unsigned live_rr;                /* round-robin count for live hits */
+
 static void pad_hit(int pad, int vel, int down)
 {
     Pad *pd = &P.pads[pad];
     if (down) pad_flash[pad] = SDL_GetTicks();
     if (pd->sample < 0 || pd->sample >= P.nsamples) return;
+    int smp = sample_pick(&P, pd->sample, vel / 127.0f, live_rr++);   /* its layer for this velocity */
     float gain = pd->volume * (float)vel / 127.0f;
     double step = pow(2.0, pd->pitch / 12.0);
     switch (pd->mode) {
     case PAD_ONESHOT:
         if (!down) return;
         voice_stop(&P, pad, -1);            /* choke: a new hit cuts the last one off */
-        voice_start(&P, pd->sample, step, gain, 0, pad, -1);
+        voice_start(&P, smp, step, gain, 0, pad, -1);
         rec_push(pad, -1, 1);
         break;
     case PAD_HOLD:
         voice_stop(&P, pad, -1);
-        if (down) voice_start(&P, pd->sample, step, gain, 0, pad, -1);
+        if (down) voice_start(&P, smp, step, gain, 0, pad, -1);
         rec_push(pad, -1, down);
         break;
     case PAD_LOOP:                          /* press to start, press again to stop */
@@ -2968,7 +2974,8 @@ static void inst_note(int note, int vel, int down)
         rec_push(-1, note, 0);
         return;
     }
-    voice_start(&P, P.inst_sample, pow(2.0, (note - P.inst_root) / 12.0), 0.9f * (float)vel / 127.0f, 0, -1, note);
+    voice_start(&P, sample_pick(&P, P.inst_sample, vel / 127.0f, live_rr++), pow(2.0, (note - P.inst_root) / 12.0),
+                0.9f * (float)vel / 127.0f, 0, -1, note);
     rec_push_vel(-1, note, 1, vel);
 }
 
@@ -5677,7 +5684,10 @@ static void library_list(int x, int y, int w, int bottom)
         int hov = hit(r) && drag.kind == D_NONE;
         fill(r, P.preview == i ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
         if (lib_flash == i && SDL_GetTicks() - lib_flash_at < 1500) outline(r, ACCENT);   /* just pasted */
-        snprintf(buf, sizeof buf, "%.2fs", (double)P.samples[i].frames / SR);
+        if (P.samples[i].nvel > 0)               /* layers: velocity x round-robin */
+            snprintf(buf, sizeof buf, "%dx%d  %.2fs", P.samples[i].nvel, P.samples[i].nrr, (double)P.samples[i].frames / SR);
+        else
+            snprintf(buf, sizeof buf, "%.2fs", (double)P.samples[i].frames / SR);
         int dw = text_w(buf);
         SDL_Rect xr = {r.x + r.w - 24, r.y + 2, 20, r.h - 4};     /* remove: shown on the row under the mouse */
         int nx = r.x + 8;
@@ -5886,6 +5896,8 @@ static void gx_name(char *buf, size_t n)
     else snprintf(buf, n, "%s", p->name);
 }
 
+static int gx_nvel = 3, gx_nrr = 2;      /* the layers new Generator sounds get */
+
 static int gx_keep(void)
 {
     char name[96];
@@ -5893,6 +5905,7 @@ static int gx_keep(void)
     GX.a4 = P.a4;
     int idx = sample_generate_synth(&P, &GX, name);
     if (idx < 0) status("Library is full");
+    else if (gx_nvel * gx_nrr > 1) sample_make_layers(&P, idx, gx_nvel, gx_nrr);
     return idx;
 }
 
@@ -5992,7 +6005,28 @@ static int gx_shape(int x, int y, int w)
         synth_from_preset(&GX, gx_preset);
         changed = 1;
     }
-    y += 38;
+    y += 34;
+    {                                       /* velocity layers and round-robins for what's kept */
+        char nb[8];
+        text(x, y + 5, "Layers", DIM);
+        int lx = x + text_w("Layers") + 8, bw = 26;
+        for (int i = 1; i <= MAX_VEL; i++) {
+            snprintf(nb, sizeof nb, "%d", i);
+            SDL_Rect b = {lx + (i - 1) * (bw + 3), y, bw, 24};
+            tip(b, i == 1 ? "One sound at every velocity" : "%d velocity layers: softer hits play a darker, gentler copy", i);
+            if (button(b, nb, gx_nvel == i)) gx_nvel = i;
+        }
+        int rx = lx + MAX_VEL * (bw + 3) + 12;
+        text(rx, y + 5, "Round-robins", DIM);
+        rx += text_w("Round-robins") + 8;
+        for (int i = 1; i <= MAX_RR; i++) {
+            snprintf(nb, sizeof nb, "%d", i);
+            SDL_Rect b = {rx + (i - 1) * (bw + 3), y, bw, 24};
+            tip(b, i == 1 ? "Every hit the same" : "%d slightly different copies, taken in turn, so repeated hits don't sound machine-made", i);
+            if (button(b, nb, gx_nrr == i)) gx_nrr = i;
+        }
+        y += 32;
+    }
     if (changed) gx_play();                  /* hear each change as soon as you let go */
 
     int hearing = scratch && scratch == gx_heard && scratch_pos < scratch_len;
@@ -11042,8 +11076,11 @@ static int selftest(void)
         int ns = P.nsamples;
         r = gx_lib_r;
         sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
-        check(P.nsamples == ns + 1 && P.samples[ns].synth && !strcmp(P.samples[ns].name, "Wobble bass"),
-              "+ Library keeps the sound");
+        int hidden_layers = 1;
+        for (int i = ns + 1; i < P.nsamples; i++) hidden_layers &= P.samples[i].is_layer && P.samples[i].hidden;
+        check(P.nsamples == ns + 6 && P.samples[ns].synth && !strcmp(P.samples[ns].name, "Wobble bass") &&
+                  P.samples[ns].nvel == 3 && P.samples[ns].nrr == 2 && hidden_layers,
+              "+ Library keeps the sound, with 3 velocity layers and 2 round-robins kept out of the list");
         int nc = P.nclips;
         P.playhead = 8 * (long)SR;
         frame();
@@ -11057,8 +11094,9 @@ static int selftest(void)
         GX.note = 38;
         frame();
         r = gx_inst_r;
+        int ns_inst = P.nsamples;
         sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
-        check(P.inst_sample == P.nsamples - 1 && P.inst_root == 38, "Play notes with it makes it the instrument at its note");
+        check(P.inst_sample == ns_inst && P.inst_root == 38, "Play notes with it makes it the instrument at its note");
         r = gx_kind_r[0];                       /* the sound being shaped stays when the filter changes */
         sim(r.x + 5, r.y + 5, 1, 1, 0, 0);
         gx_kind = -1;
@@ -12501,6 +12539,90 @@ static int selftest(void)
         history_check();
     }
 
+
+    /* ---- velocity layers and round-robins */
+    {
+        new_project();
+        frame();
+        long n = SR / 2;                          /* white noise: easy to tell darker from brighter */
+        float *nz = malloc((size_t)n * 2 * sizeof(float));
+        unsigned seed = 1;
+        for (long i = 0; i < n; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            nz[2 * i] = nz[2 * i + 1] = ((seed >> 9) / 8388608.0f - 1) * 0.5f;
+        }
+        int s0 = sample_add(&P, "noise", nz, n), ns = P.nsamples;
+        int ok = sample_make_layers(&P, s0, 3, 2) == 0;
+        Sample *o = &P.samples[s0];
+        check(ok && P.nsamples == ns + 5 && o->nvel == 3 && o->nrr == 2 && o->layer[2][0] == s0 &&
+                  sample_pick(&P, s0, 1.0f, 0) == s0 && sample_pick(&P, s0, 1.0f, 1) != s0 &&
+                  sample_pick(&P, s0, 0.1f, 0) == o->layer[0][0] && sample_pick(&P, s0, 0.5f, 0) == o->layer[1][0],
+              "a sound gets 3 layers and 2 round-robins; hits pick by velocity and take the round-robins in turn");
+        double hf[3];                             /* how bright each layer is: its first difference's energy */
+        for (int l = 0; l < 3; l++) {
+            const Sample *ls = &P.samples[o->layer[l][0]];
+            double e = 0, d = 0;
+            for (long i = 1; i < ls->frames; i++) {
+                double v = ls->data[2 * i], dv = v - ls->data[2 * i - 2];
+                e += v * v;
+                d += dv * dv;
+            }
+            hf[l] = d / (e + 1e-12);
+        }
+        check(hf[0] < hf[1] && hf[1] < hf[2], "softer layers are darker");
+        const Sample *rr1 = &P.samples[o->layer[2][1]];
+        check(rr1->frames != o->frames || memcmp(rr1->data, o->data, (size_t)n * 2 * sizeof(float)),
+              "a round-robin is a touch different from the sound itself");
+        check(sample_make_layers(&P, s0, 1, 1) == 0 && o->nvel == 0 && sample_pick(&P, s0, 0.1f, 1) == s0,
+              "1 layer and 1 round-robin goes back to the sound alone");
+        sample_make_layers(&P, s0, 3, 2);
+        /* a drum pattern plays them: two hits at full velocity aren't the same sound */
+        DrumPat *d = drum_new(0, "rr");
+        LOCK();
+        d->nrows = 1;
+        d->sample[0] = s0;
+        d->vel[0][0] = d->vel[0][8] = 127;
+        P.tracks[0].volume = 1;
+        P.playhead = 0;
+        UNLOCK();
+        int c = drum_place(d, 1);
+        Mixer *m = mixer_new();
+        long len = meter_bar_frame(&P, 1);
+        float *buf = calloc((size_t)len * 2, sizeof(float));
+        for (long f = 0; f < len; f += 512) mixer_run(m, &P, f, 1, buf + 2 * f, (int)(len - f < 512 ? len - f : 512), 0, 0);
+        long h2 = meter_beats_frame(&P, 2.0);
+        double diff = 0, e1 = 0;
+        for (long i = 0; i < SR / 10; i++) {
+            diff += fabs(buf[2 * i] - buf[2 * (h2 + i)]);
+            e1 += fabs(buf[2 * i]);
+        }
+        check(c >= 0 && e1 > 1 && diff > e1 * 0.05, "a drum pattern takes the round-robins in turn");
+        free(buf);
+        mixer_free(m);
+        char tp[1100], msg2[256];
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(tp, sizeof tp, "%s/tinydaw-layers-%u.tdaw", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        int ks = hit_sample(&(BeatSpec){.kick_hz = 50, .kick_decay = 0.4, .snare_hz = 200, .hat_decay = 0.05,
+                                        .open_decay = 0.3, .volume = 0.8, .steps = 16}, 0, "kick");
+        check(ks >= 0 && P.samples[ks].nvel == 3 && P.samples[ks].nrr == 2, "drum kits come with layers");
+        ok = project_save(&P, tp, msg2, sizeof msg2) == 0;
+        Project *q = malloc(sizeof *q);
+        ok = ok && project_load(q, tp, msg2, sizeof msg2) == 0;
+        if (ok) {
+            const Sample *qk = &q->samples[ks];
+            ok = qk->nvel == 3 && qk->nrr == 2 && !memcmp(qk->layer, P.samples[ks].layer, sizeof qk->layer) &&
+                 q->samples[qk->layer[0][1]].is_layer && q->samples[qk->layer[0][1]].frames == P.samples[P.samples[ks].layer[0][1]].frames;
+            project_free(q);
+        }
+        free(q);
+        remove(tp);
+        check(ok, "layers save and open again, made the same way");
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
     /* ---- Export: choosing the folder and file name */
     {
         char keep_proj[1024];
@@ -13434,7 +13556,9 @@ static int hit_sample(const BeatSpec *b, int lane, const char *name)    /* one d
         const Sample *s = &P.samples[i];
         if (s->is_beat == 2 && !s->removed && s->beat_mask == lane && same_beat(&s->beat, b)) return i;
     }
-    return sample_generate_hit(&P, b, lane, name);
+    int idx = sample_generate_hit(&P, b, lane, name);
+    if (idx >= 0) sample_make_layers(&P, idx, 3, 2);   /* soft to hard, and no two hits in a row the same */
+    return idx;
 }
 
 /* ---------------------------------------------------------------- the Drums panel
@@ -14795,7 +14919,7 @@ static void editor_draw(void)
     y += 40;
 
     /* the waveform: the whole sound, the clip's part lit */
-    int wh = H - y - 350;
+    int wh = H - y - 350 - (lib ? 70 : 0);
     ed_wave = (SDL_Rect){x, y, w, wh < 120 ? 120 : wh};
     fill(ed_wave, PANEL2);
     int mid = ed_wave.y + ed_wave.h / 2, half = ed_wave.h / 2 - 6;
@@ -14901,6 +15025,66 @@ static void editor_draw(void)
             editor_view_clip();
         }
         y += 42;
+        y = section(x, y, w, "VELOCITY LAYERS AND ROUND-ROBINS");
+        {                                        /* on the library sound itself */
+            int b = sample_base(&P, c->sample);
+            Sample *bs = &P.samples[b];
+            int nv = bs->nvel > 0 ? bs->nvel : 1, nr = bs->nrr > 0 ? bs->nrr : 1, bw = 30, want_v = nv, want_r = nr;
+            char nb[8];
+            text(x, y + 6, "Layers", DIM);
+            int lx = x + text_w("Layers") + 8;
+            for (int i = 1; i <= MAX_VEL; i++) {
+                snprintf(nb, sizeof nb, "%d", i);
+                SDL_Rect r = {lx + (i - 1) * (bw + 3), y, bw, 26};
+                tip(r, i == 1 ? "One sound at every velocity" : "%d velocity layers: softer hits play a darker, gentler copy", i);
+                ed_layer_r[i - 1] = r;
+                if (button(r, nb, nv == i)) want_v = i;
+            }
+            int rx = lx + MAX_VEL * (bw + 3) + 14;
+            text(rx, y + 6, "Round-robins", DIM);
+            rx += text_w("Round-robins") + 8;
+            for (int i = 1; i <= MAX_RR; i++) {
+                snprintf(nb, sizeof nb, "%d", i);
+                SDL_Rect r = {rx + (i - 1) * (bw + 3), y, bw, 26};
+                tip(r, i == 1 ? "Every hit the same" : "%d slightly different copies taken in turn, so repeats don't sound machine-made", i);
+                ed_rr_r[i - 1] = r;
+                if (button(r, nb, nr == i)) want_r = i;
+            }
+            int hx = rx + MAX_RR * (bw + 3) + 14;
+            SDL_Rect hb = {hx, y, x + w - hx, 26};
+            tip(hb, "Each layer from soft to hard, then the round-robins of the hardest");
+            if (hb.w > 60 && button(hb, "Hear them", 0)) {
+                long each = SR * 6 / 10, gap = SR / 8, n = (long)(nv + nr) * (each + gap);
+                float *buf = calloc((size_t)n * 2, sizeof(float));
+                if (buf) {
+                    long at = 0;
+                    for (int k = 0; k < nv + nr - 1; k++) {
+                        int l = k < nv ? k : nv - 1, r = k < nv ? 0 : k - nv + 1;
+                        int si = bs->nvel > 0 ? bs->layer[l][r] : b;
+                        const Sample *ls = &P.samples[si >= 0 && si < P.nsamples ? si : b];
+                        float g = (float)(l + 1) / nv;
+                        for (long i = 0; i < each && i < ls->frames; i++) {
+                            float e = each - i < SR / 50 ? (float)(each - i) / (SR / 50) : 1;
+                            buf[2 * (at + i)] = ls->data[2 * i] * g * e;
+                            buf[2 * (at + i) + 1] = ls->data[2 * i + 1] * g * e;
+                        }
+                        at += each + gap;
+                    }
+                    play_scratch(buf, at);
+                }
+            }
+            if (want_v != nv || want_r != nr) {
+                if (sample_make_layers(&P, b, want_v, want_r) == 0)
+                    status(want_v * want_r > 1 ? "\"%s\": %d velocity layer%s, %d round-robin%s"
+                                               : "\"%s\": one sound at every velocity again",
+                           bs->name, want_v, want_v == 1 ? "" : "s", want_r, want_r == 1 ? "" : "s");
+                else
+                    status("Library is full");
+            }
+            y += 34;
+            text(x, y, "Drum patterns, note clips, pads and MIDI keys pick a layer by how hard each hit is.", DIM);
+            y += font_h + 14;
+        }
     } else {
     y = section(x, y, w, "WHERE IT PLAYS");
     if (!(drag.kind == D_NUM && drag.num == &st_b) && !(numedit.active && numedit.v == &st_b)) st_b = c->start / bf + 1;

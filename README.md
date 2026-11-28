@@ -15,6 +15,9 @@ your computer keyboard, a game controller or a MIDI keyboard, and record what yo
   pan and sidechain ducking, delay and reverb, a master compressor and limiter with a loudness meter
   (LUFS), and a mixing console you can pop out into its own window.
 - **Sings your words:** type a line, pick a tune and a voice, and it sings it, in 12 languages.
+- **Sounds that respond to touch:** velocity layers (a soft hit is darker and gentler, not just
+  quieter) and round-robins (no two hits in a row the same) on Generator sounds, drum kits and any
+  sound you choose.
 - **Drum step sequencer:** patterns of any sounds over 16 or 32 steps, with velocity and a chance
   of playing on every step, swing, and a start from any of the 30 styles.
 - **Piano roll, MIDI and automation:** play or write melodies (quantize and humanize them), import
@@ -91,6 +94,7 @@ Settings > **Keys** lists every shortcut.
 | Put a sound in the song | Drag it from the library onto a track |
 | Hear a sound first | Click it in the library (click again to stop) |
 | Remove a sound | The **×** on its row in the library, or right-click it > **Remove from the library**. Its clips go too; Ctrl+Z brings both back |
+| Give a sound layers | Right-click it > **Open in the clip editor** > **Layers** 1-4 and **Round-robins** 1-3 (**Hear them** plays each). Generator sounds get 3 x 2 as they're made (set it under the sliders), drum kits too; the library shows it as "3x2". Drum patterns, note clips, pads and MIDI pick a layer by how hard each hit is |
 | Edit a clip or a sound | Double-click an audio clip: the clip editor opens in its own window (trim, fades, gain, pitch, reverse, normalize, split). Right-click a library sound > **Open in the clip editor** to shape the sound itself, then **Save as a new sound** (the original stays) |
 | Keep a sound for later | Right-click it in the library > **Save for future sessions**: a copy goes in Music/tinydaw/Saved sounds, and every project's library has it. **Pin to the top** keeps it first in the list (and saves it). **Forget the saved copy** moves the file out to Unsaved sounds |
 | Copy a sound | Right-click a library sound, pad or the instrument slot > **Copy**, then right-click another > **Paste** (or Ctrl+C / Ctrl+V over them). Pad to pad copies its settings too |

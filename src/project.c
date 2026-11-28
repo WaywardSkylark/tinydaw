@@ -37,6 +37,7 @@ static const char *kind_of(const Sample *s)
     if (s->generated && s->nchord) return "chord";
     if (s->generated) return "gen";
     if (s->pitched) return "variant";
+    if (s->is_layer) return "layer";
     if (s->path[0]) return "file";
     return "raw";
 }
@@ -110,6 +111,13 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
                 fprintf(f, "vnote %d %.9g %.9g\n", v->notes[k].note, v->notes[k].start, v->notes[k].len);
         }
         if (s->pitched) fprintf(f, "variant %d %d %d %.17g\n", s->src, s->semis, s->reversed, s->stretch > 0 ? s->stretch : 1);
+        if (s->is_layer) fprintf(f, "layer %d %d %d %d\n", s->src, s->layer_lvl, s->layer_n, s->layer_rr);
+        if (s->nvel > 0 && s->nrr > 0) {
+            fprintf(f, "layers %d %d", s->nvel, s->nrr);
+            for (int l = 0; l < MAX_VEL; l++)
+                for (int r = 0; r < MAX_RR; r++) fprintf(f, " %d", s->layer[l][r]);
+            fprintf(f, "\n");
+        }
         if (s->hidden) fprintf(f, "hidden\n");
         if (s->path[0]) fprintf(f, "path %s\n", s->path);
         if (s->removed) fprintf(f, "removed\n");
@@ -170,6 +178,8 @@ typedef struct {
     BeatSpec beat;
     int mask, src, semis, reversed, removed, listed, hidden;
     double stretch;
+    int lvl, ln, lrr;                     /* a layer */
+    int nvel, nrr, table[MAX_VEL][MAX_RR];   /* its layers */
 } Pending;
 
 static const char *rest_after(const char *line, int fields)   /* the text after n words */
@@ -217,6 +227,8 @@ static int build(Project *p, Pending *s, int *missing)
         idx = sample_generate_hit(p, &s->beat, s->mask, s->name);
     } else if ((!strcmp(s->kind, "pitched") || !strcmp(s->kind, "variant")) && s->src >= 0 && s->src < p->nsamples) {
         idx = sample_variant_ex(p, s->src, s->semis, s->reversed, s->stretch > 0 ? s->stretch : 1);
+    } else if (!strcmp(s->kind, "layer") && s->src >= 0 && s->src < p->nsamples) {
+        idx = sample_layer(p, s->src, s->lvl, s->ln, s->lrr);
     } else if (!strcmp(s->kind, "file") && s->path[0]) {
         char err[200];
         idx = sample_import(p, s->path, err, sizeof err);
@@ -233,6 +245,11 @@ static int build(Project *p, Pending *s, int *missing)
     if (idx >= 0) p->samples[idx].removed = s->removed;
     if (idx >= 0) p->samples[idx].listed = s->listed;
     if (idx >= 0) p->samples[idx].hidden = s->hidden;
+    if (idx >= 0 && s->nvel > 0 && s->nrr > 0) {   /* its layers come later: checked once all are in */
+        memcpy(p->samples[idx].layer, s->table, sizeof s->table);
+        p->samples[idx].nvel = s->nvel;
+        p->samples[idx].nrr = s->nrr;
+    }
     return idx;
 }
 
@@ -375,6 +392,19 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         } else if (in_sample && !strcmp(word, "variant")) {
             s.stretch = 1;
             ok = sscanf(line, "variant %d %d %d %lf", &s.src, &s.semis, &s.reversed, &s.stretch) >= 3 && s.stretch > 0;
+        } else if (in_sample && !strcmp(word, "layer")) {
+            ok = sscanf(line, "layer %d %d %d %d", &s.src, &s.lvl, &s.ln, &s.lrr) == 4 && s.ln >= 1 && s.ln <= MAX_VEL &&
+                 s.lvl >= 0 && s.lvl < s.ln && s.lrr >= 0 && s.lrr < MAX_RR;
+        } else if (in_sample && !strcmp(word, "layers")) {
+            int at = 0, used = 0;
+            ok = sscanf(line, "layers %d %d %n", &s.nvel, &s.nrr, &at) >= 2 && s.nvel >= 1 && s.nvel <= MAX_VEL &&
+                 s.nrr >= 1 && s.nrr <= MAX_RR;
+            const char *q = line + at;
+            for (int l = 0; ok && l < MAX_VEL; l++)
+                for (int r = 0; ok && r < MAX_RR; r++) {
+                    ok = sscanf(q, " %d%n", &s.table[l][r], &used) == 1;
+                    q += used;
+                }
         } else if (in_sample && !strcmp(word, "removed")) {
             s.removed = 1;
         } else if (in_sample && !strcmp(word, "listed")) {
@@ -491,6 +521,13 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
     fclose(f);
     f = NULL;
     p->ntracks = ntracks > 0 ? ntracks : DEFAULT_TRACKS;
+    for (int i = 0; i < p->nsamples; i++) {      /* layers that didn't come back: the sound alone */
+        Sample *o = &p->samples[i];
+        int good = o->nvel > 0;
+        for (int l = 0; good && l < MAX_VEL; l++)
+            for (int r = 0; good && r < MAX_RR; r++) good = o->layer[l][r] >= 0 && o->layer[l][r] < p->nsamples;
+        if (!good) o->nvel = o->nrr = 0;
+    }
     auto_sort(p);
     for (int c = 0; c < p->nclips; c++)
         if (p->clips[c].track >= p->ntracks) p->ntracks = p->clips[c].track + 1;

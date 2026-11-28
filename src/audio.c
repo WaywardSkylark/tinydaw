@@ -645,6 +645,8 @@ float *time_stretch(const float *in, long n, double factor, long *out_n)
     return out;
 }
 
+static float *layer_render(const Sample *s, int lvl, int n, int rr, long *frames);
+
 static float *variant_render(const Sample *s, int semis, int reverse, double stretch, long *frames)
 {
     float *d = NULL;
@@ -844,6 +846,8 @@ int project_set_rate(Project *p, int rate, char *msg, size_t msglen)
         else if (s->path[0]) nd = load_file(s->path, &nf, err, sizeof err);
         else if (s->pitched && s->src >= 0 && s->src < i)
             nd = variant_render(&p->samples[s->src], s->semis, s->reversed, s->stretch, &nf);
+        else if (s->is_layer && s->src >= 0 && s->src < i)
+            nd = layer_render(&p->samples[s->src], s->layer_lvl, s->layer_n, s->layer_rr, &nf);
         if (nd) {
             rebuilt++;
         } else {
@@ -902,6 +906,105 @@ float soft_clip(float v)
     if (a <= knee) return v;
     float shaped = knee + (1.0f - knee) * tanhf((a - knee) / (1.0f - knee));
     return v < 0 ? -shaped : shaped;
+}
+
+
+/* ---------------------------------------------------------------- velocity layers and round-robins */
+
+static float *layer_render(const Sample *s, int lvl, int n, int rr, long *frames)
+{
+    float *d = NULL;
+    long nf = s->frames;
+    if (rr > 0) {                                /* a few cents away, alternating up and down */
+        double cents = (rr % 2 ? 1 : -1) * (5.0 + 3.0 * (rr / 2));
+        d = resample(s->data, s->frames, 2, pow(2.0, -cents / 1200), &nf, SRC_SINC_MEDIUM_QUALITY);
+    } else {
+        d = malloc((size_t)nf * 2 * sizeof(float));
+        if (d) memcpy(d, s->data, (size_t)nf * 2 * sizeof(float));
+    }
+    if (!d) return NULL;
+    double t = n > 1 ? (double)lvl / (n - 1) : 1;
+    float g = rr > 0 ? (float)pow(10, -0.35 * rr / 20) : 1;
+    if (t < 1) {                                 /* softer: darker, and a gentler start */
+        double fc = 18000 * pow(0.22, 1 - t);
+        if (fc > SR * 0.45) fc = SR * 0.45;
+        double a = 1 - exp(-2 * PI * fc / SR);
+        long ramp = (long)((1 - t) * 0.0025 * SR);
+        for (int c = 0; c < 2; c++) {
+            double y1 = 0, y2 = 0;
+            for (long i = 0; i < nf; i++) {      /* two one-pole low-passes */
+                y1 += a * (d[2 * i + c] - y1);
+                y2 += a * (y1 - y2);
+                double e = ramp > 0 && i < ramp ? (double)i / ramp : 1;
+                d[2 * i + c] = (float)(y2 * e) * g;
+            }
+        }
+    } else if (g != 1) {
+        for (long i = 0; i < 2 * nf; i++) d[i] *= g;
+    }
+    *frames = nf;
+    return d;
+}
+
+int sample_layer(Project *p, int src, int lvl, int n, int rr)
+{
+    if (src < 0 || src >= p->nsamples || !p->samples[src].data) return -1;
+    for (int i = 0; i < p->nsamples; i++) {
+        const Sample *o = &p->samples[i];
+        if (o->is_layer && o->src == src && o->layer_lvl == lvl && o->layer_n == n && o->layer_rr == rr) return i;
+    }
+    long nf;
+    float *d = layer_render(&p->samples[src], lvl, n, rr, &nf);
+    if (!d) return -1;
+    char name[96];
+    snprintf(name, sizeof name, "%.70s v%d r%d", p->samples[src].name, (lvl + 1) % 10, (rr + 1) % 10);
+    int idx = sample_add(p, name, d, nf);
+    if (idx >= 0) {
+        Sample *t = &p->samples[idx];
+        t->is_layer = 1;
+        t->hidden = 1;
+        t->src = src;
+        t->layer_lvl = lvl;
+        t->layer_n = n;
+        t->layer_rr = rr;
+    }
+    return idx;
+}
+
+int sample_make_layers(Project *p, int s, int nvel, int nrr)
+{
+    if (s < 0 || s >= p->nsamples) return -1;
+    nvel = nvel < 1 ? 1 : nvel > MAX_VEL ? MAX_VEL : nvel;
+    nrr = nrr < 1 ? 1 : nrr > MAX_RR ? MAX_RR : nrr;
+    int table[MAX_VEL][MAX_RR];
+    for (int l = 0; l < MAX_VEL; l++)
+        for (int r = 0; r < MAX_RR; r++) table[l][r] = s;
+    for (int l = 0; l < nvel; l++)
+        for (int r = 0; r < nrr; r++) {
+            if (l == nvel - 1 && r == 0) continue;   /* the hardest, first: the sound itself */
+            int k = sample_layer(p, s, l, nvel, r);
+            if (k < 0) return -1;
+            table[l][r] = k;
+        }
+    Sample *o = &p->samples[s];
+    o->nvel = 0;                                 /* the audio thread sees the table only once it's whole */
+    o->nrr = 0;
+    memcpy(o->layer, table, sizeof table);
+    o->nrr = nvel * nrr > 1 ? nrr : 0;
+    o->nvel = nvel * nrr > 1 ? nvel : 0;
+    return 0;
+}
+
+int sample_pick(const Project *p, int s, float vel, unsigned rr)
+{
+    if (s < 0 || s >= p->nsamples) return s;
+    const Sample *o = &p->samples[s];
+    int nv = o->nvel, nr = o->nrr;
+    if (nv < 1 || nr < 1 || nv * nr < 2) return s;
+    int l = (int)(vel * nv);
+    l = l < 0 ? 0 : l >= nv ? nv - 1 : l;
+    int k = o->layer[l][rr % (unsigned)nr];
+    return k >= 0 && k < p->nsamples && p->samples[k].data ? k : s;
 }
 
 /* ---------------------------------------------------------------- live voices */

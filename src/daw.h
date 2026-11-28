@@ -155,6 +155,10 @@ typedef struct {
     SynthSound syn;
     int vocal;              /* made in the Singer: rebuilt from voc (needs eSpeak NG) */
     VocalSpec voc;
+    int nvel, nrr;          /* velocity layers (soft to hard) and round-robins; 0 or 1 = just this sound */
+    int layer[4][3];        /* the sound for each layer and round-robin (the hardest's first is this one) */
+    int is_layer;           /* a layer of sound `src`: layer layer_lvl of layer_n, round-robin layer_rr */
+    int layer_lvl, layer_n, layer_rr;
     int saved;              /* a copy is in the Saved sounds folder: it's in every project's library */
     int pinned;             /* kept at the top of the library (and saved) */
 } Sample;
@@ -405,6 +409,14 @@ float *time_stretch(const float *in, long frames, double factor, long *out_frame
 int sample_at_tempo(Project *p, int s, double ratio);
 int sample_pitched(Project *p, int src, int semis);
 int sample_base(const Project *p, int s);       /* the original a variant was made from */
+/* Velocity layers and round-robins: copies of a sound made softer (darker, a gentler start) for
+ * lower layers and a touch different (a few cents, a little level) for each round-robin. */
+#define MAX_VEL 4
+#define MAX_RR 3
+int sample_make_layers(Project *p, int s, int nvel, int nrr);   /* 1, 1 takes them away */
+int sample_layer(Project *p, int src, int lvl, int n, int rr);  /* one layer, made or reused */
+/* The sound to play for a hit of `s` at velocity vel (0..1), the rr-th hit in a row. */
+int sample_pick(const Project *p, int s, float vel, unsigned rr);
 
 /* ---- live voices (call with the audio device locked) ---- */
 int voice_start(Project *p, int sample, double step, float gain, int loop, int pad, int note);

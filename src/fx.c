@@ -253,8 +253,7 @@ double drum_step_beat(const DrumPat *d, long k) { return k * 0.25 + ((k & 1) ? d
 
 static void add_pattern(Mixer *m, const Project *p, const Clip *cl, long start, int n)
 {
-    const Sample *s = &p->samples[cl->sample];
-    if (!s->data || s->frames < 2) return;
+    if (!p->samples[cl->sample].data || p->samples[cl->sample].frames < 2) return;
     long ca = start > cl->start ? start : cl->start;
     long cb = start + n < cl->start + cl->length ? start + n : cl->start + cl->length;
     if (ca >= cb) return;
@@ -264,6 +263,8 @@ static void add_pattern(Mixer *m, const Project *p, const Clip *cl, long start, 
     for (int k = 0; k < p->nnotes; k++) {
         const Note *nt = &p->notes[k];
         if (nt->pattern != cl->pattern) continue;
+        const Sample *s = &p->samples[sample_pick(p, cl->sample, nt->vel, (unsigned)(nt->start / 997 + nt->note * 7))];
+        if (!s->data || s->frames < 2) continue;
         long ns = origin + nt->start, ne = ns + nt->length;
         long a = ca > ns ? ca : ns, b = cb < ne + rel_f ? cb : ne + rel_f;
         if (a >= b) continue;
@@ -293,9 +294,17 @@ static void add_drums(Mixer *m, const Project *p, const Clip *cl, long start, in
     const DrumPat *d = drum_find_c(p, -cl->pattern);
     if (!d || d->steps < 1) return;
     long maxlen = 0;
-    for (int r = 0; r < d->nrows; r++)
+    int per[DRUM_ROWS], before[DRUM_ROWS][DRUM_STEPS];   /* hits per pass, and before each step: round-robins */
+    for (int r = 0; r < d->nrows; r++) {
         if (d->sample[r] >= 0 && d->sample[r] < p->nsamples && p->samples[d->sample[r]].frames > maxlen)
             maxlen = p->samples[d->sample[r]].frames;
+        per[r] = 0;
+        for (int k = 0; k < d->steps; k++) {
+            before[r][k] = per[r];
+            per[r] += d->vel[r][k] != 0;
+        }
+    }
+    maxlen += maxlen / 50 + 64;                  /* a round-robin a few cents down is a touch longer */
     long cend = cl->start + cl->length;
     if (start >= cend + maxlen || start + n <= cl->start || !maxlen) return;
     long origin = cl->start - cl->offset, from = start - maxlen;
@@ -312,6 +321,7 @@ static void add_drums(Mixer *m, const Project *p, const Clip *cl, long start, in
         for (int r = 0; r < d->nrows; r++) {
             int si = d->sample[r];
             if (si < 0 || si >= p->nsamples || !drum_plays(d, r, k, origin)) continue;
+            si = sample_pick(p, si, d->vel[r][st] / 127.0f, (unsigned)((k / d->steps) * per[r] + before[r][st]));
             const Sample *s = &p->samples[si];
             if (!s->data) continue;
             long a = start > hf ? start : hf, b = start + n < hf + s->frames ? start + n : hf + s->frames;

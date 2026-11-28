@@ -5,7 +5,7 @@ what was decided along the way. Newest first. It's here to give context to whoev
 next. The manual (`docs/manual.md`) says how things work for users; this says why they're built the
 way they are.
 
-## Unreleased (after 0.8.0)
+## 0.8.5 (released 2026-11-28)
 
 ### 2026-11-28: The session view (clip launcher)
 

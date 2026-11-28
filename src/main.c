@@ -4866,6 +4866,407 @@ static int clip_bend_editor(int x, int y, int w)
     return y;
 }
 
+/* ---- presets: a track's whole chain (filter, EQ, drive, sends, duck, width, compressor and macros),
+ * and the shared delay and reverb. Built-in ones, and your own saved as small text files in
+ * Music/tinydaw/Presets (Track, Delay, Reverb), so every project has them. */
+
+static int slider(SDL_Rect r, double *v);
+enum { PK_TRACK, PK_DELAY, PK_REVERB, PK_KINDS };
+static const char *const PK_DIR[PK_KINDS] = {"Track", "Delay", "Reverb"};
+#define BUILTIN_TRACK 10
+#define BUILTIN_DELAY 6
+#define BUILTIN_REVERB 5
+static const char *const TRACK_PRESET_NAMES[BUILTIN_TRACK] = {"Clean", "Warm tape", "Telephone", "Wide pad", "Pumping",
+                                                               "Lo-fi crush", "Filter sweep", "Vocal", "Punchy drums", "Dub send"};
+static const char *const DELAY_PRESET_NAMES[BUILTIN_DELAY] = {"Slapback", "Eighth echo", "Dotted 8th", "Triplet bounce",
+                                                               "Dub quarter", "Long half"};
+static const char *const REVERB_PRESET_NAMES[BUILTIN_REVERB] = {"Room", "Plate", "Hall", "Cathedral", "Dark chamber"};
+
+static void preset_dir(int kind, char *buf, size_t n)
+{
+    const char *e = SDL_getenv("TINYDAW_PRESETS_DIR");
+    char base[900];
+    if (e && *e) snprintf(base, sizeof base, "%s", e);
+    else {
+        char m[800];
+        user_dir("music", m, sizeof m);
+        snprintf(base, sizeof base, "%s/tinydaw/Presets", m);
+    }
+    snprintf(buf, n, "%s/%s", base, PK_DIR[kind]);
+}
+
+static void macro_set(Macro *m, const char *name, float value)
+{
+    memset(m, 0, sizeof *m);
+    snprintf(m->name, sizeof m->name, "%s", name);
+    m->value = value;
+}
+
+static void macro_link(Macro *m, int param, float lo, float hi)
+{
+    if (m->nlinks < MACRO_LINKS) m->link[m->nlinks++] = (MacroLink){param, lo, hi};
+}
+
+/* a track's chain, everything but its name, level, pan, mute and solo, set to a built-in preset */
+static void builtin_track_preset(int i, Track *t)
+{
+    t->filter = FILT_OFF;
+    t->cutoff = 1200;
+    t->reso = 0.2f;
+    t->eq[0] = t->eq[1] = t->eq[2] = 0;
+    t->drive = t->delay_send = t->reverb_send = t->duck = 0;
+    t->width = 1;
+    t->comp_on = 0;
+    t->comp_thresh = -18, t->comp_ratio = 3, t->comp_attack = 10, t->comp_release = 150, t->comp_makeup = 0;
+    memset(t->macro, 0, sizeof t->macro);
+    Macro *m = t->macro;
+    switch (i) {
+    case 1:                                      /* warm tape */
+        t->filter = FILT_LOW, t->cutoff = 9000, t->eq[0] = 2, t->eq[2] = -2, t->drive = 0.2f;
+        t->comp_on = 1, t->comp_thresh = -18, t->comp_ratio = 2.5f;
+        macro_set(&m[0], "Warmth", 0.3f);
+        macro_link(&m[0], TP_DRIVE, 0.05f, 0.6f);
+        macro_link(&m[0], TP_CUTOFF, 14000, 3000);
+        break;
+    case 2:                                      /* telephone */
+        t->filter = FILT_BAND, t->cutoff = 1500, t->reso = 0.4f, t->eq[0] = -12, t->eq[2] = -8, t->drive = 0.35f;
+        macro_set(&m[0], "Ring", 0.5f);
+        macro_link(&m[0], TP_CUTOFF, 700, 3200);
+        break;
+    case 3:                                      /* wide pad */
+        t->width = 1.8f, t->reverb_send = 0.5f, t->delay_send = 0.2f, t->eq[0] = -3;
+        macro_set(&m[0], "Space", 0.5f);
+        macro_link(&m[0], TP_REVERB, 0.2f, 0.85f);
+        macro_link(&m[0], TP_WIDTH, 1.0f, 2.0f);
+        break;
+    case 4:                                      /* pumping */
+        t->duck = 0.8f, t->comp_on = 1, t->comp_thresh = -20, t->comp_ratio = 4;
+        macro_set(&m[0], "Pump", 0.8f);
+        macro_link(&m[0], TP_DUCK, 0, 1);
+        break;
+    case 5:                                      /* lo-fi crush */
+        t->filter = FILT_LOW, t->cutoff = 3500, t->drive = 0.6f, t->eq[2] = -6;
+        macro_set(&m[0], "Dust", 0.5f);
+        macro_link(&m[0], TP_DRIVE, 0.2f, 0.9f);
+        macro_link(&m[0], TP_CUTOFF, 8000, 1800);
+        break;
+    case 6:                                      /* filter sweep */
+        t->filter = FILT_LOW, t->cutoff = 2000, t->reso = 0.5f;
+        macro_set(&m[0], "Sweep", 0.6f);
+        macro_link(&m[0], TP_CUTOFF, 200, 16000);
+        macro_set(&m[1], "Res", 0.4f);
+        macro_link(&m[1], TP_RESO, 0.1f, 0.85f);
+        break;
+    case 7:                                      /* vocal */
+        t->filter = FILT_HIGH, t->cutoff = 120, t->eq[1] = 1, t->eq[2] = 2, t->comp_on = 1, t->comp_thresh = -20;
+        t->delay_send = 0.15f, t->reverb_send = 0.25f;
+        macro_set(&m[0], "Air", 0.3f);
+        macro_link(&m[0], TP_EQ_HIGH, 0, 6);
+        macro_link(&m[0], TP_REVERB, 0.1f, 0.5f);
+        break;
+    case 8:                                      /* punchy drums */
+        t->eq[0] = 3, t->eq[2] = 2, t->drive = 0.15f, t->comp_on = 1, t->comp_thresh = -16, t->comp_ratio = 4;
+        t->comp_attack = 15;
+        macro_set(&m[0], "Smash", 0.3f);
+        macro_link(&m[0], TP_COMP, -10, -32);
+        macro_link(&m[0], TP_DRIVE, 0, 0.5f);
+        break;
+    case 9:                                      /* dub send */
+        t->delay_send = 0.6f, t->reverb_send = 0.3f, t->filter = FILT_HIGH, t->cutoff = 200;
+        macro_set(&m[0], "Echo", 0.6f);
+        macro_link(&m[0], TP_DELAY, 0, 1);
+        break;
+    }
+}
+
+static void builtin_fx_preset(int kind, int i, MasterFx *fx)
+{
+    if (kind == PK_DELAY) {
+        static const struct { int div; float fb, tone, level; int ping; } D[BUILTIN_DELAY] = {
+            {0, 0.1f, 0.6f, 0.6f, 0}, {2, 0.35f, 0.5f, 0.55f, 0}, {4, 0.4f, 0.5f, 0.55f, 1},
+            {1, 0.35f, 0.55f, 0.5f, 1}, {5, 0.65f, 0.3f, 0.6f, 1}, {7, 0.5f, 0.4f, 0.5f, 0}};
+        fx->delay_div = D[i].div, fx->delay_feedback = D[i].fb, fx->delay_tone = D[i].tone;
+        fx->delay_level = D[i].level, fx->pingpong = D[i].ping;
+    } else {
+        static const float R[BUILTIN_REVERB][3] = {{0.35f, 0.5f, 0.5f}, {0.6f, 0.3f, 0.6f}, {0.85f, 0.4f, 0.7f},
+                                                   {0.97f, 0.2f, 0.75f}, {0.7f, 0.8f, 0.65f}};
+        fx->reverb_size = R[i][0], fx->reverb_damp = R[i][1], fx->reverb_level = R[i][2];
+    }
+}
+
+/* your own presets: key value lines */
+static int preset_write(int kind, const char *name, const Track *t, const MasterFx *fx)
+{
+    char d[1024], path[1300];
+    preset_dir(kind, d, sizeof d);
+    ensure_dir(d);
+    snprintf(path, sizeof path, "%s/%s.preset", d, name);
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    fprintf(f, "tinydaw-preset 1 %s\n", PK_DIR[kind]);
+    if (kind == PK_TRACK) {
+        fprintf(f, "chain %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n", t->filter, t->cutoff, t->reso, t->eq[0],
+                t->eq[1], t->eq[2], t->drive, t->delay_send, t->reverb_send, t->duck, t->width);
+        fprintf(f, "comp %d %.9g %.9g %.9g %.9g %.9g\n", t->comp_on, t->comp_thresh, t->comp_ratio, t->comp_attack,
+                t->comp_release, t->comp_makeup);
+        for (int m = 0; m < TRACK_MACROS; m++) {
+            const Macro *mc = &t->macro[m];
+            if (!mc->name[0] && !mc->nlinks) continue;
+            fprintf(f, "macro %d %.6g %s\n", m, mc->value, mc->name);
+            for (int k = 0; k < mc->nlinks; k++)
+                fprintf(f, "mlink %d %d %.9g %.9g\n", m, mc->link[k].param, mc->link[k].lo, mc->link[k].hi);
+        }
+    } else if (kind == PK_DELAY) {
+        fprintf(f, "delay %d %.9g %.9g %.9g %d\n", fx->delay_div, fx->delay_feedback, fx->delay_tone, fx->delay_level,
+                fx->pingpong);
+    } else {
+        fprintf(f, "reverb %.9g %.9g %.9g\n", fx->reverb_size, fx->reverb_damp, fx->reverb_level);
+    }
+    return fclose(f) == 0 ? 0 : -1;
+}
+
+static int preset_read(int kind, const char *name, Track *t, MasterFx *fx)
+{
+    char d[1024], path[1300], line_[300];
+    preset_dir(kind, d, sizeof d);
+    snprintf(path, sizeof path, "%s/%s.preset", d, name);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (kind == PK_TRACK) memset(t->macro, 0, sizeof t->macro);
+    while (fgets(line_, sizeof line_, f)) {
+        int m, nm = 0;
+        float v;
+        MacroLink l;
+        if (kind == PK_TRACK)
+            if (sscanf(line_, "chain %d %f %f %f %f %f %f %f %f %f %f", &t->filter, &t->cutoff, &t->reso, &t->eq[0], &t->eq[1],
+                       &t->eq[2], &t->drive, &t->delay_send, &t->reverb_send, &t->duck, &t->width) == 11) {
+                if (t->filter < 0 || t->filter >= FILT_TYPES) t->filter = FILT_OFF;
+                continue;
+            }
+        if (kind == PK_TRACK && sscanf(line_, "comp %d %f %f %f %f %f", &t->comp_on, &t->comp_thresh, &t->comp_ratio,
+                                       &t->comp_attack, &t->comp_release, &t->comp_makeup) == 6)
+            continue;
+        if (kind == PK_TRACK && sscanf(line_, "macro %d %f %n", &m, &v, &nm) >= 2 && m >= 0 && m < TRACK_MACROS) {
+            Macro *mc = &t->macro[m];
+            mc->value = v < 0 ? 0 : v > 1 ? 1 : v;
+            if (nm > 0) snprintf(mc->name, sizeof mc->name, "%.15s", line_ + nm);
+            mc->name[strcspn(mc->name, "\r\n")] = 0;
+            continue;
+        }
+        if (kind == PK_TRACK && sscanf(line_, "mlink %d %d %f %f", &m, &l.param, &l.lo, &l.hi) == 4 && m >= 0 &&
+            m < TRACK_MACROS && l.param >= 0 && l.param < TP_COUNT && t->macro[m].nlinks < MACRO_LINKS) {
+            t->macro[m].link[t->macro[m].nlinks++] = l;
+            continue;
+        }
+        if (kind == PK_DELAY && sscanf(line_, "delay %d %f %f %f %d", &fx->delay_div, &fx->delay_feedback, &fx->delay_tone,
+                                       &fx->delay_level, &fx->pingpong) == 5) {
+            if (fx->delay_div < 0 || fx->delay_div >= DELAY_DIVS) fx->delay_div = 2;
+            continue;
+        }
+        if (kind == PK_REVERB)
+            sscanf(line_, "reverb %f %f %f", &fx->reverb_size, &fx->reverb_damp, &fx->reverb_level);
+    }
+    fclose(f);
+    return 0;
+}
+
+/* the list a preset dropdown shows: "Choose a preset", the built-ins, then yours ("Saved: name") */
+static struct { char names[64][48]; const char *ptr[64 + 16]; int n, nbuilt; Uint32 at; } plist[PK_KINDS];
+
+static void preset_list(int kind)
+{
+    if (plist[kind].n && SDL_GetTicks() - plist[kind].at < 2000) return;   /* read again every couple of seconds */
+    plist[kind].at = SDL_GetTicks();
+    const char *const *bn = kind == PK_TRACK ? TRACK_PRESET_NAMES : kind == PK_DELAY ? DELAY_PRESET_NAMES : REVERB_PRESET_NAMES;
+    int nb = kind == PK_TRACK ? BUILTIN_TRACK : kind == PK_DELAY ? BUILTIN_DELAY : BUILTIN_REVERB, n = 0;
+    plist[kind].ptr[n++] = "Choose a preset...";
+    for (int i = 0; i < nb; i++) plist[kind].ptr[n++] = bn[i];
+    plist[kind].nbuilt = nb;
+    char d[1024];
+    preset_dir(kind, d, sizeof d);
+    DIR *dir = headless && !SDL_getenv("TINYDAW_PRESETS_DIR") ? NULL : opendir(d);
+    int k = 0;
+    struct dirent *e;
+    while (dir && (e = readdir(dir)) && k < 64) {
+        size_t len = strlen(e->d_name);
+        if (len < 8 || strcmp(e->d_name + len - 7, ".preset")) continue;
+        snprintf(plist[kind].names[k], sizeof plist[kind].names[k], "Saved: %.*s", (int)(len - 7 < 38 ? len - 7 : 38), e->d_name);
+        plist[kind].ptr[n++] = plist[kind].names[k++];
+    }
+    if (dir) closedir(dir);
+    plist[kind].n = n;
+}
+
+/* applies item `i` of the list to the selected track or the shared effects */
+static void preset_apply(int kind, int i, Track *t)
+{
+    if (i <= 0 || i >= plist[kind].n) return;
+    const char *label = plist[kind].ptr[i];
+    Track tmp = t ? *t : P.tracks[0];
+    MasterFx fx = P.fx;
+    int ok = 0;
+    if (i <= plist[kind].nbuilt) {
+        if (kind == PK_TRACK) builtin_track_preset(i - 1, &tmp);
+        else builtin_fx_preset(kind, i - 1, &fx);
+        ok = 1;
+    } else {
+        ok = preset_read(kind, label + 7, &tmp, &fx) == 0;
+    }
+    if (!ok) {
+        status("Couldn't read the preset \"%s\"", label);
+        return;
+    }
+    LOCK();
+    if (kind == PK_TRACK && t) {                 /* the chain; the track keeps its name, level, pan, mute and solo */
+        Track keep = *t;
+        *t = tmp;
+        snprintf(t->name, sizeof t->name, "%s", keep.name);
+        t->volume = keep.volume, t->pan = keep.pan, t->mute = keep.mute, t->solo = keep.solo;
+    } else {
+        P.fx = fx;
+    }
+    UNLOCK();
+    status("%s: %s. Ctrl+Z puts it back", kind == PK_TRACK ? t->name : kind == PK_DELAY ? "Delay" : "Reverb", label);
+}
+
+/* a preset row: the list, and Save (which asks for a name in the same place) */
+static int preset_row(int x, int y, int w, int kind, Track *t)
+{
+    static int pick[PK_KINDS], naming = -1;
+    static char name[40];
+    preset_list(kind);
+    if (naming == kind) {
+        SDL_Rect fr = {x, y, w - 160, 26};
+        textfield(fr, name, sizeof name, 0, "name the preset");
+        if (!tf.buf && name[0] == 0) naming = -1;
+        if (button((SDL_Rect){x + w - 154, y, 74, 26}, "Save", 1) || (!tf.buf && name[0])) {
+            if (name[0]) {
+                if (preset_write(kind, name, t, &P.fx) == 0) status("Saved the preset \"%s\": every project has it now", name);
+                else status("Couldn't save the preset \"%s\"", name);
+                plist[kind].n = 0;
+            }
+            tf_end(1);
+            naming = -1;
+        }
+        if (button((SDL_Rect){x + w - 74, y, 74, 26}, "Cancel", 0)) {
+            tf_end(0);
+            naming = -1;
+        }
+        return y + 34;
+    }
+    pick[kind] = 0;
+    if (dropdown((SDL_Rect){x, y, w - 86, 26}, kind == PK_TRACK ? "Preset: " : "", plist[kind].ptr, plist[kind].n, &pick[kind], 0))
+        preset_apply(kind, pick[kind], t);
+    tip((SDL_Rect){x, y, w - 86, 26}, kind == PK_TRACK ? "Set the whole effect chain from a preset (the track keeps its level and pan)"
+                                                      : "Set it from a preset");
+    if (button((SDL_Rect){x + w - 80, y, 80, 26}, "Save as", 0)) {
+        naming = kind;
+        name[0] = 0;
+        tf_end(1);
+        tf.buf = name;
+        tf.cap = sizeof name;
+        tf.path = 0;
+        tf.caret = 0;
+        tf_drawn = 1;
+        tf.orig[0] = 0;
+        SDL_StartTextInput();
+    }
+    tip((SDL_Rect){x + w - 80, y, 80, 26}, "Keep these settings as a preset of your own, in every project");
+    return y + 34;
+}
+
+/* ---- macros: four knobs a track can have, each turning up to four of its settings at once */
+static int macro_open = -1;                     /* the macro whose links are showing */
+
+static int macros_section(int x, int y, int w, Track *t)
+{
+    char buf[96];
+    int linked[TP_COUNT] = {0};
+    for (int m = 0; m < TRACK_MACROS; m++)
+        for (int k = 0; k < t->macro[m].nlinks; k++) linked[t->macro[m].link[k].param] = 1;
+    for (int m = 0; m < TRACK_MACROS; m++) {
+        Macro *mc = &t->macro[m];
+        int nw = 110, bw = 86;
+        SDL_Rect nr = {x, y, nw, 26};
+        char ph[16];
+        snprintf(ph, sizeof ph, "Macro %d", m + 1);
+        textfield(nr, mc->name, sizeof mc->name, 0, ph);
+        double v = mc->value;
+        SDL_Rect sr = {x + nw + 8, y, w - nw - 8 - bw - 8, 26};
+        if (mc->nlinks) {
+            slider(sr, &v);
+            if ((float)v != mc->value) {
+                LOCK();
+                mc->value = (float)v;
+                UNLOCK();
+            }
+        } else {
+            text_clip(sr, sr.x + 6, y + 6, "not linked to anything yet", DIM);
+        }
+        int has_auto = auto_lane(&P, sel_track, AUTO_MACRO1 + m, NULL);
+        tip(sr, "%s: turns %d setting%s at once%s", mc->name[0] ? mc->name : ph, mc->nlinks, mc->nlinks == 1 ? "" : "s",
+            has_auto ? " (automated: the track's A lane sets it)" : "");
+        snprintf(buf, sizeof buf, macro_open == m ? "Done" : "Links (%d)", mc->nlinks);
+        if (button((SDL_Rect){x + w - bw, y, bw, 26}, buf, macro_open == m)) macro_open = macro_open == m ? -1 : m;
+        y += 32;
+        if (macro_open != m) continue;
+        static const char *pnames[TP_COUNT];
+        for (int p = 0; p < TP_COUNT; p++) pnames[p] = TRACK_PARAMS[p].name;
+        for (int k = 0; k < mc->nlinks; k++) {    /* each link: what it turns, from where to where */
+            MacroLink *l = &mc->link[k];
+            int lw = (w - 30 - 8) / 3;
+            static int psel[TRACK_MACROS][MACRO_LINKS];
+            psel[m][k] = l->param;
+            if (dropdown((SDL_Rect){x + 16, y, lw, 26}, "", pnames, TP_COUNT, &psel[m][k], 0)) {
+                const TrackParamInfo *pi = &TRACK_PARAMS[psel[m][k]];
+                LOCK();
+                l->param = psel[m][k];
+                l->lo = pi->lo + (pi->hi - pi->lo) * (pi->log ? 0.01f : 0.25f);
+                l->hi = pi->log ? pi->hi * 0.6f : pi->lo + (pi->hi - pi->lo) * 0.75f;
+                UNLOCK();
+            }
+            const TrackParamInfo *pi = &TRACK_PARAMS[l->param];
+            double step = (pi->hi - pi->lo) / (pi->log ? 2000 : 400);
+            fnumber((SDL_Rect){x + 16 + lw + 4, y, lw, 26}, "From", &l->lo, pi->lo, pi->hi, step, pi->fmt);
+            fnumber((SDL_Rect){x + 16 + 2 * (lw + 4), y, lw, 26}, "To", &l->hi, pi->lo, pi->hi, step, pi->fmt);
+            if (button((SDL_Rect){x + w - 22, y, 22, 26}, "x", 0)) {
+                LOCK();
+                memmove(&mc->link[k], &mc->link[k + 1], (size_t)(mc->nlinks - k - 1) * sizeof(MacroLink));
+                mc->nlinks--;
+                UNLOCK();
+                break;
+            }
+            y += 30;
+        }
+        if (mc->nlinks < MACRO_LINKS && button((SDL_Rect){x + 16, y, 120, 26}, "+ Link", 0)) {
+            int p = TP_CUTOFF;                     /* the first setting no macro turns yet */
+            for (int q = TP_COUNT - 1; q >= 0; q--)
+                if (!linked[q] && q != TP_VOLUME && q != TP_PAN) p = q;
+            const TrackParamInfo *pi = &TRACK_PARAMS[p];
+            float cur = *track_param(t, p);
+            LOCK();
+            mc->link[mc->nlinks++] = (MacroLink){p, cur, pi->log ? (cur * 4 < pi->hi ? cur * 4 : pi->hi)
+                                                                  : (cur + (pi->hi - pi->lo) * 0.5f < pi->hi ? cur + (pi->hi - pi->lo) * 0.5f : pi->hi)};
+            if (mc->nlinks == 1) mc->value = 0;
+            UNLOCK();
+        }
+        text(x + 144, y + 6, "Each link turns a setting from one value to another", DIM);
+        y += 34;
+    }
+    char lst[160] = "";
+    for (int p = 0; p < TP_COUNT; p++)
+        if (linked[p]) {
+            if (lst[0]) strncat(lst, ", ", sizeof lst - strlen(lst) - 1);
+            strncat(lst, TRACK_PARAMS[p].name, sizeof lst - strlen(lst) - 1);
+        }
+    if (lst[0]) {
+        snprintf(buf, sizeof buf, "Set by the macros: %s", lst);
+        text_clip((SDL_Rect){x, y, w, font_h + 4}, x, y, buf, ACCENT);
+        y += font_h + 10;
+    }
+    return y;
+}
+
 static int mixer_content(int x, int y, int w)
 {
     char buf[160], b2[48];
@@ -4949,6 +5350,7 @@ static int mixer_content(int x, int y, int w)
     track_dropdown((SDL_Rect){x + 10, y, w - 10, 26}, "Track ", &sel_track);
     t = &P.tracks[sel_track];
     y += rh;
+    y = preset_row(x, y, w, PK_TRACK, t);
     fnumber((SDL_Rect){x, y, hw, 26}, "Volume", &t->volume, 0, 1.5, 0.004, "%.2f");
     double *pd = fproxy(&t->pan);
     pan_text((float)*pd, b2, sizeof b2);
@@ -5035,12 +5437,16 @@ static int mixer_content(int x, int y, int w)
     y += rh;
     text(x, y, "Width 0 is mono, 1 as it is, 2 twice as wide.", DIM);
     y += font_h + 14;
+    y = section(x, y, w, "MACROS");
+    y = macros_section(x, y, w, t);
+    y += 8;
 
     }
     MasterFx *fx = &P.fx;
     if (mixer_sub == 3) {
     /* shared effects */
     y = section(x, y, w, "DELAY");
+    y = preset_row(x, y, w, PK_DELAY, NULL);
     int dw = (w - 7 * 4) / 8;
     for (int k = 0; k < DELAY_DIVS; k++)
         if (button((SDL_Rect){x + k * (dw + 4), y, dw, 26}, DELAY_NAMES[k], fx->delay_div == k)) {
@@ -5062,6 +5468,7 @@ static int mixer_content(int x, int y, int w)
     text(x + 132, y + 6, buf, DIM);
     y += rh + 8;
     y = section(x, y, w, "REVERB");
+    y = preset_row(x, y, w, PK_REVERB, NULL);
     fnumber((SDL_Rect){x, y, tw, 26}, "Size", &fx->reverb_size, 0, 1, 0.004, "%.2f");
     fnumber((SDL_Rect){x + tw + 8, y, tw, 26}, "Damping", &fx->reverb_damp, 0, 1, 0.004, "%.2f");
     fnumber((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Level", &fx->reverb_level, 0, 1.5, 0.004, "%.2f");
@@ -8183,8 +8590,10 @@ static void auto_header(int t, int y)
     static const char *ptr[MAX_TRACKS][AUTO_PARAMS];
     for (int p = 0; p < AUTO_PARAMS; p++) {
         int np = auto_lane(&P, t, p, NULL);
-        if (np) snprintf(names[t][p], sizeof names[t][p], "%s (%d)", AUTO_NAMES[p], np);
-        else snprintf(names[t][p], sizeof names[t][p], "%s", AUTO_NAMES[p]);
+        const char *pn = p >= AUTO_MACRO1 && P.tracks[t].macro[p - AUTO_MACRO1].name[0]
+                             ? P.tracks[t].macro[p - AUTO_MACRO1].name : AUTO_NAMES[p];   /* a macro by its name */
+        if (np) snprintf(names[t][p], sizeof names[t][p], "%s (%d)", pn, np);
+        else snprintf(names[t][p], sizeof names[t][p], "%s", pn);
         ptr[t][p] = names[t][p];
     }
     dropdown((SDL_Rect){L.left + 10, y + 5, L.head - 18, 24}, "", ptr[t], AUTO_PARAMS, &auto_param[t], 0);
@@ -15666,6 +16075,127 @@ static int selftest(void)
         frame();
         frame();
         P.a4 = a4;
+    }
+
+    /* ---- macros and effect presets */
+    {
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+        Track tt = P.tracks[0];
+        memset(tt.macro, 0, sizeof tt.macro);
+        tt.filter = FILT_OFF;
+        macro_set(&tt.macro[0], "Test", 0.5f);
+        macro_link(&tt.macro[0], TP_DRIVE, 0, 1);
+        macro_link(&tt.macro[0], TP_CUTOFF, 100, 10000);
+        macros_apply(&tt, NULL);
+        check(fabsf(tt.drive - 0.5f) < 1e-5f && fabsf(tt.cutoff - 1000) < 1 && tt.filter == FILT_LOW,
+              "a macro sets what it's linked to (cutoff on a log scale), turning the filter on");
+        LOCK();
+        P.tracks[0].macro[0] = tt.macro[0];
+        P.tracks[0].macro[1] = (Macro){"Gone", 0, 1, {{TP_VOLUME, 1, 0}}};
+        P.tracks[0].macro[1].value = 1;          /* turned right up: volume 0 */
+        UNLOCK();
+        float *silent = test_render(&P, 0, 4 * beat_frames(), 0);
+        double r0 = test_rms(silent, 0, 4 * beat_frames(), 2);
+        free(silent);
+        LOCK();
+        P.tracks[0].macro[1].value = 0;
+        UNLOCK();
+        float *loud = test_render(&P, 0, 4 * beat_frames(), 0);
+        double r1 = test_rms(loud, 0, 4 * beat_frames(), 2);
+        free(loud);
+        check(r0 < 1e-5 && r1 > 0.01, "a macro linked to the volume silences the track at one end and not the other");
+        Track eff;
+        auto_add(0, AUTO_MACRO1, 0, 1.0f);
+        auto_apply(&P, 0, 100, &eff);
+        check(fabsf(eff.drive - 1) < 1e-5f, "automating a macro turns everything it's linked to");
+        char tp[1100], msg2[256];
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(tp, sizeof tp, "%s/tinydaw-macros-%u.tdaw", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        int ok = project_save(&P, tp, msg2, sizeof msg2) == 0;
+        Project *q = malloc(sizeof *q);
+        ok = ok && project_load(q, tp, msg2, sizeof msg2) == 0;
+        if (ok) {
+            const Macro *a = &q->tracks[0].macro[0], *b = &q->tracks[0].macro[1];
+            ok = !strcmp(a->name, "Test") && a->nlinks == 2 && a->link[1].param == TP_CUTOFF && a->link[1].hi == 10000 &&
+                 !strcmp(b->name, "Gone") && b->nlinks == 1 && b->link[0].param == TP_VOLUME;
+            project_free(q);
+        }
+        free(q);
+        remove(tp);
+        check(ok, "macros save and open again with their links");
+        frame();
+        history_check();
+
+        /* presets: built in, and your own */
+        char pd[1100];
+        snprintf(pd, sizeof pd, "%s/tinydaw-presets-%u", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        SDL_setenv("TINYDAW_PRESETS_DIR", pd, 1);
+        plist[PK_TRACK].n = 0;
+        preset_list(PK_TRACK);
+        int warm = -1;
+        for (int i = 0; i < plist[PK_TRACK].n; i++)
+            if (!strcmp(plist[PK_TRACK].ptr[i], "Warm tape")) warm = i;
+        float vol = P.tracks[1].volume;
+        int u0 = nundo;
+        preset_apply(PK_TRACK, warm, &P.tracks[1]);
+        frame();
+        history_check();
+        check(warm > 0 && P.tracks[1].filter == FILT_LOW && fabsf(P.tracks[1].drive - 0.2f) < 1e-5f && P.tracks[1].comp_on &&
+                  !strcmp(P.tracks[1].macro[0].name, "Warmth") && P.tracks[1].volume == vol && nundo == u0 + 1,
+              "a built-in preset sets the track's chain and macros, keeps its level, in one undo step");
+        LOCK();
+        P.tracks[1].eq[1] = 4.5f;
+        P.tracks[1].macro[2] = (Macro){"Mine", 0.25f, 1, {{TP_WIDTH, 0.5f, 1.9f}}};
+        UNLOCK();
+        int wrote = preset_write(PK_TRACK, "My chain", &P.tracks[1], &P.fx) == 0;
+        plist[PK_TRACK].n = 0;
+        preset_list(PK_TRACK);
+        int mine = -1;
+        for (int i = 0; i < plist[PK_TRACK].n; i++)
+            if (!strcmp(plist[PK_TRACK].ptr[i], "Saved: My chain")) mine = i;
+        preset_apply(PK_TRACK, mine, &P.tracks[2]);
+        const Track *a = &P.tracks[1], *b = &P.tracks[2];
+        check(wrote && mine > 0 && b->filter == a->filter && b->eq[1] == 4.5f && b->drive == a->drive &&
+                  !memcmp(b->macro, a->macro, sizeof a->macro) && strcmp(b->name, a->name),
+              "a saved preset lists as yours and puts the same chain and macros on another track");
+        plist[PK_DELAY].n = 0;
+        preset_list(PK_DELAY);
+        preset_apply(PK_DELAY, 3, NULL);         /* Dotted 8th */
+        plist[PK_REVERB].n = 0;
+        preset_list(PK_REVERB);
+        preset_apply(PK_REVERB, 3, NULL);        /* Hall */
+        check(P.fx.delay_div == 4 && P.fx.pingpong && fabsf(P.fx.reverb_size - 0.85f) < 1e-5f,
+              "the delay and reverb have presets too (a dotted 8th, a hall)");
+        char f1[1300];
+        snprintf(f1, sizeof f1, "%s/Track/My chain.preset", pd);
+        remove(f1);
+        snprintf(f1, sizeof f1, "%s/Track", pd);
+        rmdir(f1);
+        rmdir(pd);
+        SDL_setenv("TINYDAW_PRESETS_DIR", "", 1);
+        plist[PK_TRACK].n = plist[PK_DELAY].n = plist[PK_REVERB].n = 0;
+        for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+        show_panel(RI_MIXER);
+        mixer_sub = 2;
+        sel_track = 2;
+        macro_open = 2;
+        mixer_scroll = 0;
+        frame();
+        int dirty0 = nundo;
+        frame();
+        history_check();
+        check(mixer_content_h > 600 && nundo == dirty0, "the Track page shows the macros, and looking changes nothing");
+        mixer_sub = 3;
+        frame();
+        macro_open = -1;
+        mixer_sub = 0;
+        new_project();
+        make_demo();
+        frame();
+        history_check();
     }
 
     /* ---- the Singer's pitch curve */

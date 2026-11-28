@@ -223,7 +223,8 @@ typedef struct {
 /* Automation: points on a track's lane for one parameter, kept sorted by track, param, at.
  * v is 0..1 across the parameter's range (see auto_to_value). Between points the value moves
  * in a straight line; before the first and after the last it holds. */
-enum { AUTO_VOLUME, AUTO_PAN, AUTO_CUTOFF, AUTO_DELAY, AUTO_REVERB, AUTO_PARAMS };
+enum { AUTO_VOLUME, AUTO_PAN, AUTO_CUTOFF, AUTO_DELAY, AUTO_REVERB, AUTO_MACRO1, AUTO_MACRO2, AUTO_MACRO3, AUTO_MACRO4,
+       AUTO_PARAMS };
 extern const char *AUTO_NAMES[AUTO_PARAMS];
 typedef struct {
     int track, param;
@@ -232,6 +233,22 @@ typedef struct {
 } AutoPoint;
 
 enum { FILT_OFF, FILT_LOW, FILT_HIGH, FILT_BAND, FILT_TYPES };
+
+/* What a track's macro knobs can turn: each link moves one of these from `lo` to `hi` as the knob goes
+ * from 0 to 1 (the cutoff on a log scale). A linked parameter follows its macro, not its own knob. */
+enum { TP_VOLUME, TP_PAN, TP_CUTOFF, TP_RESO, TP_EQ_LOW, TP_EQ_MID, TP_EQ_HIGH, TP_DRIVE, TP_DELAY, TP_REVERB,
+       TP_DUCK, TP_WIDTH, TP_COMP, TP_COUNT };
+typedef struct { const char *name; float lo, hi; int log; const char *fmt; } TrackParamInfo;
+extern const TrackParamInfo TRACK_PARAMS[TP_COUNT];
+#define TRACK_MACROS 4
+#define MACRO_LINKS 4
+typedef struct { int param; float lo, hi; } MacroLink;          /* param: TP_* */
+typedef struct {
+    char name[16];          /* "" = unused */
+    float value;            /* 0..1 */
+    int nlinks;
+    MacroLink link[MACRO_LINKS];
+} Macro;
 
 typedef struct {
     char name[32];
@@ -247,6 +264,7 @@ typedef struct {
     float width;            /* stereo width: 0 mono, 1 as it is, 2 twice as wide */
     int comp_on;            /* the track's own compressor */
     float comp_thresh, comp_ratio, comp_attack, comp_release, comp_makeup;   /* dB, :1, ms, ms, dB */
+    Macro macro[TRACK_MACROS];
 } Track;
 
 /* The shared effects every track can send to, plus the sidechain and live controls. */
@@ -512,7 +530,9 @@ float value_to_auto(int param, float value);
 void auto_sort(Project *p);                     /* after adding or moving points */
 int auto_lane(const Project *p, int track, int param, int *first);   /* how many points; first index */
 float auto_at(const Project *p, int track, int param, long at, int *has);   /* 0..1 at frame `at` */
-void auto_apply(const Project *p, int track, long at, Track *out);  /* the track with its automation */
+void auto_apply(const Project *p, int track, long at, Track *out);  /* the track with its automation and macros */
+float *track_param(Track *t, int tp);           /* where a TP_* parameter lives in a track */
+void macros_apply(Track *t, const float *values);   /* the macros (at these values, or their own) set what they're linked to */
 int sample_root(const Sample *s);              /* the note a sound plays at, for note clips */
 long pattern_end(const Project *p, int pattern);
 

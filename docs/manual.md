@@ -266,6 +266,21 @@ twice doesn't make a copy, and the Create button counts what you've added.
 | Effects | The delay (in time with the tempo, 1/16 to 1/2 including dotted and triplet, feedback, tone, ping-pong), the reverb (size, damping), the sidechain (which track makes the others duck), and the master: **Off**, **Glue** or **Loud**, or set the compressor and the limiter's ceiling yourself, with a loudness meter |
 | Live | How far pitch bend goes; the mod wheel opens the filter on the instrument's track |
 
+**Presets.** The Track page's **Preset** list sets a track's whole chain at once (filter, EQ, drive,
+sends, duck, width, compressor and macros) while it keeps its name, level and pan: Clean, Warm tape,
+Telephone, Wide pad, Pumping, Lo-fi crush, Filter sweep, Vocal, Punchy drums and Dub send. **Save as**
+keeps the chain as a preset of your own, listed as "Saved:" in every project (they're small files in
+Music/tinydaw/Presets). The Effects page has the same for the shared delay (Slapback, Eighth echo,
+Dotted 8th, Triplet bounce, Dub quarter, Long half) and reverb (Room, Plate, Hall, Cathedral, Dark
+chamber).
+
+**Macros.** Each track has four macro knobs, at the bottom of the Track page. A macro turns up to
+four of the track's settings at once, each between two values you choose: **Links** opens it, **+
+Link** adds a setting (then pick which, and its From and To), and the knob sweeps them all together.
+A linked setting follows its macro instead of its own box. Name a macro by typing in its box. Macros
+can be automated (the track's A lane lists them by name), and they're saved with presets, so a preset
+like Warm tape comes with a "Warmth" knob.
+
 **Pitch bend.** Mixer > Clip draws a pitch curve over the selected clip: any clip, whether audio,
 notes or drums. Drag across the curve to draw the pitch, from 12 semitones down to 12 up (24 once you
 need it); hold Shift for whole semitones, right-click or Ctrl+drag to rub a bend out. Or start from

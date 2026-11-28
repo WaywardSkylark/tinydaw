@@ -71,6 +71,13 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
         fprintf(f, "track %.9g %d %d %s\n", tr->volume, tr->mute, tr->solo, tr->name);
         fprintf(f, "trackfx %.9g %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g %.9g\n", tr->pan, tr->filter, tr->cutoff,
                 tr->reso, tr->eq[0], tr->eq[1], tr->eq[2], tr->drive, tr->delay_send, tr->reverb_send, tr->duck);
+        for (int m = 0; m < TRACK_MACROS; m++) {    /* after the track line they belong to */
+            const Macro *mc = &tr->macro[m];
+            if (!mc->name[0] && !mc->nlinks) continue;
+            fprintf(f, "macro %d %.6g %s\n", m, mc->value, mc->name);
+            for (int k = 0; k < mc->nlinks; k++)
+                fprintf(f, "mlink %d %d %.9g %.9g\n", m, mc->link[k].param, mc->link[k].lo, mc->link[k].hi);
+        }
         fprintf(f, "trackdyn %.9g %d %.9g %.9g %.9g %.9g %.9g\n", tr->width, tr->comp_on, tr->comp_thresh,
                 tr->comp_ratio, tr->comp_attack, tr->comp_release, tr->comp_makeup);
     }
@@ -348,6 +355,23 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                             &t->eq[0], &t->eq[1], &t->eq[2], &t->drive, &t->delay_send, &t->reverb_send, &t->duck) == 11;
                 if (t->filter < 0 || t->filter >= FILT_TYPES) t->filter = FILT_OFF;
             }
+        } else if (!strcmp(word, "macro")) {
+            int m = -1, nm = 0;
+            float v = 0;
+            ok = ntracks > 0 && sscanf(line, "macro %d %f %n", &m, &v, &nm) >= 2 && m >= 0 && m < TRACK_MACROS;
+            if (ok) {
+                Macro *mc = &p->tracks[ntracks - 1].macro[m];
+                mc->value = v < 0 ? 0 : v > 1 ? 1 : v;
+                if (nm > 0) snprintf(mc->name, sizeof mc->name, "%.15s", line + nm);
+                mc->name[strcspn(mc->name, "\r\n")] = 0;
+            }
+        } else if (!strcmp(word, "mlink")) {
+            int m = -1;
+            MacroLink l;
+            ok = ntracks > 0 && sscanf(line, "mlink %d %d %f %f", &m, &l.param, &l.lo, &l.hi) == 4 && m >= 0 &&
+                 m < TRACK_MACROS && l.param >= 0 && l.param < TP_COUNT;
+            Macro *mc = ok ? &p->tracks[ntracks - 1].macro[m] : NULL;
+            if (mc && mc->nlinks < MACRO_LINKS) mc->link[mc->nlinks++] = l;
         } else if (!strcmp(word, "track")) {
             if (ntracks < MAX_TRACKS) {
                 Track *t = &p->tracks[ntracks];

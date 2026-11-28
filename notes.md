@@ -7,6 +7,36 @@ way they are.
 
 ## Unreleased (after 0.8.0)
 
+### 2026-11-28: Effect presets and macro knobs
+
+Asked for: presets for the delay, reverb and filter, tracks exposing a few macro knobs bound to effect
+parameters, and the whole track chain saved as a named preset. The user also proposed a session view
+/ clip launcher. That was agreed to come next, with **per-track** launching Ableton-style (a track
+plays the timeline until a slot is launched on it; "back to timeline" returns it). Design so far: same
+tracks and mixer; slots hold ordinary clips; a playing slot is rendered as a temporary repeated clip
+so the existing engine plays it; launches quantized to the bar; capture writes recorded launches onto
+the timeline as one undo step.
+
+- **Macros:** `Track.macro[4]`, each with a name, a value 0..1 and up to 4 `MacroLink`s
+  (TP_* parameter, lo, hi). `TRACK_PARAMS` (fx.c) lists what can be linked and its range; cutoff is
+  log. `macros_apply` runs last in `auto_apply`, so a linked parameter follows its macro, over its
+  own knob and automation. Linking the cutoff turns the filter on (low-pass), and linking the
+  compressor turns it on. Four automation params, `AUTO_MACRO1..4`, automate the knobs; lanes show
+  the macro's name.
+- **Why not the Generator's five controls:** those change how a sound is synthesized (the sound is
+  re-rendered), so they can't be live per-track knobs. Macros are the mixer's equivalent.
+- **Presets:** built-ins in code (`builtin_track_preset`, `builtin_fx_preset`). Yours are saved as
+  `<Music>/tinydaw/Presets/{Track,Delay,Reverb}/<name>.preset` (key/value lines;
+  `TINYDAW_PRESETS_DIR` overrides the folder, which tests use). Applying a track preset keeps the
+  name, volume, pan, mute and solo. Delay and reverb presets apply to `P.fx` (they're shared sends).
+- **File format:** `macro i value name` and `mlink i param lo hi` lines after a track's line.
+  Older builds ignore them.
+- **Tests:** 8 checks: links (log cutoff, filter on), a volume-linked macro silencing the track,
+  macro automation, save and load, built-in and saved presets, delay and reverb presets, and that
+  just drawing the page changes nothing. (An early version filled in "Macro 1" names while drawing,
+  which dirtied the project; it's a placeholder now.)
+- **Not done:** the pop-out mixing console doesn't show macro knobs yet.
+
 ### 2026-11-27: Sixteen example songs, made with the new tools
 
 Asked for: replace Hip-hop, Rock and Experimental with new songs using the new tools, and fill the

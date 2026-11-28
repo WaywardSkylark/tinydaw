@@ -115,7 +115,56 @@ int project_has_tails(const Project *p)
 
 /* ---------------------------------------------------------------- automation */
 
-const char *AUTO_NAMES[AUTO_PARAMS] = {"Volume", "Pan", "Cutoff", "Delay send", "Reverb send"};
+const char *AUTO_NAMES[AUTO_PARAMS] = {"Volume", "Pan", "Cutoff", "Delay send", "Reverb send",
+                                       "Macro 1", "Macro 2", "Macro 3", "Macro 4"};
+
+const TrackParamInfo TRACK_PARAMS[TP_COUNT] = {
+    [TP_VOLUME] = {"Volume", 0, 1.5f, 0, "%.2f"},   [TP_PAN] = {"Pan", -1, 1, 0, "%+.2f"},
+    [TP_CUTOFF] = {"Cutoff", 20, 20000, 1, "%.0f Hz"}, [TP_RESO] = {"Resonance", 0, 1, 0, "%.2f"},
+    [TP_EQ_LOW] = {"Low EQ", -12, 12, 0, "%+.1f dB"}, [TP_EQ_MID] = {"Mid EQ", -12, 12, 0, "%+.1f dB"},
+    [TP_EQ_HIGH] = {"High EQ", -12, 12, 0, "%+.1f dB"}, [TP_DRIVE] = {"Drive", 0, 1, 0, "%.2f"},
+    [TP_DELAY] = {"Delay send", 0, 1, 0, "%.2f"},    [TP_REVERB] = {"Reverb send", 0, 1, 0, "%.2f"},
+    [TP_DUCK] = {"Duck", 0, 1, 0, "%.2f"},           [TP_WIDTH] = {"Width", 0, 2, 0, "%.2f"},
+    [TP_COMP] = {"Compressor", -40, 0, 0, "%.0f dB"},
+};
+
+float *track_param(Track *t, int tp)
+{
+    switch (tp) {
+    case TP_VOLUME: return &t->volume;
+    case TP_PAN: return &t->pan;
+    case TP_CUTOFF: return &t->cutoff;
+    case TP_RESO: return &t->reso;
+    case TP_EQ_LOW: return &t->eq[0];
+    case TP_EQ_MID: return &t->eq[1];
+    case TP_EQ_HIGH: return &t->eq[2];
+    case TP_DRIVE: return &t->drive;
+    case TP_DELAY: return &t->delay_send;
+    case TP_REVERB: return &t->reverb_send;
+    case TP_DUCK: return &t->duck;
+    case TP_WIDTH: return &t->width;
+    case TP_COMP: return &t->comp_thresh;
+    }
+    return NULL;
+}
+
+void macros_apply(Track *t, const float *values)
+{
+    for (int m = 0; m < TRACK_MACROS; m++) {
+        const Macro *mc = &t->macro[m];
+        float v = values ? values[m] : mc->value;
+        v = v < 0 ? 0 : v > 1 ? 1 : v;
+        for (int k = 0; k < mc->nlinks && k < MACRO_LINKS; k++) {
+            const MacroLink *l = &mc->link[k];
+            float *dst = l->param >= 0 && l->param < TP_COUNT ? track_param(t, l->param) : NULL;
+            if (!dst) continue;
+            if (TRACK_PARAMS[l->param].log && l->lo > 0 && l->hi > 0) *dst = l->lo * powf(l->hi / l->lo, v);
+            else *dst = l->lo + (l->hi - l->lo) * v;
+            if (l->param == TP_CUTOFF && t->filter == FILT_OFF) t->filter = FILT_LOW;   /* as automating it does */
+            if (l->param == TP_COMP) t->comp_on = 1;
+        }
+    }
+}
 
 float auto_to_value(int param, float v)
 {
@@ -180,7 +229,18 @@ float auto_at(const Project *p, int track, int param, long at, int *has)
 void auto_apply(const Project *p, int track, long at, Track *out)
 {
     *out = p->tracks[track];
-    if (!p->nautos) return;
+    float mv[TRACK_MACROS];
+    int any = 0;
+    for (int m = 0; m < TRACK_MACROS; m++) {
+        int has = 0;
+        float v = p->nautos ? auto_at(p, track, AUTO_MACRO1 + m, at, &has) : 0;
+        mv[m] = has ? v : out->macro[m].value;
+        any |= out->macro[m].nlinks > 0;
+    }
+    if (!p->nautos) {
+        if (any) macros_apply(out, mv);
+        return;
+    }
     int has;
     float v = auto_at(p, track, AUTO_VOLUME, at, &has);
     if (has) out->volume = auto_to_value(AUTO_VOLUME, v);
@@ -195,6 +255,7 @@ void auto_apply(const Project *p, int track, long at, Track *out)
     if (has) out->delay_send = auto_to_value(AUTO_DELAY, v);
     v = auto_at(p, track, AUTO_REVERB, at, &has);
     if (has) out->reverb_send = auto_to_value(AUTO_REVERB, v);
+    if (any) macros_apply(out, mv);              /* last: a macro takes over what it's linked to */
 }
 
 /* ---------------------------------------------------------------- note clips */

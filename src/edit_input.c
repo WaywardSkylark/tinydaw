@@ -252,6 +252,10 @@ void end_drag(void)
                       n == 1 ? "" : "s");
     } else if (drag.kind == D_BEAT && hit(area)) {
         place_beat(drag.sample, snap(x_to_frame(mx)), lane_at(my));
+    } else if (drag.kind == D_PART && hit(area) && !session_view) {
+        part_drop(drag.sample, x_to_frame(mx), lane_at(my));
+    } else if (drag.kind == D_PART && hit(area)) {
+        status("Parts go on the timeline: switch to it (Session view off) and drop it there");
     }
     drag.kind = D_NONE;
 }

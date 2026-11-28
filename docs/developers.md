@@ -73,7 +73,7 @@ comment saying what it covers.
 file: a few seconds for most, about 30 for `selftest.c`.
 
 ```sh
-./tinydaw --selftest                      # 492 checks, driving the real interface with simulated input
+./tinydaw --selftest                      # 497 checks, driving the real interface with simulated input
 ./tinydaw --demo --screenshot ui.bmp      # draw the window off-screen
 TINYDAW_DEBUG_INPUT=1 ./tinydaw           # print every key, controller and MIDI input
 TINYDAW_CHECK_TEXT=1 ./tinydaw            # report any text that overlaps other text or outgrows its button

@@ -510,9 +510,15 @@ void frame(void)
         input_event(SRC_MOUSE, mouse_pad, 0, 0, -1);
         mouse_pad = -1;
     }
-    if (drag.kind == D_LIB || drag.kind == D_BEAT) {   /* label following the pointer */
+    if (drag.kind == D_LIB || drag.kind == D_BEAT || drag.kind == D_PART) {   /* label following the pointer */
+        static const char *const PART_LABEL[] = {"Chord part", "Bassline", "Melody", "Fills"};
         char beat_label[64];
-        snprintf(beat_label, sizeof beat_label, "%s beat", GENRES[drag.sample].name);
+        if (drag.kind == D_PART && drag.sample < PART_KINDS)
+            snprintf(beat_label, sizeof beat_label, "%s (%s)", PART_LABEL[drag.sample], PART_STYLES[drag.sample][pt_style[drag.sample]]);
+        else if (drag.kind == D_PART)
+            snprintf(beat_label, sizeof beat_label, "%s", PART_LABEL[3]);
+        else
+            snprintf(beat_label, sizeof beat_label, "%s beat", GENRES[drag.sample].name);
         const char *name = drag.kind == D_LIB ? P.samples[drag.sample].name : beat_label;
         SDL_Rect r = {mx + 14, my + 10, text_w(name) + 12, font_h + 6};
         fill(r, alpha(PANEL3, 230));

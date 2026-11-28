@@ -3588,6 +3588,84 @@ int selftest(void)
         history_check();
     }
 
+    /* ---- dragging a part from the Parts pane onto the timeline */
+    {
+        new_project();
+        LOCK();
+        P.nclips = P.nnotes = P.nautos = P.nchanges = P.ndrums = P.nsections = 0;
+        P.bpm = 120;
+        P.ts_num = P.ts_den = 4;
+        P.playing = 0;
+        P.nchords = 0;
+        UNLOCK();
+        static const int DR[4] = {0, 9, 5, 7}, DT[4] = {CH_MAJ, CH_MIN, CH_MAJ, CH_MAJ};
+        for (int b = 0; b < 8; b++) chord_put(&P, b * 4, 4, DR[b % 4], DT[b % 4], -1);
+        sec_add(4, 2, "Chorus");
+        for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+        session_view = 0;
+        show_panel(RI_SOUNDS);
+        sounds_sub = 5;
+        pt_kind = PART_BASS;
+        pt_where = 0;
+        pt_sound[PART_BASS] = 1;
+        frame();
+        frame();
+        history_check();
+        int u0 = nundo, c0 = P.nclips;
+        SDL_Rect hd = pt_handle;
+        long b2 = meter_bar_frame(&P, 2);
+        int tx = (int)frame_to_x(b2 + meter_bar_frame(&P, 1) / 2);   /* the middle of bar 3 */
+        sim_drag(hd.x + hd.w / 2, hd.y + hd.h / 2, tx, lane_y(4), 0);
+        frame();
+        history_check();
+        int c = P.nclips - 1;
+        check(P.nclips == c0 + 1 && P.clips[c].track == 4 && P.clips[c].pattern > 0 && P.clips[c].start == b2 &&
+                  P.clips[c].start + P.clips[c].length == meter_beats_frame(&P, 32),
+              "a bassline dragged from the Parts pane lands on that track, from the start of that bar to the chords' end");
+        int notes_in = 0, notes_out = 0;
+        for (int i = 0; i < P.nnotes; i++)
+            if (P.notes[i].pattern == P.clips[c].pattern) {
+                notes_in++;
+                notes_out += P.notes[i].start < 0 || P.notes[i].start >= P.clips[c].length;
+            }
+        check(notes_in > 0 && !notes_out && nundo == u0 + 1, "it's written there, in one undo step");
+        pt_kind = PART_MELODY;
+        pt_where = 2;                            /* This section: the one it's dropped in */
+        pt_sound[PART_MELODY] = 1;
+        frame();
+        c0 = P.nclips;
+        tx = (int)frame_to_x(meter_bar_frame(&P, 5) + 100);
+        hd = pt_handle;
+        sim_drag(hd.x + hd.w / 2, hd.y + hd.h / 2, tx, lane_y(5), 0);
+        frame();
+        c = P.nclips - 1;
+        check(P.nclips == c0 + 1 && P.clips[c].track == 5 && P.clips[c].start == meter_bar_frame(&P, 4) &&
+                  P.clips[c].start + P.clips[c].length == meter_bar_frame(&P, 6),
+              "with Where on This section, a dropped part fills the section it's dropped in");
+        c0 = P.nclips;
+        pt_where = 0;
+        frame();
+        tx = (int)frame_to_x(meter_bar_frame(&P, 9) + 100);   /* past the chords */
+        hd = pt_handle;
+        if (tx < L.tl_x + L.tl_w) sim_drag(hd.x + hd.w / 2, hd.y + hd.h / 2, tx, lane_y(5), 0);
+        frame();
+        check(P.nclips == c0, "a part dropped where there are no chords writes nothing");
+        session_view = 1;
+        frame();
+        hd = pt_handle;
+        sim_drag(hd.x + hd.w / 2, hd.y + hd.h / 2, L.tl_x + 40, lane_y(2), 0);
+        frame();
+        check(P.nclips == c0, "a part dropped on the session view isn't placed (it goes on the timeline)");
+        session_view = 0;
+        pt_kind = 0;
+        sounds_sub = 0;
+        for (int i = 0; i < RI_COUNT; i++) *RAIL_FLAG[i] = 0;
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
     /* ---- pitch curves on any clip (Mixer > Clip > Pitch bend) */
     {
         Bend tb;

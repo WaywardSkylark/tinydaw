@@ -276,6 +276,12 @@ instrument chosen in Pads), and where it goes: the whole chord track, the loop, 
 playhead is in. **Make it** puts it on a free track as a note clip you can edit in the piano roll;
 **Try another** writes it again differently, in the same clip.
 
+Or drag the **:: Drag it onto the timeline ::** strip to where the part should go: it's written on
+that track, from the start of the bar you drop it in, following the chords there. Where still says
+how far it runs: to the end of the chords, as long as the loop, or (This section) the section you
+drop it in. A ghost shows where it will land. Fills drag the same way: drop them on the drum track
+they're for.
+
 | Part | Styles |
 |---|---|
 | Chords | **Held** (pads), **Pulse** and **Stabs** (keys), **Arp up** and **Arp up & down** (plucks). Each chord is voiced close to the last, so the voices move as little as they can |

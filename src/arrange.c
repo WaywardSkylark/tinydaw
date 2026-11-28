@@ -598,6 +598,7 @@ void chord_action(int act, int i)
 }
 
 int pt_kind;                                     /* 0 chords, 1 bass, 2 melody, 3 fills */
+SDL_Rect pt_handle;                              /* the "drag it onto the timeline" strip */
 int pt_style[PART_KINDS] = {0, 1, 0};
 double pt_busy[PART_KINDS] = {0.5, 0.5, 0.5};
 int pt_octave[PART_KINDS];                       /* -1 lower, 0 as is, 1 higher */
@@ -766,6 +767,49 @@ int part_make(int kind, int again)
     status("%s %s (%s) on track %d: %d notes on \"%s\". Try another writes it again differently; double-click it to edit",
            reuse ? "Wrote the" : "Made a", kind == PART_CHORDS ? "chord part" : kind == PART_BASS ? "bassline" : "melody",
            PART_STYLES[kind][pt_style[kind]], P.clips[c].track + 1, n, P.samples[s].name);
+    return c;
+}
+
+/* Dragged from the Parts pane: where it would go, in beats, for a drop at `frame`. It starts at that
+ * bar; Where says how far it runs (to the chords' end, as long as the loop, or the section there).
+ * 1 if there are chords there, 0 if not. */
+int part_drop_range(int kind, long frame, double *a, double *b)
+{
+    if (!P.nchords || kind >= PART_KINDS) return 0;
+    double ca = P.chords[0].at, cb = P.chords[P.nchords - 1].at + P.chords[P.nchords - 1].len;
+    long bf = bar_floor(frame < 0 ? 0 : frame);
+    *a = meter_beats(&P, bf);
+    *b = cb;
+    int si = sec_at_bar((int)floor(meter_bars(&P, bf) + 1e-9));
+    if (pt_where == 1 && P.loop_end > P.loop_start)
+        *b = *a + meter_beats(&P, P.loop_end) - meter_beats(&P, P.loop_start);
+    else if (pt_where == 2 && si >= 0) {
+        *a = meter_beats(&P, meter_bar_frame(&P, P.sections[si].bar));
+        *b = meter_beats(&P, meter_bar_frame(&P, P.sections[si].bar + P.sections[si].bars));
+    }
+    if (*a < ca) *a = ca;
+    if (*b > cb) *b = cb;
+    return *b > *a + 1e-6;
+}
+
+/* the drop itself: the part written there, on that track (a fill: that track's drums get them) */
+int part_drop(int kind, long frame, int track)
+{
+    if (kind >= PART_KINDS) {
+        fl_track = track;
+        return fills_make(0);
+    }
+    double a, b;
+    if (!part_drop_range(kind, frame, &a, &b)) {
+        status(P.nchords ? "No chords there: drop it where the CHORDS strip has some"
+                         : "No chords yet: add some on the CHORDS strip, or a progression from Theory > Keys > Place");
+        return -1;
+    }
+    pt_from = a, pt_to = b;                      /* (part_make's range, just this once) */
+    pt_force_track = track;
+    int c = part_make(kind, 0);
+    pt_from = pt_to = -1;
+    pt_force_track = -1;
     return c;
 }
 
@@ -967,7 +1011,22 @@ int parts_tab(int x, int y, int w)
             fills_make(1);
         }
     }
-    y += 42;
+    y += 40;
+    pt_handle = (SDL_Rect){x, y, w, 30};          /* or drag it to where it should go */
+    int ok = pt_kind < PART_KINDS ? P.nchords > 0 : 1;
+    int hov = ok && hit(pt_handle) && drag.kind == D_NONE;
+    fill(pt_handle, !ok ? PANEL2 : hov ? tone(ACCENT, 0.55f) : tone(ACCENT, 0.35f));
+    outline(pt_handle, ok ? ACCENT : LINE);
+    text_center(pt_handle, pt_kind < PART_KINDS ? ":: Drag it onto the timeline ::" : ":: Drag onto a drum track ::",
+                ok ? TEXT : DIM);
+    tip(pt_handle, pt_kind < PART_KINDS ? "Drop it on a track and bar: it's written from there (Where says how far: to the "
+                                          "chords' end, as long as the loop, or the section you drop it in)"
+                                        : "Drop it on a track with drum clips: the fills go there");
+    if (hov && lpress) {
+        drag = (typeof(drag)){.kind = D_PART, .sample = pt_kind, .sx = mx, .sy = my};
+        lpress = 0;
+    }
+    y += 38;
     static const char *const ABOUT[4] = {
         "Each chord voiced close to the last, so the voices move as little as they can. Held suits pads; Stabs and "
         "Pulse suit keys; the arpeggios suit plucks.",

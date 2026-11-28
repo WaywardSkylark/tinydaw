@@ -7,6 +7,22 @@ way they are.
 
 ## Unreleased (after 0.8.5)
 
+### 2026-11-28: Drag a part from the Parts pane onto the timeline
+
+Asked for: dragging from the Parts pane to place on the timeline.
+
+- A drag strip under Make it / Add fills, like the Beats tab's, starts a `D_PART` drag (`.sample` is
+  the kind). While dragging, the timeline shows a ghost of where it will be written, and a label
+  follows the pointer.
+- **Where it goes:** `part_drop_range`. It starts at the bar under the pointer. Where still decides
+  the length: Whole song runs to the chords' end, The loop runs for the loop's length, This section
+  takes the section under the pointer. It's clamped to the chord track. `part_drop` writes it
+  through `part_make`, using its existing `pt_from`/`pt_to`/`pt_force_track` overrides (the command
+  line's) for that one call.
+- Fills: dropping sets the drum track (`fl_track`) and adds them.
+- Not on the session view: it says to switch to the timeline.
+- **Tests:** 5 checks, by real drags with simulated input.
+
 ### 2026-11-28: Buses and an effect rack
 
 Asked for: buses and a flexible effect chain ("the biggest musical gap"). The user chose "strip +

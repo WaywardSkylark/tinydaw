@@ -1053,6 +1053,24 @@ void timeline(void)
         }
     }
 
+    if (drag.kind == D_PART && hit(area)) {   /* where the part would be written (or the track the fills go on) */
+        double a, b;
+        int t = lane_at(my);
+        Clip ghost = {0, t, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        if (drag.sample < PART_KINDS && part_drop_range(drag.sample, x_to_frame(mx), &a, &b)) {
+            ghost.start = bar_floor(meter_beats_frame(&P, a));
+            ghost.length = meter_beats_frame(&P, b) - ghost.start;
+        } else if (drag.sample >= PART_KINDS) {
+            ghost.start = 0;
+            long end = project_end(&P);
+            ghost.length = end > 0 ? end : meter_bar_frame(&P, 8);
+        }
+        if (ghost.length > 0) {
+            SDL_Rect r = clip_rect(&ghost);
+            fill(r, alpha(TRACK_COL[t % MAX_TRACKS], drag.sample < PART_KINDS ? 90 : 40));
+            outline(r, TEXT);
+        }
+    }
     if (drag.kind == D_BAND) {          /* the selection box */
         SDL_Rect band = {mx < drag.sx ? mx : drag.sx, my < drag.sy ? my : drag.sy, abs(mx - drag.sx), abs(my - drag.sy)};
         fill(band, alpha(HEAD, 30));
@@ -1075,7 +1093,7 @@ void timeline(void)
     /* cursor shape */
     if (drag.kind == D_TRIML || drag.kind == D_TRIMR || drag.kind == D_FADEIN || drag.kind == D_FADEOUT || hover_edge)
         SDL_SetCursor(cur_resize);
-    else if (drag.kind == D_MOVE || drag.kind == D_LIB || drag.kind == D_BEAT) SDL_SetCursor(cur_hand);
+    else if (drag.kind == D_MOVE || drag.kind == D_LIB || drag.kind == D_BEAT || drag.kind == D_PART) SDL_SetCursor(cur_hand);
     else SDL_SetCursor(cur_arrow);
 
     if (drag.kind != D_NONE) return;

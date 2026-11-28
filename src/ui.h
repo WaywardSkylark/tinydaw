@@ -56,7 +56,7 @@ typedef struct { char s[128]; Uint32 key; SDL_Texture *t; SDL_Renderer *r; int w
 typedef struct { SDL_Rect r; char s[40]; } T_tlog;
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
        D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER, D_DRUM,
-       D_SEC, D_SECNEW, D_SECEND, D_BEND, D_BENDX, D_CHD, D_CHDNEW, D_CHDEND, D_CBEND, D_CBENDX, D_SLOT, D_SCENE };
+       D_SEC, D_SECNEW, D_SECEND, D_BEND, D_BENDX, D_CHD, D_CHDNEW, D_CHDEND, D_CBEND, D_CBENDX, D_SLOT, D_SCENE, D_PART };
 /* Pop-out windows: the clip editor and the mixing console. Each has its own renderer and mouse;
  * a drag belongs to the window it started in (drag_pop, -1 = the main window). */
 typedef struct { int mx, my, ldown, lpress, lrel, rpress, wheel_x, wheel_y, ldouble; } PopIn;
@@ -551,6 +551,7 @@ extern SDL_Rect sec_rect_[MAX_SECTIONS];
 extern SDL_Rect chd_rect_[MAX_CHORDS], chp_box;
 extern double chd_at0, chd_menu_beat;
 extern int pt_kind;
+extern SDL_Rect pt_handle;
 extern int pt_style[PART_KINDS];
 extern double pt_busy[PART_KINDS];
 extern int pt_octave[PART_KINDS];
@@ -1048,6 +1049,8 @@ int pt_range(double *a, double *b);
 int pt_sample(int kind, double longest);
 int pt_free_track(long a, long b, const char *name);
 int part_make(int kind, int again);
+int part_drop_range(int kind, long frame, double *a, double *b);
+int part_drop(int kind, long frame, int track);
 int fl_default_track(void);
 int clip_split_one(int c, long f);
 void fl_rewrite(int i);

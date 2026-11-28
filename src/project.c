@@ -10,6 +10,7 @@
 #endif
 #include "daw.h"
 #include "compat.h"
+#include "theory.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -136,6 +137,12 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     }
     for (int i = 0; i < p->nsections; i++)
         fprintf(f, "section %d %d %s\n", p->sections[i].bar, p->sections[i].bars, p->sections[i].name);
+    if (p->key_root || p->key_scale) fprintf(f, "key %d %d\n", p->key_root, p->key_scale);
+    for (int i = 0; i < p->nkeys; i++) fprintf(f, "keychange %d %d %d\n", p->keys[i].bar, p->keys[i].root, p->keys[i].scale);
+    for (int i = 0; i < p->nchords; i++) {
+        const Chord *c = &p->chords[i];
+        fprintf(f, "harmony %.9g %.9g %d %d %d\n", c->at, c->len, c->root, c->type, c->bass);
+    }
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
         fprintf(f, "clip %d %d %ld %ld %ld %.9g %ld %ld", cl->sample, cl->track, cl->start, cl->offset, cl->length,
@@ -467,6 +474,24 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 sc.name[strcspn(sc.name, "\r\n")] = 0;
                 p->sections[p->nsections++] = sc;
             }
+        } else if (!strcmp(word, "key")) {
+            int r = 0, sc = 0;
+            ok = sscanf(line, "key %d %d", &r, &sc) == 2 && r >= 0 && r < 12 && sc >= 0 && sc < NSCALES;
+            if (ok) {
+                p->key_root = r;
+                p->key_scale = sc;
+            }
+        } else if (!strcmp(word, "keychange")) {
+            KeyChange k;
+            ok = sscanf(line, "keychange %d %d %d", &k.bar, &k.root, &k.scale) == 3 && k.bar >= 1 && k.bar < 100000 &&
+                 k.root >= 0 && k.root < 12 && k.scale >= 0 && k.scale < NSCALES;
+            if (ok && p->nkeys < MAX_KEYS) p->keys[p->nkeys++] = k;
+        } else if (!strcmp(word, "harmony")) {
+            Chord c;
+            ok = sscanf(line, "harmony %lf %lf %d %d %d", &c.at, &c.len, &c.root, &c.type, &c.bass) == 5 && c.at >= 0 &&
+                 c.at < 1e6 && c.len > 0 && c.len < 1e5 && c.root >= 0 && c.root < 12 && c.type >= 0 && c.type < CH_COUNT &&
+                 c.bass >= -1 && c.bass < 12;
+            if (ok && p->nchords < MAX_CHORDS) p->chords[p->nchords++] = c;
         } else if (!strcmp(word, "drum")) {
             DrumPat d;
             memset(&d, 0, sizeof d);
@@ -551,6 +576,12 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         if (!good) o->nvel = o->nrr = 0;
     }
     auto_sort(p);
+    keys_tidy(p);
+    chords_sort(p);
+    for (int i = 0; i + 1 < p->nchords; i++)     /* never overlapping */
+        if (p->chords[i].at + p->chords[i].len > p->chords[i + 1].at) p->chords[i].len = p->chords[i + 1].at - p->chords[i].at;
+    for (int i = p->nchords - 1; i >= 0; i--)
+        if (p->chords[i].len <= 1e-6) chord_remove(p, i);
     for (int c = 0; c < p->nclips; c++)
         if (p->clips[c].track >= p->ntracks) p->ntracks = p->clips[c].track + 1;
     if (p->inst_sample >= p->nsamples) p->inst_sample = -1;

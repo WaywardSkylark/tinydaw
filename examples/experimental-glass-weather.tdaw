@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title Experimental: Glass Weather
 rate 48000
 bpm 96
@@ -12,6 +12,7 @@ instrument 2 79 2
 change 8 96 7 8
 change 16 96 5 4
 change 24 96 4 4
+key 5 6
 dynamics 1 -20 2 20 250 2 1 -1
 track 0.7 0 0 Drone low
 trackfx -0.35 3 420 0.7 0 0 0 0.6 0 0.25 0.5

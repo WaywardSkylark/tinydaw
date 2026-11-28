@@ -11,7 +11,7 @@ controller or a MIDI keyboard, and record what you play or sing.
 - **Makes its own sounds:** 62 synth sounds across 12 styles, shaped with plain controls like
   *brightness* and *grit*. It also loads WAV, FLAC, OGG and MP3 files.
 - **Sings your words:** type a line, pick a tune and a voice, and it sings it, in 12 languages.
-- **Everything you need to finish a song:** a piano roll, a drum step sequencer, MIDI, automation, a full mixer with effects,
+- **Everything you need to finish a song:** a chord track, a piano roll, a drum step sequencer, MIDI, automation, a full mixer with effects,
   and export to WAV, FLAC, MP3 and more.
 
 ## Get it

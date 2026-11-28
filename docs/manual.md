@@ -6,6 +6,7 @@ Everything tinydaw does, panel by panel. New here? Start with [Your first minute
 
 - [Finding your way around](#finding-your-way-around)
 - [Arranging](#arranging)
+- [Chords and keys](#chords-and-keys)
 - [Notes and automation](#notes-and-automation)
 - [Making sounds](#making-sounds)
 - [Mixing](#mixing)
@@ -44,7 +45,7 @@ sections with the same name share a colour.
 | To | Do this |
 |---|---|
 | Go to a section | Click it; **Ctrl+PageUp** / **Ctrl+PageDown** for the previous / next |
-| Rearrange the song | Drag a section to another section's edge: everything in it (clips, automation, tempo changes) moves, and what was between moves along. Clips crossing an edge are split there |
+| Rearrange the song | Drag a section to another section's edge: everything in it (clips, automation, chords, tempo and key changes) moves, and what was between moves along. Clips crossing an edge are split there |
 | Rename / resize | Double-click it to type a name; drag its right end |
 | Repeat, loop or cut | Right-click: **Copy it in after itself**, **Loop it**, **Remove the marker** (the music stays) or **Remove it and its bars** |
 
@@ -79,6 +80,31 @@ sections with the same name share a colour.
 | Metronome | **Click** in the top bar, or M. Its arrow sets the sound, 8th/16th ticks, accent and a 1-2 bar count-in |
 | Add a track | **+** next to TRACKS (up to 16). Each track has mute, solo and volume |
 | Bring in audio | Drop WAV, FLAC, OGG or MP3 files on the window |
+
+## Chords and keys
+
+**The chord track.** The CHORDS strip under the sections holds the song's chords: what the harmony
+is, bar by bar. It makes no sound on its own; it's there to see, to play from, and to write parts
+from. Each chord shows its name and its Roman numeral in the key (Am vi, G V), coloured by where it
+sits in the key.
+
+| To | Do this |
+|---|---|
+| Add a chord | Click the strip: a chord fills the rest of that bar. Drag along it to set the length yourself, or press **+** beside CHORDS for a bar at the playhead. It suggests the next chord the key usually goes to (I, then V, vi, IV) and opens the chord picker |
+| Change a chord | Double-click it. The picker has the key's own chords (with **7ths** for sevenths), any root and any of the 19 chord types, and a bass note for slash chords (C/E). Each change plays as you click |
+| Hear a chord | Click it |
+| Move / resize | Drag it (it takes the place of any chord it lands on); drag its right end |
+| Remove | Delete with the pointer on the strip, or right-click > **Remove it** |
+| Put in a progression | Theory > Keys > **Place**: the chords go on the chord track as well as a track |
+| Find the chords in a part | Select a note clip, then right-click the strip > **Chords from the selected note clip**. It works half a bar at a time (a bar at a time in 3/4 and 6/8) and joins repeats |
+| Hear the chords | Right-click the strip > **Make a part from the chords**: a note clip on a free track with every chord held, each voice moving as little as it can. It uses the instrument's sound (Pads) if one is chosen, or a pad. Edit it in the piano roll like any part |
+
+**The key.** Every song has a key, saved with it, and shown beside CHORDS. Theory always shows the
+key where the playhead is, and changing it in Theory > Keys changes the key there. For a key change
+part-way through (the last chorus up a step), right-click the chord strip > **A key change here**,
+then pick the new key in Theory > Keys with the playhead after it. A key change is a flag on the
+chord strip: click it to go there, right-click to remove it. Chords are named and numbered in the
+key where they are.
 
 ## Notes and automation
 
@@ -322,8 +348,8 @@ music draws it faster. Space plays and stops, the pad keys still work, and Esc l
 | Chiptune: Pixel Quest | 150 BPM, C major. A title screen, two levels (the second a whole step up), a boss fight in 3/4 at 170 and a victory jingle. Square-wave lead, fast arpeggios, a pulse bass jumping octaves and noise drums |
 
 Every drum part is a pattern you can open in the Drums panel, the kits and keys have velocity
-layers and round-robins, the sung lines have pitch curves, and the parts are named on the arranger
-strip. Each sets up the pads with its own sounds too. `examples/make_examples.py` writes them.
+layers and round-robins, the sung lines have pitch curves, the parts are named on the arranger
+strip, and the chords are on the chord track (Chiptune changes key three times). Each sets up the pads with its own sounds too. `examples/make_examples.py` writes them.
 
 ## Settings
 

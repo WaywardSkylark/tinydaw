@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title Trap: Midnight Hollow
 rate 48000
 bpm 140
@@ -9,6 +9,37 @@ loop 1 329143 987429
 playhead 0
 fx 4 0.4 0.5 0.6 1 0.7 0.5 0.7 1 200 2
 instrument 6 72 3
+key 5 1
+harmony 0 4 5 1 -1
+harmony 4 4 1 0 -1
+harmony 8 4 8 0 -1
+harmony 12 4 3 0 -1
+harmony 16 4 5 1 -1
+harmony 20 4 1 0 -1
+harmony 24 4 8 0 -1
+harmony 28 4 3 0 -1
+harmony 32 4 5 1 -1
+harmony 36 4 1 0 -1
+harmony 40 4 8 0 -1
+harmony 44 4 3 0 -1
+harmony 48 4 5 1 -1
+harmony 52 4 1 0 -1
+harmony 56 4 8 0 -1
+harmony 60 4 3 0 -1
+harmony 64 4 5 1 -1
+harmony 68 4 1 0 -1
+harmony 72 4 8 0 -1
+harmony 76 4 3 0 -1
+harmony 80 4 5 1 -1
+harmony 84 4 1 0 -1
+harmony 88 4 8 0 -1
+harmony 92 4 3 0 -1
+harmony 96 4 5 1 -1
+harmony 100 4 1 0 -1
+harmony 104 4 8 0 -1
+harmony 108 4 3 0 -1
+harmony 112 4 5 1 -1
+harmony 116 4 1 0 -1
 dynamics 1 -22 4 8 120 7 1 -1
 track 0.75 0 0 808
 trackfx 0 0 1200 0.2 0 0 0 0.25 0 0 0

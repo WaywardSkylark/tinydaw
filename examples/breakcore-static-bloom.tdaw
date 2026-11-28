@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title Breakcore: Static Bloom
 rate 48000
 bpm 86
@@ -12,6 +12,43 @@ instrument 30 72 4
 change 4 172 4 4
 change 20 172 7 8
 change 24 186 4 4
+key 3 1
+harmony 0 4 3 4 -1
+harmony 4 4 11 6 -1
+harmony 8 4 6 6 -1
+harmony 12 4 1 13 -1
+harmony 16 4 3 4 -1
+harmony 20 4 11 6 -1
+harmony 24 4 6 6 -1
+harmony 28 4 1 13 -1
+harmony 32 4 3 4 -1
+harmony 36 4 11 6 -1
+harmony 40 4 6 6 -1
+harmony 44 4 1 13 -1
+harmony 48 4 3 4 -1
+harmony 52 4 11 6 -1
+harmony 56 4 6 6 -1
+harmony 60 4 1 13 -1
+harmony 64 4 3 4 -1
+harmony 68 4 11 6 -1
+harmony 72 4 6 6 -1
+harmony 76 4 1 13 -1
+harmony 80 3.5 3 4 -1
+harmony 83.5 3.5 11 6 -1
+harmony 87 3.5 6 6 -1
+harmony 90.5 3.5 1 13 -1
+harmony 94 4 3 4 -1
+harmony 98 4 11 6 -1
+harmony 102 4 6 6 -1
+harmony 106 4 1 13 -1
+harmony 110 4 3 4 -1
+harmony 114 4 11 6 -1
+harmony 118 4 6 6 -1
+harmony 122 4 1 13 -1
+harmony 126 4 3 4 -1
+harmony 130 4 11 6 -1
+harmony 134 4 6 6 -1
+harmony 138 4 1 13 -1
 dynamics 1 -22 4 6 110 7 1 -1
 track 0.85 0 0 Kick
 trackfx 0 0 1200 0.2 0 0 0 0.25 0 0 0

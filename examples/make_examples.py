@@ -197,6 +197,7 @@ class Song2(Song):
         self.dynamics = None
         self.instrument = (-1, 60, 0)
         self.drumpats = []
+        self.key0, self.keychanges, self.harm = (0, 0), [], []
 
     # ---- velocity layers and round-robins (made by tinydaw from the sound, kept out of the list)
     def layers(self, sample, nvel=3, nrr=2):
@@ -235,6 +236,33 @@ class Song2(Song):
         snd = self.drumpats[pid - 1]["rows"][0][0]
         start = self.frame(at)
         self.clips.append((snd, track, start, 0, self.frame(at + beats) - start, 0.0, 0, 0, -pid, 60))
+
+    # ---- the chord track and the key
+    SCALE_NAMES = ["Major", "Minor", "Harm. minor", "Mel. minor", "Dorian", "Phrygian", "Lydian", "Mixolydian",
+                   "Locrian", "Pent. major", "Pent. minor", "Blues"]
+    SUFFIXES = ["", "m", "dim", "aug", "sus2", "sus4", "maj7", "7", "m7", "m7b5", "dim7", "m(maj7)", "+maj7", "6",
+                "m6", "add9", "9", "maj9", "m9"]
+    PCS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+    def _pc(self, name):
+        return (self.PCS[name[0]] + (1 if name[1:] == "#" else -1 if name[1:] == "b" else 0)) % 12
+
+    def key(self, name, bar=0):
+        """'A Minor' from bar `bar` on (0: the song's key)."""
+        note, scale = name.split(" ", 1)
+        k = (self._pc(note), self.SCALE_NAMES.index(scale))
+        if bar == 0:
+            self.key0 = k
+        else:
+            self.keychanges.append((bar, k[0], k[1]))
+
+    def harmony(self, bar, name, bars=1):
+        """A chord on the chord track: 'Am7', 'G/B', for `bars` bars from bar `bar`."""
+        m = re.match(r"^([A-G][#b]?)(.*?)(?:/([A-G][#b]?))?$", name)
+        root, suffix, bass = m.group(1), m.group(2), m.group(3)
+        at = self.bar(bar)
+        self.harm.append((at, self.bar(bar + bars) - at, self._pc(root), self.SUFFIXES.index(suffix),
+                          self._pc(bass) if bass else -1))
 
     # ---- the tempo map: quarter notes ("beats") and bars, to frames
     def _sections(self):
@@ -327,6 +355,12 @@ class Song2(Song):
             head.append("meter %d %d" % (self.num, self.den))
         for b, bpm, num, den in self.changes:
             head.append("change %d %s %d %d" % (b, t(bpm), num, den))
+        if self.key0 != (0, 0):
+            head.append("key %d %d" % self.key0)
+        for kc in self.keychanges:
+            head.append("keychange %d %d %d" % kc)
+        for h in sorted(self.harm):
+            head.append("harmony %s %s %d %d %d" % (t(h[0]), t(h[1]), h[2], h[3], h[4]))
         if self.dynamics:
             head.append("dynamics %d %s %s %s %s %s %d %s" % tuple(
                 t(v) if isinstance(v, float) else v for v in self.dynamics))
@@ -546,6 +580,9 @@ def house():
     s.section(12, 4, "Build")
     s.section(16, 4, "Break")
     s.section(20, 12, "Drop")
+    s.key("A Minor")
+    for bar in range(32):
+        s.harmony(bar, ["Am7", "Fmaj7", "Cmaj7", "G6"][bar % 4])
     return s
 
 
@@ -626,6 +663,9 @@ def hiphop():
     s.section(16, 2, "Break")
     s.section(18, 4, "Hook")
     s.section(22, 2, "Outro")
+    s.key("D Minor")
+    for bar in range(24):
+        s.harmony(bar, ["Dm9", "Gm7", "Bbmaj7", "A7"][bar % 4])
     return s
 
 
@@ -703,6 +743,7 @@ def experimental():
     s.section(8, 8, "Glass (7/8)")
     s.section(16, 8, "Choir (5/4)")
     s.section(24, 4, "Clearing")
+    s.key("F Lydian")
     return s
 
 
@@ -805,6 +846,9 @@ def breakcore():
     s.section(4, 16, "Break")
     s.section(20, 4, "7/8")
     s.section(24, 12, "Finale")
+    s.key("Eb Minor")
+    for b in range(36):
+        s.harmony(b, ["Ebsus2", "Bmaj7", "Gbmaj7", "Db6"][b % 4])
     return s
 
 
@@ -917,6 +961,9 @@ def rock():
     s.section(12, 8, "Chorus")
     s.section(20, 4, "Solo")
     s.section(24, 8, "Chorus")
+    s.key("E Minor")
+    for b in range(32):
+        s.harmony(b, ["Em", "C", "G", "D"][b % 4])
     return s
 
 
@@ -1009,6 +1056,9 @@ def trap():
     s.section(12, 4, "Break")
     s.section(16, 12, "Drop")
     s.section(28, 2, "Outro")
+    s.key("F Minor")
+    for b in range(30):
+        s.harmony(b, ["Fm", "Db", "Ab", "Eb"][b % 4])
     return s
 
 
@@ -1091,6 +1141,9 @@ def synthwave():
     s.section(12, 8, "Chorus")
     s.section(20, 4, "Bridge")
     s.section(24, 4, "Chorus")
+    s.key("F# Minor")
+    for b in range(28):
+        s.harmony(b, ["F#m", "D", "A", "E"][b % 4])
     return s
 
 
@@ -1174,6 +1227,9 @@ def techno():
     s.section(8, 8, "Groove")
     s.section(16, 8, "Breakdown")
     s.section(24, 8, "Peak")
+    s.key("G Minor")
+    for b in (8, 16, 24):
+        s.harmony(b, "Gm", 8)
     return s
 
 
@@ -1272,6 +1328,9 @@ def pop():
     s.section(12, 8, "Chorus")
     s.section(20, 4, "Break")
     s.section(24, 8, "Chorus")
+    s.key("C Major")
+    for b in range(32):
+        s.harmony(b, ["C", "G", "Am", "F"][b % 4])
     return s
 
 
@@ -1364,6 +1423,16 @@ def chiptune():
     s.section(12, 8, "Level 2")
     s.section(20, 16, "Boss (3/4)")
     s.section(36, 6, "Victory")
+    s.key("C Major")                            # the second level a step up, the boss in A, home for the win
+    s.key("D Major", 12)
+    s.key("A Major", 20)
+    s.key("C Major", 36)
+    for b in list(range(12)) + list(range(36, 42)):
+        s.harmony(b, ["C", "Am", "F", "G"][b % 4])
+    for b in range(12, 20):
+        s.harmony(b, ["D", "Bm", "G", "A"][b % 4])
+    for b in range(20, 36, 2):
+        s.harmony(b, ["D", "E", "A", "F#m"][(b // 2) % 4], 2)
     return s
 
 

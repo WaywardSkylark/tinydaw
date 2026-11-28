@@ -364,3 +364,40 @@ int diatonic_chord(int root, int scale, int degree, int sevenths, int *type, cha
     snprintf(numeral, nlen, "%s%s%s", pre, roman, suf);
     return (root + s->steps[degree]) % 12;
 }
+
+int chord_guess(const float w[12], int lowest, int *type, int *bass)
+{
+    /* the chords worth naming; 6ths and 9ths read as inversions or extensions of these */
+    static const int CAND[] = {CH_MAJ, CH_MIN, CH_DIM, CH_AUG, CH_SUS2, CH_SUS4, CH_MAJ7, CH_DOM7, CH_MIN7, CH_M7B5, CH_DIM7};
+    float total = 0;
+    for (int i = 0; i < 12; i++) total += w[i] > 0 ? w[i] : 0;
+    if (total <= 0) return -1;
+    double best = -1e18;
+    int broot = -1, btype = CH_MAJ;
+    for (int r = 0; r < 12; r++)
+        for (size_t k = 0; k < sizeof CAND / sizeof *CAND; k++) {
+            const ChordType *c = &CHORDS[CAND[k]];
+            int in[12] = {0};
+            for (int i = 0; i < c->n; i++) in[(r + c->iv[i]) % 12] = 1;
+            double s = 0;
+            for (int pc = 0; pc < 12; pc++) {
+                double v = w[pc] > 0 ? w[pc] : 0;
+                if (in[pc]) s += v;
+                else s -= 1.2 * v;               /* a note the chord doesn't have counts against it */
+                if (in[pc] && v <= 0) s -= 0.12 * total;   /* nor should it have notes that aren't there */
+            }
+            if (!(w[(r + c->iv[1]) % 12] > 0)) s -= 0.2 * total;   /* the third (or 2nd/4th) decides the chord */
+            if (!(w[r] > 0)) s -= 0.15 * total;    /* a chord's root is usually played */
+            if (lowest == r) s += 0.12 * total;
+            s -= 0.03 * total * (c->n - 3);        /* the simpler name, when both explain it */
+            if (CAND[k] == CH_AUG || CAND[k] == CH_DIM7 || CAND[k] == CH_SUS2) s -= 0.02 * total;   /* symmetric: rarely meant */
+            if (s > best + 1e-9) {
+                best = s;
+                broot = r;
+                btype = CAND[k];
+            }
+        }
+    *type = btype;
+    *bass = lowest >= 0 && lowest != broot ? lowest : -1;
+    return broot;
+}

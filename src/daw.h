@@ -294,6 +294,20 @@ typedef struct { int bar; double bpm; int num, den; } MeterChange;
 #define MAX_SECTIONS 64
 typedef struct { int bar, bars; char name[24]; } Section;
 
+/* The chord track: the song's harmony, silent itself, read by whatever writes parts from it.
+ * Positions are in quarter notes from the start of the song, so tempo edits never move them. */
+#define MAX_CHORDS 512
+typedef struct {
+    double at, len;         /* quarter notes */
+    int root, type;         /* pitch class 0..11, CH_* */
+    int bass;               /* the bass note's pitch class for a slash chord (C/E), -1 = the root */
+} Chord;
+
+/* A key change from the start of bar `bar` (>= 1) on. The song's first key is the project's
+ * key_root and key_scale (an index into SCALES). */
+#define MAX_KEYS 64
+typedef struct { int bar, root, scale; } KeyChange;
+
 /* The project. The audio thread reads it; the UI changes it only while holding the
  * audio device lock (see LOCK/UNLOCK in main.c). */
 typedef struct {
@@ -328,6 +342,11 @@ typedef struct {
     int ndrums;
     Section sections[MAX_SECTIONS];         /* in bar order, not overlapping */
     int nsections;
+    int key_root, key_scale;                /* the key at the start */
+    KeyChange keys[MAX_KEYS];               /* in bar order */
+    int nkeys;
+    Chord chords[MAX_CHORDS];               /* in order, not overlapping */
+    int nchords;
     Voice voices[MAX_VOICES];
     float bend;             /* live pitch wheel, -1..1 (not saved) */
     float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */
@@ -497,6 +516,29 @@ const DrumPat *drum_find_c(const Project *p, int id);
  * decided the same way every time (so playback and export agree). */
 int drum_plays(const DrumPat *d, int r, long k, long seed);
 double drum_step_beat(const DrumPat *d, long k);   /* where step k lands, in beats from the origin */
+
+/* ---- the chord track and the song's key (harmony.c) ---- */
+void key_at_bar(const Project *p, int bar, int *root, int *scale);   /* the key in force in bar `bar` */
+void key_at_beat(const Project *p, double beat, int *root, int *scale);
+/* Sets the key of the stretch `bar` is in (from its key change, or the start, to the next one). */
+void key_set(Project *p, int bar, int root, int scale);
+int key_change_add(Project *p, int bar);        /* a change at `bar` keeping the key as it is; its index or -1 */
+void key_change_remove(Project *p, int i);
+void keys_tidy(Project *p);                     /* bar order, one a bar */
+int chord_at(const Project *p, double beat);    /* the chord sounding at a beat, or -1 */
+/* Puts a chord over [at, at + len), cutting back or removing the chords it covers; its index or -1. */
+int chord_put(Project *p, double at, double len, int root, int type, int bass);
+void chord_remove(Project *p, int i);
+void chords_sort(Project *p);
+void chord_split(Project *p, double beat);      /* a chord sounding across `beat` becomes two there */
+/* "Am", "C/E": spelled with sharps or flats as the key there wants. */
+void chord_label(const Project *p, const Chord *c, char *buf, size_t n);
+/* The chord's Roman numeral in the key at its start: "vi", "V7", or "bVII" for a chord borrowed
+ * from outside the key (degrees counted on the major scale of the key's root). */
+void chord_numeral(const Project *p, const Chord *c, char *buf, size_t n);
+/* A voicing between lo and hi (MIDI notes) that moves as little as it can from prev (nprev notes,
+ * 0 = none: close to the middle of the range). Returns how many notes went into out (up to 6). */
+int chord_voice(const Chord *c, const int *prev, int nprev, int lo, int hi, int *out);
 
 /* ---- analysis (analysis.c) ---- */
 #define VIS_FFT 4096

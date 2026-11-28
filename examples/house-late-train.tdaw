@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title House: Late Train
 rate 48000
 bpm 124
@@ -9,6 +9,39 @@ loop 1 1858065 2229677
 playhead 0
 fx 4 0.38 0.55 0.7 1 0.7 0.4 0.8 0 150 2
 instrument 6 60 3
+key 9 1
+harmony 0 4 9 8 -1
+harmony 4 4 5 6 -1
+harmony 8 4 0 6 -1
+harmony 12 4 7 13 -1
+harmony 16 4 9 8 -1
+harmony 20 4 5 6 -1
+harmony 24 4 0 6 -1
+harmony 28 4 7 13 -1
+harmony 32 4 9 8 -1
+harmony 36 4 5 6 -1
+harmony 40 4 0 6 -1
+harmony 44 4 7 13 -1
+harmony 48 4 9 8 -1
+harmony 52 4 5 6 -1
+harmony 56 4 0 6 -1
+harmony 60 4 7 13 -1
+harmony 64 4 9 8 -1
+harmony 68 4 5 6 -1
+harmony 72 4 0 6 -1
+harmony 76 4 7 13 -1
+harmony 80 4 9 8 -1
+harmony 84 4 5 6 -1
+harmony 88 4 0 6 -1
+harmony 92 4 7 13 -1
+harmony 96 4 9 8 -1
+harmony 100 4 5 6 -1
+harmony 104 4 0 6 -1
+harmony 108 4 7 13 -1
+harmony 112 4 9 8 -1
+harmony 116 4 5 6 -1
+harmony 120 4 0 6 -1
+harmony 124 4 7 13 -1
 dynamics 1 -18 2.5 15 180 3 1 -1
 track 0.9 0 0 Kick
 trackfx 0 0 1200 0.2 0 0 0 0 0 0 0

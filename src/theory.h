@@ -79,6 +79,10 @@ void chord_tone_names(int root_pc, int type, int flats, char *buf, size_t n);
 /* Chord built on scale degree `degree` (0-based) of a 7-note scale. Returns its root pitch
  * class and sets *type and the Roman numeral, or returns -1 for 5/6-note scales. */
 int diatonic_chord(int root, int scale, int degree, int sevenths, int *type, char *numeral, size_t nlen);
+/* The chord that best explains how much each pitch class sounds (w, e.g. length x velocity) with
+ * `lowest` the lowest note's pitch class (-1 = don't know). Returns its root and sets *type and
+ * *bass (a slash chord's bass, -1 = the root), or returns -1 when nothing sounds. */
+int chord_guess(const float w[12], int lowest, int *type, int *bass);
 /* Key signature of a major key: >0 sharps, <0 flats. */
 int key_signature(int major_root);
 

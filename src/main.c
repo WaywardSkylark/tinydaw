@@ -463,7 +463,7 @@ static int hit(SDL_Rect r) { return mx >= r.x && mx < r.x + r.w && my >= r.y && 
 
 enum { D_NONE, D_LIBPEND, D_LIB, D_MOVE, D_TRIML, D_TRIMR, D_PLAYHEAD, D_LOOP, D_NUM, D_NOTE, D_TVOL, D_BEAT,
        D_FADEIN, D_FADEOUT, D_BAND, D_SCROLL, D_AUTO, D_NMOVE, D_NLEN, D_NBAND, D_VEL, D_SLIDE, D_ED, D_FADER, D_DRUM,
-       D_SEC, D_SECNEW, D_SECEND, D_BEND, D_BENDX };
+       D_SEC, D_SECNEW, D_SECEND, D_BEND, D_BENDX, D_CHD, D_CHDNEW, D_CHDEND };
 static int beat_layout(int genre, long *pattern_frames, int *reps);
 /* Pop-out windows: the clip editor and the mixing console. Each has its own renderer and mouse;
  * a drag belongs to the window it started in (drag_pop, -1 = the main window). */
@@ -513,7 +513,7 @@ static struct {
 
 /* ---------------------------------------------------------------- layout and view */
 
-static struct { int top, left, head, ruler, arr, status, lane_h, auto_h, tl_x, tl_w, lanes_y, pane_x, pane_w; } L;
+static struct { int top, left, head, ruler, arr, chd, status, lane_h, auto_h, tl_x, tl_w, lanes_y, pane_x, pane_w; } L;
 
 /* automation lanes (one shown under a track when its A is on) and the piano roll */
 static int auto_open[MAX_TRACKS], auto_param[MAX_TRACKS];
@@ -565,6 +565,11 @@ static int sel_track;                   /* the track the Mixer pane shows */
 static int headless;                    /* self-test or screenshot: touch no files */
 static int pads_drop(int sample);
 static int theory_open, theory_tab = 6, th_root, th_scale, th_sevenths, th_track = 4, th_scroll, th_content_h;
+static int chd_sel = -1;                /* the chord on the chord track clicked last */
+static int chp_open, chp_idx;           /* the chord picker, and the chord it changes */
+static void chord_strip(void);
+static void chord_picker(void);
+static void key_sync(void);
 
 /* one-off preview buffer (chords, intervals, notes) played on top of everything */
 static float *scratch;
@@ -740,7 +745,8 @@ static void layout(void)
     L.tl_x = L.left + L.head;
     L.tl_w = W - L.tl_x;
     L.arr = 22;                         /* the arranger strip: the song's sections */
-    L.lanes_y = L.top + L.ruler + L.arr;
+    L.chd = 24;                         /* the chord track, under it */
+    L.lanes_y = L.top + L.ruler + L.arr + L.chd;
     int avail = H - L.lanes_y - L.status, nopen = 0;
     for (int t = 0; t < P.ntracks; t++) nopen += auto_open[t] != 0;
     L.auto_h = nopen ? avail / (P.ntracks + nopen) : 0;   /* a lane gets a row's share, within reason */
@@ -2058,6 +2064,10 @@ typedef struct {
     int ndrums;
     Section sections[MAX_SECTIONS];
     int nsections;
+    Chord *chords;
+    int nchords;
+    int key_root, key_scale, nkeys;
+    KeyChange keys[MAX_KEYS];
     Track tracks[MAX_TRACKS];
     int ntracks;
     double bpm, a4;
@@ -2085,11 +2095,13 @@ static void state_free(State *s)
     free(s->notes);
     free(s->autos);
     free(s->drums);
+    free(s->chords);
     s->clips = NULL;
     s->notes = NULL;
     s->autos = NULL;
     s->drums = NULL;
-    s->nclips = s->nnotes = s->nautos = s->ndrums = 0;
+    s->chords = NULL;
+    s->nclips = s->nnotes = s->nautos = s->ndrums = s->nchords = 0;
 }
 
 static void *dup_mem(const void *src, size_t n)   /* malloc'd copy; never NULL for n = 0 */
@@ -2116,6 +2128,13 @@ static void state_capture(State *s)
     s->ndrums = s->drums ? P.ndrums : 0;
     memcpy(s->sections, P.sections, sizeof s->sections);
     s->nsections = P.nsections;
+    free(s->chords);
+    s->chords = dup_mem(P.chords, (size_t)P.nchords * sizeof(Chord));
+    s->nchords = s->chords ? P.nchords : 0;
+    s->key_root = P.key_root;
+    s->key_scale = P.key_scale;
+    s->nkeys = P.nkeys;
+    memcpy(s->keys, P.keys, sizeof s->keys);
     memcpy(s->tracks, P.tracks, sizeof s->tracks);
     s->ntracks = P.ntracks;
     s->bpm = P.bpm;
@@ -2150,6 +2169,9 @@ static int state_same(const State *s)
            s->nautos == P.nautos && !memcmp(s->autos, P.autos, (size_t)P.nautos * sizeof(AutoPoint)) &&
            s->ndrums == P.ndrums && !memcmp(s->drums, P.drums, (size_t)P.ndrums * sizeof(DrumPat)) &&
            s->nsections == P.nsections && !memcmp(s->sections, P.sections, (size_t)P.nsections * sizeof(Section)) &&
+           s->nchords == P.nchords && !memcmp(s->chords, P.chords, (size_t)P.nchords * sizeof(Chord)) &&
+           s->key_root == P.key_root && s->key_scale == P.key_scale && s->nkeys == P.nkeys &&
+           !memcmp(s->keys, P.keys, (size_t)P.nkeys * sizeof(KeyChange)) &&
            s->ntracks == P.ntracks && !memcmp(s->tracks, P.tracks, sizeof s->tracks) && s->bpm == P.bpm && s->ts_num == P.ts_num && s->ts_den == P.ts_den && s->nchanges == P.nchanges &&
            !memcmp(s->changes, P.changes, (size_t)P.nchanges * sizeof(MeterChange)) &&
            s->a4 == P.a4 && s->loop_start == P.loop_start && s->loop_end == P.loop_end &&
@@ -2171,6 +2193,12 @@ static void state_restore(const State *s)
     P.ndrums = s->ndrums;
     memcpy(P.sections, s->sections, sizeof P.sections);
     P.nsections = s->nsections;
+    memcpy(P.chords, s->chords, (size_t)s->nchords * sizeof(Chord));
+    P.nchords = s->nchords;
+    P.key_root = s->key_root;
+    P.key_scale = s->key_scale;
+    P.nkeys = s->nkeys;
+    memcpy(P.keys, s->keys, sizeof P.keys);
     memcpy(P.tracks, s->tracks, sizeof s->tracks);
     P.ntracks = s->ntracks;
     P.bpm = s->bpm;
@@ -2208,6 +2236,11 @@ static void describe(const State *s, char *buf, size_t n)
         snprintf(buf, n, "automation");
     else if (s->nsections != P.nsections || memcmp(s->sections, P.sections, (size_t)P.nsections * sizeof(Section)))
         snprintf(buf, n, "%s", P.nsections > s->nsections ? "add section" : P.nsections < s->nsections ? "remove section" : "sections");
+    else if (s->nchords != P.nchords || memcmp(s->chords, P.chords, (size_t)P.nchords * sizeof(Chord)))
+        snprintf(buf, n, "%s", P.nchords > s->nchords ? "add chord" : P.nchords < s->nchords ? "remove chord" : "chords");
+    else if (s->key_root != P.key_root || s->key_scale != P.key_scale || s->nkeys != P.nkeys ||
+             memcmp(s->keys, P.keys, (size_t)P.nkeys * sizeof(KeyChange)))
+        snprintf(buf, n, "key");
     else if (s->ndrums != P.ndrums || memcmp(s->drums, P.drums, (size_t)P.ndrums * sizeof(DrumPat)))
         snprintf(buf, n, "%s", P.ndrums > s->ndrums ? "new drum pattern" : P.ndrums < s->ndrums ? "delete drum pattern" : "drum steps");
     else if (P.nclips > s->nclips) snprintf(buf, n, "add %d clip%s", P.nclips - s->nclips, P.nclips - s->nclips == 1 ? "" : "s");
@@ -2248,8 +2281,11 @@ static void history_check(void)
     edit_serial++;
 }
 
+static int th_synced_root = -1, th_synced_scale = -1;   /* the key Theory showed last frame (-1: take the song's) */
+
 static void history_reset(void)
 {
+    th_synced_root = th_synced_scale = -1;
     while (nundo > 0) state_free(&undo_stack[--nundo]);
     while (nredo > 0) state_free(&redo_stack[--nredo]);
     state_capture(&committed);
@@ -3450,7 +3486,7 @@ static void rec_drain(void)
 
 static int pad_sel, pads_scroll, pads_content_h;
 static SDL_Rect pad_rects[NPADS], inst_drop;
-enum { CM_LIB, CM_PAD, CM_INST, CM_SEC };   /* what a right-click menu is for */
+enum { CM_LIB, CM_PAD, CM_INST, CM_SEC, CM_CHD, CM_CHDS };   /* what a right-click menu is for */
 static void cm_open(int kind, int idx);
 
 static const char *MODE_NAMES[PAD_MODES] = {"One-shot", "Hold", "Loop"};
@@ -4070,6 +4106,26 @@ static void song_edit(SongEdit e)
     }
     for (int c = 0; c < P.nclips; c++) se_where(P.clips[c].start, &cb[c], &ci[c]);
     for (int i = 0; i < P.nautos; i++) se_where(P.autos[i].at, &ab[i], &ai[i]);
+    /* chords split at the edges too, and where each starts, in bars; and the key written out at the
+     * edges, like the tempo, so each part keeps its own */
+    for (int k = 0; k < 3; k++)
+        if (k < 2 || e.mode == SE_MOVE) chord_split(&P, meter_beats(&P, meter_bar_frame(&P, edges[k] > 0 ? edges[k] : 0)));
+    static int chb[MAX_CHORDS];
+    static double chi[MAX_CHORDS];
+    for (int i = 0; i < P.nchords; i++) se_where(meter_beats_frame(&P, P.chords[i].at), &chb[i], &chi[i]);
+    KeyChange km[MAX_KEYS + 4];
+    int nkm = 0;
+    km[nkm++] = (KeyChange){0, P.key_root, P.key_scale};
+    for (int i = 0; i < P.nkeys; i++) km[nkm++] = P.keys[i];
+    for (int k = 0; k < 3; k++) {
+        int bar = edges[k], have = 0;
+        if (bar <= 0 || (k == 2 && e.mode != SE_MOVE)) continue;
+        for (int i = 0; i < nkm; i++) have |= km[i].bar == bar;
+        if (have || nkm >= MAX_KEYS + 4) continue;
+        KeyChange kc = {bar, 0, 0};
+        key_at_bar(&P, bar, &kc.root, &kc.scale);
+        km[nkm++] = kc;
+    }
     /* 3. the tempo map, remapped */
     MeterChange nmap[2 * (MAX_METER + 8)];
     int nn = 0, gone;
@@ -4167,6 +4223,60 @@ static void song_edit(SongEdit e)
             P.sections[j] = P.sections[j - 1];
             P.sections[j - 1] = t;
         }
+    /* 6. chords, by bar and how far into it, under the new tempo map */
+    {
+        static Chord out[MAX_CHORDS];
+        int no = 0;
+        for (int i = 0; i < P.nchords; i++) {
+            Chord c = P.chords[i];
+            if (e.mode == SE_COPY && chb[i] >= e.a && chb[i] < e.b && no < MAX_CHORDS) {
+                Chord cp = c;
+                cp.at = meter_beats(&P, se_frame(chb[i] + len, chi[i]));
+                out[no++] = cp;
+            }
+            double nb = se_map(&e, chb[i], &gone);
+            if (gone || no >= MAX_CHORDS) continue;
+            c.at = meter_beats(&P, se_frame((int)nb, chi[i]));
+            out[no++] = c;
+        }
+        memcpy(P.chords, out, (size_t)no * sizeof(Chord));
+        P.nchords = no;
+        chords_sort(&P);
+        for (int i = 0; i + 1 < P.nchords; i++)   /* rounding never makes two overlap */
+            if (P.chords[i].at + P.chords[i].len > P.chords[i + 1].at) P.chords[i].len = P.chords[i + 1].at - P.chords[i].at;
+        for (int i = P.nchords - 1; i >= 0; i--)
+            if (P.chords[i].len <= 1e-6) chord_remove(&P, i);
+    }
+    /* 7. the key map, remapped like the tempo map */
+    {
+        KeyChange nk[2 * (MAX_KEYS + 4)];
+        int nn2 = 0;
+        for (int i = 0; i < nkm; i++) {
+            double nb = se_map(&e, km[i].bar, &gone);
+            if (!gone) nk[nn2++] = (KeyChange){(int)nb, km[i].root, km[i].scale};
+            if (e.mode == SE_COPY && km[i].bar >= e.a && km[i].bar < e.b) nk[nn2++] = (KeyChange){km[i].bar + len, km[i].root, km[i].scale};
+        }
+        for (int i = 1; i < nn2; i++)
+            for (int j = i; j > 0 && nk[j - 1].bar > nk[j].bar; j--) {
+                KeyChange t = nk[j];
+                nk[j] = nk[j - 1];
+                nk[j - 1] = t;
+            }
+        int r0 = P.key_root, s0 = P.key_scale;
+        for (int i = 0; i < nn2 && nk[i].bar == 0; i++) r0 = nk[i].root, s0 = nk[i].scale;
+        P.key_root = r0;
+        P.key_scale = s0;
+        P.nkeys = 0;
+        int pr = r0, ps = s0;
+        for (int i = 0; i < nn2; i++) {           /* only real changes, once a bar */
+            if (nk[i].bar <= 0 || (i + 1 < nn2 && nk[i + 1].bar == nk[i].bar)) continue;
+            if (nk[i].root == pr && nk[i].scale == ps) continue;
+            if (P.nkeys >= MAX_KEYS) break;
+            P.keys[P.nkeys++] = nk[i];
+            pr = nk[i].root;
+            ps = nk[i].scale;
+        }
+    }
     UNLOCK();
     selected = -1;
     free(cb);
@@ -5475,7 +5585,8 @@ static struct {
     Pad pad;                            /* a pad's settings, when copied from a pad */
 } sclip;
 enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR, CMA_PIN, CMA_SAVE, CMA_EDIT,
-       CMA_SREN, CMA_SLOOP, CMA_SDUP, CMA_SDEL, CMA_SCUT };
+       CMA_SREN, CMA_SLOOP, CMA_SDUP, CMA_SDEL, CMA_SCUT,
+       CMA_CCHG, CMA_CHEAR, CMA_CDUP, CMA_CKEY, CMA_CDEL, CMA_CDETECT, CMA_CPART, CMA_CCLEAR };
 static struct {
     int open, kind, idx, n;
     int act[6], enabled[6];
@@ -5845,6 +5956,8 @@ static void cm_open_section(int i)
     if (cm.box.y + h > H - 4) cm.box.y = H - 4 - h;
 }
 
+static void chord_action(int act, int i);
+
 static void sec_action(int act, int i)
 {
     if (i < 0 || i >= P.nsections) return;
@@ -5907,6 +6020,8 @@ static void cm_draw(void)
         case CMA_PIN: sound_pin(cm.idx, !P.samples[cm.idx].pinned); break;
         case CMA_EDIT: editor_open_sound(cm.idx); break;
         case CMA_SREN: case CMA_SLOOP: case CMA_SDUP: case CMA_SDEL: case CMA_SCUT: sec_action(cm.act[chosen], cm.idx); break;
+        case CMA_CCHG: case CMA_CHEAR: case CMA_CDUP: case CMA_CKEY: case CMA_CDEL: case CMA_CDETECT: case CMA_CPART:
+        case CMA_CCLEAR: chord_action(cm.act[chosen], cm.idx); break;
         case CMA_SAVE:
             if (P.samples[cm.idx].saved) sound_unsave(cm.idx);
             else if (sound_save(cm.idx) == 0)
@@ -8607,6 +8722,7 @@ static void piano_roll(void)
 }
 
 static void sec_add_here(void);
+static void chord_header(void);
 
 static void track_headers(void)
 {
@@ -8619,6 +8735,7 @@ static void track_headers(void)
         tip(sa, "A new section at the playhead's bar (Intro, Verse, Chorus...). Or drag along the strip");
         if (button(sa, "+", 0)) sec_add_here();
     }
+    chord_header();
     fill((SDL_Rect){L.left, L.top, L.head, L.ruler}, PANEL);
     text(L.left + 12, L.top + (L.ruler - font_h) / 2, "TRACKS", DIM);
     SDL_Rect add = {L.left + L.head - 32, L.top + 4, 22, L.ruler - 8};
@@ -8972,7 +9089,7 @@ static void arranger_strip(void)
         text_clip(g, g.x + 5, g.y + (g.h - font_h) / 2, sc->name, DARK);
         if (t >= 0) {
             int tx = (int)frame_to_x(meter_bar_frame(&P, t));
-            fill((SDL_Rect){tx - 1, strip.y, 3, L.arr + lanes_h()}, HEAD);
+            fill((SDL_Rect){tx - 1, strip.y, 3, L.arr + L.chd + lanes_h()}, HEAD);
         }
         SDL_SetCursor(cur_hand);
     }
@@ -8997,6 +9114,678 @@ static void arranger_release(void)
             int at = (int)drag.b <= sc.bar ? (int)drag.b : (int)drag.b - sc.bars;
             status("Moved %s, with everything in it, to bar %d. Ctrl+Z puts it back", sc.name, at + 1);
         }
+    }
+}
+
+/* ---------------------------------------------------------------- the chord track
+ *
+ * A strip under the sections naming the song's harmony, chord by chord. It makes no sound itself:
+ * Make a part writes a note clip from it, and the generators to come read it. Key changes sit on
+ * it too, and Theory shows (and edits) the key wherever the playhead is. */
+
+static void preview_notes(const int *notes, int n, double beats);
+static int chord_button(SDL_Rect r, const char *top, const char *bottom);
+static SDL_Rect chd_rect_[MAX_CHORDS], chp_box;
+static double chd_at0, chd_menu_beat;    /* a dragged chord's start as it was; where the strip was right-clicked */
+
+static double chd_beat_at_x(int x)        /* the beat under x, on the Snap grid (Shift: off), to a 16th at least */
+{
+    double fr = x_to_frame_raw(x);
+    long f = snap(fr > 0 ? (long)fr : 0);
+    double b = floor(meter_beats(&P, f) * 4 + 0.5) / 4;
+    return b < 0 ? 0 : b;
+}
+
+static double chd_bar_beats(double beat)  /* how long the bar at `beat` is, in quarter notes */
+{
+    int num, den;
+    meter_at(&P, meter_beats_frame(&P, beat), NULL, &num, &den, NULL, NULL, NULL);
+    return num * 4.0 / den;
+}
+
+static double chd_bar_start(double beat) { return meter_beats(&P, bar_floor(meter_beats_frame(&P, beat + 1e-6))); }
+
+static int chd_bar_of(double beat) { return (int)floor(meter_bars(&P, meter_beats_frame(&P, beat)) + 1e-4); }   /* frames round: a little slack */
+
+static double chd_next_after(double beat) /* where the next chord starts, or far away */
+{
+    for (int i = 0; i < P.nchords; i++)
+        if (P.chords[i].at > beat + 1e-9) return P.chords[i].at;
+    return 1e9;
+}
+
+static void chd_hear(const Chord *c)
+{
+    int notes[8], n = chord_voice(c, NULL, 0, 52, 72, notes);
+    notes[n++] = 36 + (c->bass >= 0 ? c->bass : c->root);   /* and the bass under it */
+    preview_notes(notes, n, 2);
+}
+
+static void chd_where(const Chord *c, char *buf, size_t n)   /* "bar 3, beat 2" */
+{
+    int bar = chd_bar_of(c->at);
+    double into = floor((c->at - meter_beats(&P, meter_bar_frame(&P, bar))) * 4 + 0.5) / 4;   /* to a 16th */
+    if (into <= 0) snprintf(buf, n, "bar %d", bar + 1);
+    else snprintf(buf, n, "bar %d, beat %g", bar + 1, into + 1);
+}
+
+/* A good next chord in the key: I, V, vi, IV round again, after whatever came before. */
+static void chd_suggest(double at, int *root, int *type)
+{
+    int kr, ks, deg = 0, prev = -1;
+    key_at_beat(&P, at, &kr, &ks);
+    for (int i = 0; i < P.nchords; i++)
+        if (P.chords[i].at < at) prev = i;
+    if (prev >= 0 && SCALES[ks].n == 7) {
+        static const int NEXT[7] = {4, 4, 5, 0, 5, 3, 0};
+        int iv = ((P.chords[prev].root - kr) % 12 + 12) % 12;
+        for (int d = 0; d < 7; d++)
+            if (SCALES[ks].steps[d] == iv) deg = NEXT[d];
+    }
+    char num[16];
+    int t, r = diatonic_chord(kr, ks, deg, th_sevenths, &t, num, sizeof num);
+    if (r < 0) {
+        r = kr;
+        t = SCALES[ks].minor ? CH_MIN : CH_MAJ;
+    }
+    *root = r;
+    *type = t;
+}
+
+static int chd_add(double at, double len)  /* a suggested chord, picker open on it */
+{
+    int r, t;
+    chd_suggest(at, &r, &t);
+    int i = chord_put(&P, at, len, r, t, -1);
+    if (i < 0) {
+        status("The chord track is full (%d chords)", MAX_CHORDS);
+        return -1;
+    }
+    chd_sel = chp_idx = i;
+    chp_open = 1;
+    chd_hear(&P.chords[i]);
+    char nm[32], wh[48];
+    chord_label(&P, &P.chords[i], nm, sizeof nm);
+    chd_where(&P.chords[i], wh, sizeof wh);
+    status("%s at %s, %g beats. Pick another chord here, drag it to move it, drag its end to resize it", nm, wh, P.chords[i].len);
+    return i;
+}
+
+static void chd_add_here(void)            /* the + in the header: a bar's chord at the playhead */
+{
+    double at = chd_bar_start(meter_beats(&P, P.playhead));
+    int in = chord_at(&P, at);
+    if (in >= 0) at = P.chords[in].at + P.chords[in].len;   /* one there already: straight after it */
+    double len = chd_bar_beats(at), next = chd_next_after(at - 1e-9);
+    if (at + len > next) len = next - at;
+    if (len < 0.25) {
+        status("No room for a chord there: there's one straight after");
+        return;
+    }
+    chd_add(at, len);
+}
+
+static void open_key_tab(void)
+{
+    show_panel(RI_THEORY);
+    theory_tab = 0;
+    th_scroll = 0;
+}
+
+/* Theory's key is the key where the playhead is: following it as the playhead moves, and setting it
+ * (that stretch of the song's) when changed in Theory. */
+static void key_sync(void)
+{
+    int bar = (int)floor(meter_bars(&P, P.playhead) + 1e-9), r, sc;
+    if (bar < 0) bar = 0;
+    key_at_bar(&P, bar, &r, &sc);
+    if (th_synced_root >= 0 && (th_root != th_synced_root || th_scale != th_synced_scale)) {
+        if (r != th_root || sc != th_scale) key_set(&P, bar, th_root, th_scale);
+    } else if (r != th_root || sc != th_scale) {
+        th_root = r;
+        th_scale = sc;
+    }
+    th_synced_root = th_root;
+    th_synced_scale = th_scale;
+}
+
+static void key_name(int root, int scale, char *buf, size_t n)
+{
+    snprintf(buf, n, "%s %s", pitch_name(root, key_uses_flats(root, scale)), SCALES[scale].name);
+}
+
+static void chd_key_change(double beat)
+{
+    int bar = chd_bar_of(beat);
+    if (bar < 1) {
+        open_key_tab();
+        status("The key at the start is the song's key: pick it in Theory > Keys");
+        return;
+    }
+    int k = key_change_add(&P, bar);
+    if (k < 0) {
+        status("A song can have %d key changes", MAX_KEYS);
+        return;
+    }
+    playhead_to(meter_bar_frame(&P, bar));
+    open_key_tab();
+    status("A key change at bar %d: pick the new key in Theory > Keys (right-click the flag to remove it)", bar + 1);
+}
+
+static void chord_header(void)
+{
+    SDL_Rect hr = {L.left, L.top + L.ruler + L.arr, L.head, L.chd};
+    fill(hr, tone(PANEL, 0.86f));
+    line(L.left, hr.y + hr.h - 1, L.left + L.head, hr.y + hr.h - 1, LINE);
+    int tw = text(L.left + 12, hr.y + (hr.h - font_h) / 2, "CHORDS", DIM);
+    SDL_Rect sa = {L.left + L.head - 32, hr.y + 2, 22, hr.h - 4};
+    tip(sa, "A chord at the playhead's bar. Or click along the strip");
+    if (button(sa, "+", 0)) chd_add_here();
+    int bar = (int)floor(meter_bars(&P, P.playhead) + 1e-9), kr, ks;
+    key_at_bar(&P, bar < 0 ? 0 : bar, &kr, &ks);
+    char kn[40];
+    key_name(kr, ks, kn, sizeof kn);
+    SDL_Rect kb = {L.left + 12 + tw + 8, hr.y + 2, sa.x - 4 - (L.left + 12 + tw + 8), hr.h - 4};
+    if (kb.w > 10) {
+        int hov = hit(kb) && drag.kind == D_NONE;
+        if (hov) fill(kb, PANEL3);
+        text_clip(kb, kb.x + 4, hr.y + (hr.h - font_h) / 2, kn, hov ? TEXT : HEAD);
+        tip(kb, "The key here: %s. Click to change it in Theory > Keys. Right-click the chord strip for a key change", kn);
+        if (hov && lpress) {
+            lpress = 0;
+            open_key_tab();
+        }
+    }
+}
+
+static void cm_open_list(int kind, int idx, const char *const *labels, const int *acts, const int *enabled, int n)
+{
+    memset(&cm, 0, sizeof cm);
+    cm.open = 1;
+    cm.kind = kind;
+    cm.idx = idx;
+    int w = 0;
+    for (int k = 0; k < n && k < 6; k++) {
+        snprintf(cm.label[k], sizeof cm.label[k], "%s", labels[k]);
+        cm.act[k] = acts[k];
+        cm.enabled[k] = enabled ? enabled[k] : 1;
+        w = text_w(labels[k]) > w ? text_w(labels[k]) : w;
+    }
+    cm.n = n < 6 ? n : 6;
+    w += 28;
+    int h = cm.n * (font_h + 12) + 8;
+    cm.box = (SDL_Rect){mx + 2, my + 2, w, h};
+    if (cm.box.x + w > W - 4) cm.box.x = W - 4 - w;
+    if (cm.box.y + h > H - 4) cm.box.y = H - 4 - h;
+}
+
+static void chord_strip(void)
+{
+    SDL_Rect strip = {L.tl_x, L.top + L.ruler + L.arr, L.tl_w, L.chd};
+    fill(strip, tone(PANEL, 0.86f));
+    line(L.tl_x, strip.y + strip.h - 1, W, strip.y + strip.h - 1, LINE);
+    int over = -1, edge = -1;
+    double now = meter_beats(&P, P.playhead);
+    if (chd_sel >= P.nchords) chd_sel = -1;
+    for (int i = 0; i < P.nchords; i++) {
+        const Chord *c = &P.chords[i];
+        int x0 = (int)frame_to_x(meter_beats_frame(&P, c->at)), x1 = (int)frame_to_x(meter_beats_frame(&P, c->at + c->len));
+        SDL_Rect r = {x0, strip.y + 2, x1 - x0 - 1 > 2 ? x1 - x0 - 1 : 2, strip.h - 4};
+        chd_rect_[i] = r;
+        if (r.x + r.w < L.tl_x || r.x > W) continue;
+        int kr, ks;
+        key_at_beat(&P, c->at, &kr, &ks);
+        Col col = TRACK_COL[(((c->root - kr) % 12 + 12) % 12 * 7) % 12];   /* a fifth apart, a colour apart */
+        int here = now >= c->at && now < c->at + c->len;
+        int dragged = drag.kind == D_CHD && drag.clip == i && abs(mx - drag.sx) > 4;
+        fill(r, dragged ? alpha(col, 90) : wash(col, here ? 0.85f : i == chd_sel ? 0.75f : 0.55f));
+        if (i == chd_sel) outline(r, TEXT);
+        else if (here) outline(r, HEAD);
+        char nm[32], num[16];
+        chord_label(&P, c, nm, sizeof nm);
+        chord_numeral(&P, c, num, sizeof num);
+        int lx = r.x > L.tl_x ? r.x : L.tl_x;
+        for (int k = 0; k < P.nkeys; k++)          /* a key change's flag starts here: the name goes after it */
+            if (fabs(meter_beats(&P, meter_bar_frame(&P, P.keys[k].bar)) - c->at) < 1e-6) {
+                char kn[40];
+                key_name(P.keys[k].root, P.keys[k].scale, kn, sizeof kn);
+                if (lx < r.x + text_w(kn) + 12) lx = r.x + text_w(kn) + 12;
+            }
+        SDL_Rect clipr = {lx, r.y, r.x + r.w - lx - 2, r.h};
+        int tw = text_w(nm);
+        if (clipr.w > 12) {                        /* cut short like a clip's name; the tooltip has it all */
+            text_clip(clipr, lx + 5, r.y + (r.h - font_h) / 2, nm, DARK);
+            if (clipr.w > tw + text_w(num) + 16) text_clip(clipr, lx + 5 + tw + 7, r.y + (r.h - font_h) / 2, num, alpha(DARK, 150));
+        }
+        if (hit(r) && drag.kind == D_NONE) {
+            over = i;
+            if (mx >= r.x + r.w - 5) edge = i;
+            char wh[48];
+            chd_where(c, wh, sizeof wh);
+            tip(r, "%s (%s), %s, %g beats. Click to hear it, double-click to change it, drag to move it, drag its right "
+                   "end to resize, right-click for more", nm, num, wh, c->len);
+        }
+    }
+    for (int k = 0; k < P.nkeys; k++) {          /* key changes: a flag each */
+        int x = (int)frame_to_x(meter_bar_frame(&P, P.keys[k].bar));
+        if (x < L.tl_x - 120 || x > W) continue;
+        char kn[40];
+        key_name(P.keys[k].root, P.keys[k].scale, kn, sizeof kn);
+        SDL_Rect f = {x, strip.y, text_w(kn) + 10, font_h + 2};
+        int hov = hit(f) && drag.kind == D_NONE;
+        fill((SDL_Rect){x - 1, strip.y, 2, strip.h}, ACCENT);
+        fill(f, hov ? ACCENT : alpha(ACCENT, 200));
+        text(f.x + 5, f.y + 1, kn, DARK);
+        if (hov) {
+            over = -2;
+            tip(f, "From bar %d the key is %s. Click to go there and change it in Theory > Keys; right-click removes the "
+                   "key change", P.keys[k].bar + 1, kn);
+            if (lpress) {
+                lpress = 0;
+                playhead_to(meter_bar_frame(&P, P.keys[k].bar));
+                open_key_tab();
+            } else if (rpress) {
+                rpress = 0;
+                key_change_remove(&P, k);
+                status("Removed the key change at bar %d", P.keys[k].bar + 1);
+                break;
+            }
+        }
+    }
+    if (!P.nchords && drag.kind != D_CHDNEW)
+        text_clip(strip, L.tl_x + 8, strip.y + (strip.h - font_h) / 2,
+                  "Click here to add a chord, or put in a progression with Theory > Keys > Place", tone(DIM, 0.8f));
+    if (hit(strip) && drag.kind == D_NONE && over == -1)
+        tip(strip, "The song's chords. Click to add one here, drag along to set how long; right-click for a key change, "
+                   "chords from a note clip, or a part made from the chords");
+    if (hit(strip) && drag.kind == D_NONE) SDL_SetCursor(edge >= 0 ? cur_resize : cur_arrow);
+
+    /* the mouse */
+    if (hit(strip) && drag.kind == D_NONE && lpress && over != -2) {
+        lpress = 0;
+        if (over >= 0 && ldouble) {
+            chd_sel = chp_idx = over;
+            chp_open = 1;
+        } else if (edge >= 0) {
+            drag = (typeof(drag)){.kind = D_CHDEND, .clip = edge, .sx = mx, .sy = my};
+        } else if (over >= 0) {
+            drag = (typeof(drag)){.kind = D_CHD, .clip = over, .sx = mx, .sy = my};
+            chd_at0 = P.chords[over].at;
+        } else {
+            drag = (typeof(drag)){.kind = D_CHDNEW, .sx = mx, .sy = my};
+            chd_at0 = chd_beat_at_x(mx);
+        }
+    }
+    if (hit(strip) && drag.kind == D_NONE && rpress && over != -2) {
+        rpress = 0;
+        double fr = x_to_frame_raw(mx);
+        chd_menu_beat = meter_beats(&P, fr > 0 ? (long)fr : 0);
+        if (over >= 0) {
+            chd_sel = over;
+            static const char *const LB[5] = {"Change the chord", "Hear it", "Copy it in after itself", "A key change at its bar",
+                                              "Remove it"};
+            static const int AC[5] = {CMA_CCHG, CMA_CHEAR, CMA_CDUP, CMA_CKEY, CMA_CDEL};
+            cm_open_list(CM_CHD, over, LB, AC, NULL, 5);
+        } else {
+            static const char *const LB[4] = {"A key change here", "Chords from the selected note clip",
+                                              "Make a part from the chords", "Remove every chord"};
+            static const int AC[4] = {CMA_CKEY, CMA_CDETECT, CMA_CPART, CMA_CCLEAR};
+            int en[4] = {1, selected >= 0 && selected < P.nclips && P.clips[selected].pattern > 0, P.nchords > 0, P.nchords > 0};
+            cm_open_list(CM_CHDS, -1, LB, AC, en, 4);
+        }
+    }
+    /* drags in progress */
+    if (drag.kind == D_CHDNEW) {
+        double a = chd_at0, b = chd_beat_at_x(mx);
+        if (b < a) {
+            double t = a;
+            a = b;
+            b = t;
+        }
+        if (b - a < 0.25) b = a + 0.25;
+        int x0 = (int)frame_to_x(meter_beats_frame(&P, a)), x1 = (int)frame_to_x(meter_beats_frame(&P, b));
+        SDL_Rect g = {x0, strip.y + 2, x1 - x0, strip.h - 4};
+        fill(g, alpha(ACCENT, 110));
+        outline(g, ACCENT);
+    } else if (drag.kind == D_CHDEND && drag.clip < P.nchords) {
+        Chord *c = &P.chords[drag.clip];
+        double len = chd_beat_at_x(mx) - c->at, next = chd_next_after(c->at);
+        if (len < 0.25) len = 0.25;
+        if (c->at + len > next) len = next - c->at;
+        c->len = len;
+    } else if (drag.kind == D_CHD && drag.clip < P.nchords && abs(mx - drag.sx) > 4) {
+        const Chord *c = &P.chords[drag.clip];
+        double at = chd_beat_at_x(chd_rect_[drag.clip].x + (mx - drag.sx));
+        int x0 = (int)frame_to_x(meter_beats_frame(&P, at)), x1 = (int)frame_to_x(meter_beats_frame(&P, at + c->len));
+        SDL_Rect g = {x0, strip.y + 2, x1 - x0, strip.h - 4};
+        char nm[32];
+        chord_label(&P, c, nm, sizeof nm);
+        fill(g, alpha(ACCENT, 170));
+        outline(g, TEXT);
+        text_clip(g, g.x + 5, g.y + (g.h - font_h) / 2, nm, DARK);
+        SDL_SetCursor(cur_hand);
+    }
+}
+
+static void chord_release(void)
+{
+    char nm[32], wh[48];
+    if (drag.kind == D_CHDNEW) {
+        double a = chd_at0, b = chd_beat_at_x(mx);
+        int click = abs(mx - drag.sx) < 4;
+        if (b < a) {
+            double t = a;
+            a = b;
+            b = t;
+        }
+        double len = click ? chd_bar_start(a) + chd_bar_beats(a) - a : b - a;   /* a click: to the end of the bar */
+        if (len < 0.25) len = click ? chd_bar_beats(a) : 0.25;
+        int in = chord_at(&P, a);
+        if (in >= 0) return;
+        double next = chd_next_after(a);
+        if (a + len > next) len = next - a;
+        if (len >= 0.25 - 1e-9) chd_add(a, len);
+    } else if (drag.kind == D_CHDEND && drag.clip < P.nchords) {
+        chord_label(&P, &P.chords[drag.clip], nm, sizeof nm);
+        status("%s: %g beats", nm, P.chords[drag.clip].len);
+    } else if (drag.kind == D_CHD && drag.clip < P.nchords) {
+        Chord c = P.chords[drag.clip];
+        chord_label(&P, &c, nm, sizeof nm);
+        if (abs(mx - drag.sx) < 4) {             /* a click: hear it */
+            chd_sel = drag.clip;
+            chd_hear(&c);
+            char num[16];
+            chord_numeral(&P, &c, num, sizeof num);
+            chd_where(&c, wh, sizeof wh);
+            status("%s (%s) at %s, %g beats. Double-click to change it, Delete removes it", nm, num, wh, c.len);
+        } else {
+            double at = chd_beat_at_x(chd_rect_[drag.clip].x + (mx - drag.sx));
+            chord_remove(&P, drag.clip);
+            chd_sel = chord_put(&P, at, c.len, c.root, c.type, c.bass);
+            if (chd_sel >= 0) {
+                chd_where(&P.chords[chd_sel], wh, sizeof wh);
+                status("Moved %s to %s (it takes the place of any chord it lands on). Ctrl+Z puts it back", nm, wh);
+            }
+        }
+    }
+}
+
+/* The chord picker: the key's own chords, then any root, type and bass note. Changes apply as you
+ * click, and you hear each. */
+static void chord_picker(void)
+{
+    if (chp_idx < 0 || chp_idx >= P.nchords) {
+        chp_open = 0;
+        return;
+    }
+    Chord *c = &P.chords[chp_idx];
+    int kr, ks;
+    key_at_beat(&P, c->at, &kr, &ks);
+    int flats = key_uses_flats(kr, ks), seven = SCALES[ks].n == 7;
+    int w = 540, rowh = 26, per = 7, trows = (CH_COUNT + per - 1) / per;
+    int h = 12 + (font_h + 10) + (seven ? font_h + 8 + 2 * font_h + 14 : 0) + 3 * (font_h + 8) + 3 * rowh + 24 + trows * (rowh + 4) + 14;
+    SDL_Rect cr = chd_rect_[chp_idx];
+    SDL_Rect m = {cr.x, L.lanes_y + 4, w, h};
+    if (m.x + w > W - 4) m.x = W - 4 - w;
+    if (m.x < L.left + 4) m.x = L.left + 4;
+    if (m.y + h > H - 4) m.y = H - 4 - h;
+    chp_box = m;
+    fill((SDL_Rect){m.x + 3, m.y + 3, m.w, m.h}, alpha(DARK, 90));
+    fill(m, PANEL);
+    outline(m, LINE);
+    int x = m.x + 14, y = m.y + 12, iw = w - 28, changed = 0;
+    char nm[32], num[16], wh[48], buf[96], kn[40];
+    chord_label(&P, c, nm, sizeof nm);
+    chord_numeral(&P, c, num, sizeof num);
+    chd_where(c, wh, sizeof wh);
+    snprintf(buf, sizeof buf, "%s  (%s)", nm, num);
+    int tw = text(x, y, buf, HEAD);
+    snprintf(buf, sizeof buf, "%s, %g beats", wh, c->len);
+    text_clip((SDL_Rect){x + tw + 12, y, iw - tw - 12, font_h + 2}, x + tw + 12, y, buf, DIM);
+    y += font_h + 10;
+    key_name(kr, ks, kn, sizeof kn);
+    if (seven) {
+        snprintf(buf, sizeof buf, "IN %s", kn);
+        for (char *q = buf; *q; q++) *q = (char)toupper((unsigned char)*q);
+        text(x, y + 2, buf, DIM);
+        if (button((SDL_Rect){x + iw - 70, y - 4, 70, font_h + 6}, "7ths", th_sevenths)) th_sevenths = !th_sevenths;
+        y += font_h + 8;
+        int bw = (iw - 6 * 4) / 7;
+        for (int d = 0; d < 7; d++) {
+            int t;
+            char dn[16], dname[32];
+            int r = diatonic_chord(kr, ks, d, th_sevenths, &t, dn, sizeof dn);
+            if (r < 0) continue;
+            chord_name(r, t, flats, dname, sizeof dname);
+            SDL_Rect b = {x + d * (bw + 4), y, bw, 2 * font_h + 10};
+            if (chord_button(b, dn, dname)) {
+                c->root = r;
+                c->type = t;
+                c->bass = -1;
+                changed = 1;
+            }
+            if (c->root == r && c->type == t) outline(b, ACCENT);
+        }
+        y += 2 * font_h + 14;
+    }
+    text(x, y + 2, "ROOT", DIM);
+    y += font_h + 8;
+    int bw = (iw - 11 * 3) / 12;
+    for (int i = 0; i < 12; i++)
+        if (button((SDL_Rect){x + i * (bw + 3), y, bw, rowh}, pitch_name(i, flats), c->root == i)) {
+            c->root = i;
+            if (c->bass == i) c->bass = -1;
+            changed = 1;
+        }
+    y += rowh + 8;
+    text(x, y + 2, "TYPE", DIM);
+    y += font_h + 8;
+    int tw2 = (iw - (per - 1) * 3) / per;
+    for (int t = 0; t < CH_COUNT; t++) {
+        SDL_Rect b = {x + (t % per) * (tw2 + 3), y + (t / per) * (rowh + 4), tw2, rowh};
+        if (button(b, CHORDS[t].suffix[0] ? CHORDS[t].suffix : "maj", c->type == t)) {
+            c->type = t;
+            changed = 1;
+        }
+        tip(b, "%s: %s", CHORDS[t].name, CHORDS[t].formula);
+    }
+    y += trows * (rowh + 4) + 4;
+    text(x, y + 2, "BASS NOTE", DIM);
+    y += font_h + 8;
+    int bw2 = (iw - 12 * 3) / 13;
+    if (button((SDL_Rect){x, y, bw2, rowh}, "Root", c->bass < 0)) c->bass = -1, changed = 1;
+    for (int i = 0; i < 12; i++) {
+        SDL_Rect b = {x + (i + 1) * (bw2 + 3), y, bw2, rowh};
+        if (button(b, pitch_name(i, flats), c->bass == i)) {
+            c->bass = i == c->root ? -1 : i;
+            changed = 1;
+        }
+    }
+    tip((SDL_Rect){x, y, iw, rowh}, "A slash chord: the chord over another bass note (C/E is C with E in the bass)");
+    y += rowh + 12;
+    if (button((SDL_Rect){x, y, 80, rowh}, "Hear it", 0)) chd_hear(c);
+    if (button((SDL_Rect){x + 88, y, 80, rowh}, "Remove", 0)) {
+        chord_remove(&P, chp_idx);
+        chd_sel = -1;
+        chp_open = 0;
+        status("Removed %s from the chord track", nm);
+        lpress = 0;
+        return;
+    }
+    if (button((SDL_Rect){x + iw - 80, y, 80, rowh}, "Done", 1)) chp_open = 0;
+    if (changed) {
+        chd_hear(c);
+        chord_label(&P, c, nm, sizeof nm);
+        chord_numeral(&P, c, num, sizeof num);
+        status("%s (%s) at %s", nm, num, wh);
+    }
+    if ((lpress || rpress) && !hit(m)) chp_open = 0;     /* a click outside closes it */
+    lpress = rpress = 0;
+}
+
+/* A note clip of the chords, held and voiced close together, on a free track: the instrument's sound
+ * if one is chosen, or a pad. */
+static int chord_part(void)
+{
+    if (!P.nchords) {
+        status("No chords yet: add some on the CHORDS strip first");
+        return -1;
+    }
+    double longest = 0;
+    for (int i = 0; i < P.nchords; i++) {
+        long f0 = meter_beats_frame(&P, P.chords[i].at), f1 = meter_beats_frame(&P, P.chords[i].at + P.chords[i].len);
+        if ((double)(f1 - f0) / SR > longest) longest = (double)(f1 - f0) / SR;
+    }
+    int s = P.inst_sample;
+    if (s < 0 || s >= P.nsamples || P.samples[s].removed) {
+        s = -1;
+        for (int i = 0; i < P.nsamples; i++)
+            if (!P.samples[i].removed && !strcmp(P.samples[i].name, "Chord pad") && P.samples[i].frames >= (long)(longest * SR))
+                s = i;
+        if (s < 0) {
+            int pre = 0;
+            for (int i = 0; i < NSYNTH_PRESETS; i++)
+                if (!strcmp(SYNTH_PRESETS[i].name, "Analog pad")) pre = i;
+            SynthSound y;
+            synth_from_preset(&y, pre);
+            y.a4 = P.a4;
+            y.seconds = longest + 1 < 4 ? 4 : longest + 1 > 20 ? 20 : longest + 1;
+            s = sample_generate_synth(&P, &y, "Chord pad");
+        }
+    }
+    if (s < 0) {
+        status("The library is full");
+        return -1;
+    }
+    const Chord *last = &P.chords[P.nchords - 1];
+    long a = bar_floor(meter_beats_frame(&P, P.chords[0].at)), b = meter_beats_frame(&P, last->at + last->len);
+    int t = -1;
+    for (int k = 0; k < P.ntracks && t < 0; k++) {
+        int busy = 0;
+        for (int c = 0; c < P.nclips && !busy; c++)
+            busy = P.clips[c].track == k && P.clips[c].start < b && P.clips[c].start + P.clips[c].length > a;
+        if (!busy) t = k;
+    }
+    if (t < 0 && P.ntracks < MAX_TRACKS) {
+        LOCK();
+        t = project_add_track(&P, "Chords");
+        UNLOCK();
+    }
+    if (t < 0) t = P.ntracks - 1;
+    int c = clip_add(s, t, a, 0, b - a);
+    if (c < 0) return -1;
+    int prev[8], np = 0, made = 0;
+    LOCK();
+    P.clips[c].pattern = pattern_new_id(&P);
+    P.clips[c].root = sample_root(&P.samples[s]);
+    for (int i = 0; i < P.nchords; i++) {
+        const Chord *ch = &P.chords[i];
+        long f0 = meter_beats_frame(&P, ch->at) - a, f1 = meter_beats_frame(&P, ch->at + ch->len) - a;
+        long gap = (f1 - f0) / 16 < SR / 50 ? (f1 - f0) / 16 : SR / 50;   /* a breath before the next chord */
+        int v[8], n = chord_voice(ch, prev, np, 52, 72, v);
+        for (int k = 0; k < n && P.nnotes < MAX_NOTES; k++) P.notes[P.nnotes++] = (Note){P.clips[c].pattern, v[k], f0, f1 - f0 - gap, 0.7f};
+        memcpy(prev, v, sizeof(int) * (size_t)n);
+        np = n;
+        made++;
+    }
+    UNLOCK();
+    sel_only(c);
+    status("Made a chord part on track %d: %d chords held on \"%s\", each moving as little as it can. Double-click it to "
+           "edit the notes", t + 1, made, P.samples[s].name);
+    return c;
+}
+
+/* The chords a note clip plays, half a bar at a time (a bar at a time in 3/4 and 6/8), into the
+ * chord track over the clip's stretch. */
+static int chords_from_clip(int ci)
+{
+    if (ci < 0 || ci >= P.nclips || P.clips[ci].pattern <= 0) {
+        status("Select a note clip first (click it), then try again");
+        return 0;
+    }
+    const Clip *cl = &P.clips[ci];
+    double a = meter_beats(&P, cl->start), b = meter_beats(&P, cl->start + cl->length);
+    chord_split(&P, a);
+    chord_split(&P, b);
+    for (int i = P.nchords - 1; i >= 0; i--)
+        if (P.chords[i].at >= a - 1e-9 && P.chords[i].at + P.chords[i].len <= b + 1e-9) chord_remove(&P, i);
+    int made = 0, lasti = -1;
+    double w0 = a;
+    while (w0 < b - 1e-6) {
+        double bs = chd_bar_start(w0), bb = chd_bar_beats(w0);
+        double step = bb >= 4 && fmod(bb, 2) < 1e-9 ? bb / 2 : bb;
+        double w1 = bs + step * (floor((w0 - bs) / step + 1e-9) + 1);
+        if (w1 > b) w1 = b;
+        float wt[12] = {0};
+        int low = 999;
+        for (int i = 0; i < P.nnotes; i++) {
+            const Note *n = &P.notes[i];
+            if (n->pattern != cl->pattern) continue;
+            long ns = cl->start + n->start - cl->offset, ne = ns + n->length;
+            if (ns < cl->start) ns = cl->start;
+            if (ne > cl->start + cl->length) ne = cl->start + cl->length;
+            if (ne <= ns) continue;
+            double nb0 = meter_beats(&P, ns), nb1 = meter_beats(&P, ne);
+            double ov = (nb1 < w1 ? nb1 : w1) - (nb0 > w0 ? nb0 : w0);
+            if (ov <= 1e-6) continue;
+            wt[n->note % 12] += (float)(ov * (0.3 + n->vel));
+            if (n->note < low) low = n->note;
+        }
+        int type, bass, r = chord_guess(wt, low < 999 ? low % 12 : -1, &type, &bass);
+        if (r < 0) {
+            lasti = -1;
+        } else if (lasti >= 0 && P.chords[lasti].root == r && P.chords[lasti].type == type && P.chords[lasti].bass == bass &&
+                   fabs(P.chords[lasti].at + P.chords[lasti].len - w0) < 1e-6) {
+            P.chords[lasti].len = w1 - P.chords[lasti].at;     /* the same chord still */
+        } else {
+            lasti = chord_put(&P, w0, w1 - w0, r, type, bass);
+            made += lasti >= 0;
+        }
+        w0 = w1;
+    }
+    if (!made) status("No chords found in that clip: it has no notes");
+    else status("Found %d chord%s in the clip, now on the chord track. Click one to hear it", made, made == 1 ? "" : "s");
+    return made;
+}
+
+static void chord_action(int act, int i)
+{
+    int ok = i >= 0 && i < P.nchords;
+    char nm[32];
+    switch (act) {
+    case CMA_CCHG:
+        if (ok) chd_sel = chp_idx = i, chp_open = 1;
+        break;
+    case CMA_CHEAR:
+        if (ok) chd_hear(&P.chords[i]);
+        break;
+    case CMA_CDUP:
+        if (ok) {
+            Chord c = P.chords[i];
+            int k = chord_put(&P, c.at + c.len, c.len, c.root, c.type, c.bass);
+            if (k >= 0) chd_sel = k;
+            chord_label(&P, &c, nm, sizeof nm);
+            status("A copy of %s after itself", nm);
+        }
+        break;
+    case CMA_CKEY: chd_key_change(ok ? P.chords[i].at : chd_menu_beat); break;
+    case CMA_CDEL:
+        if (ok) {
+            chord_label(&P, &P.chords[i], nm, sizeof nm);
+            chord_remove(&P, i);
+            chd_sel = -1;
+            status("Removed %s from the chord track", nm);
+        }
+        break;
+    case CMA_CDETECT: chords_from_clip(selected); break;
+    case CMA_CPART: chord_part(); break;
+    case CMA_CCLEAR: {
+        int n = P.nchords;
+        P.nchords = 0;
+        chd_sel = -1;
+        status("Removed all %d chords. Ctrl+Z brings them back", n);
+        break;
+    }
     }
 }
 
@@ -9047,6 +9836,7 @@ static void timeline(void)
     }
     time_scale((SDL_Rect){L.tl_x, L.top + 24, L.tl_w, L.ruler - 24});
     arranger_strip();
+    chord_strip();
     line(L.tl_x, L.top + 24, W, L.top + 24, tone(LINE, 0.8f));
     line(L.tl_x, L.top + L.ruler - 1, W, L.top + L.ruler - 1, LINE);
 
@@ -9568,10 +10358,17 @@ static void bounce_clips(const int *list, int n)
 
 static void arranger_release(void);
 
+static void chord_release(void);
+
 static void end_drag(void)
 {
     if (drag.kind == D_SEC || drag.kind == D_SECNEW || drag.kind == D_SECEND) {
         arranger_release();
+        drag.kind = D_NONE;
+        return;
+    }
+    if (drag.kind == D_CHD || drag.kind == D_CHDNEW || drag.kind == D_CHDEND) {
+        chord_release();
         drag.kind = D_NONE;
         return;
     }
@@ -9744,8 +10541,8 @@ static void key(SDL_Keysym k)
         roll_open(selected);
         return;
     }
-    if ((menu_open || met_open || dd.open) && k.sym == SDLK_ESCAPE) {
-        menu_open = met_open = dd.open = 0;
+    if ((menu_open || met_open || dd.open || chp_open) && k.sym == SDLK_ESCAPE) {
+        menu_open = met_open = dd.open = chp_open = 0;
         return;
     }
     if (learn_pad >= 0 && k.sym == SDLK_ESCAPE) {
@@ -9859,7 +10656,13 @@ static void key(SDL_Keysym k)
         break;
     case SDLK_DELETE:
     case SDLK_BACKSPACE:
-        if (sel_count()) {
+        if (chd_sel >= 0 && chd_sel < P.nchords && my >= L.top + L.ruler + L.arr && my < L.lanes_y && mx >= L.tl_x) {
+            char nm[32];
+            chord_label(&P, &P.chords[chd_sel], nm, sizeof nm);
+            chord_remove(&P, chd_sel);
+            chd_sel = -1;
+            status("Removed %s from the chord track", nm);
+        } else if (sel_count()) {
             int n = delete_selection();
             status("Deleted %d clip%s", n, n == 1 ? "" : "s");
         }
@@ -11278,11 +12081,19 @@ static int selftest(void)
     {
         examples_scan();
         check(nexamples == 10, "the ten example songs are found next to the program");
-        int good = 0;
+        int good = 0, harm = 0, chip_keys = 0;
         for (int i = 0; i < nexamples; i++) {
             Project *q = malloc(sizeof *q);
             int old_rate = g_rate;
             if (project_load(q, example_path[i], msg, sizeof msg) == 0) {
+                harm += q->nchords >= 3 || strstr(example_path[i], "experimental");
+                if (strstr(example_path[i], "chiptune")) {
+                    int kr, ks, r0, s0, r1, s1;
+                    key_at_bar(q, 25, &kr, &ks);
+                    key_at_bar(q, 14, &r0, &s0);
+                    key_at_bar(q, 38, &r1, &s1);
+                    chip_keys = q->nkeys == 3 && kr == 9 && r0 == 2 && r1 == 0 && ks == 0;
+                }
                 long end = project_end(q), n = 2 * SR, at = end / 2;
                 float *b = calloc((size_t)n * 2, sizeof(float));
                 Mixer *m = mixer_new();
@@ -11300,6 +12111,8 @@ static int selftest(void)
             g_rate = old_rate;
         }
         check(good == nexamples && good > 0, "each example opens, runs about a minute and is playing sound mid-song");
+        check(harm == nexamples, "the example songs have their chords on the chord track");
+        check(chip_keys, "Chiptune changes key for the second level and the boss, and comes home for the win");
         if (nexamples) {
             int pick = 0;                       /* the one the tests after this were written against */
             for (int i = 0; i < nexamples; i++)
@@ -13511,6 +14324,206 @@ static int selftest(void)
     }
 
 
+    /* ---- the chord track and the song's key */
+    {
+        int ty, tb;
+        float w[12] = {0};
+        w[0] = w[4] = w[7] = 1;
+        check(chord_guess(w, 0, &ty, &tb) == 0 && ty == CH_MAJ && tb == -1, "C, E and G are named C");
+        memset(w, 0, sizeof w);
+        w[9] = w[0] = w[4] = 1;
+        check(chord_guess(w, 0, &ty, &tb) == 9 && ty == CH_MIN && tb == 0, "A, C and E over a low C are named Am/C");
+        memset(w, 0, sizeof w);
+        w[7] = w[11] = w[2] = w[5] = 1;
+        check(chord_guess(w, 7, &ty, &tb) == 7 && ty == CH_DOM7, "G, B, D and F are named G7");
+        memset(w, 0, sizeof w);
+        check(chord_guess(w, -1, &ty, &tb) == -1, "silence names no chord");
+        Chord cc = {0, 4, 0, CH_MAJ, -1}, gc = {4, 4, 7, CH_MAJ, -1};
+        int v1[8], v2[8], n1 = chord_voice(&cc, NULL, 0, 52, 72, v1), n2 = chord_voice(&gc, v1, n1, 52, 72, v2), moved = 0, fits = 1;
+        for (int k = 0; k < n2; k++) {
+            int d = 99;
+            for (int j = 0; j < n1; j++) d = abs(v2[k] - v1[j]) < d ? abs(v2[k] - v1[j]) : d;
+            moved += d;
+            fits &= v2[k] >= 52 && v2[k] <= 72 && (v2[k] % 12 == 7 || v2[k] % 12 == 11 || v2[k] % 12 == 2);
+        }
+        check(n1 == 3 && n2 == 3 && fits && moved <= 4, "C to G voiced in range, each voice moving a step or less");
+
+        new_project();
+        make_demo();
+        LOCK();
+        P.nclips = 0;
+        P.nautos = 0;
+        P.nchanges = 0;
+        P.bpm = 120;
+        P.ts_num = 4;
+        P.ts_den = 4;
+        UNLOCK();
+        view_start = 0;
+        pps = 15;
+        show_panel(RI_SOUNDS);
+        frame();
+        history_check();
+        check(P.nchords == 0 && P.key_root == 0 && P.key_scale == 0, "a new song has no chords, in C major");
+        int sy = L.top + L.ruler + L.arr + L.chd / 2;
+        sim((int)frame_to_x(meter_bar_frame(&P, 1)) + 1, sy, 1, 0, 0, 0);   /* click the strip in bar 2 */
+        sim((int)frame_to_x(meter_bar_frame(&P, 1)) + 1, sy, 0, 1, 0, 0);
+        check(P.nchords == 1 && P.chords[0].at == 4 && P.chords[0].len == 4 && P.chords[0].root == 0 &&
+                  P.chords[0].type == CH_MAJ && chp_open, "clicking the chord strip adds the key's I for the bar, picker open");
+        key((SDL_Keysym){.sym = SDLK_ESCAPE});
+        check(!chp_open, "Esc closes the chord picker");
+        sim((int)frame_to_x(meter_bar_frame(&P, 2)) + 1, sy, 1, 0, 0, 0);
+        sim((int)frame_to_x(meter_bar_frame(&P, 2)) + 1, sy, 0, 1, 0, 0);
+        key((SDL_Keysym){.sym = SDLK_ESCAPE});
+        check(P.nchords == 2 && P.chords[1].at == 8 && P.chords[1].root == 7 && P.chords[1].type == CH_MAJ,
+              "the next chord suggested after I is V");
+        playhead_to(meter_bar_frame(&P, 2));
+        chd_add_here();
+        key((SDL_Keysym){.sym = SDLK_ESCAPE});
+        check(P.nchords == 3 && P.chords[2].at == 12 && P.chords[2].root == 9 && P.chords[2].type == CH_MIN,
+              "+ in the header adds a chord after the one at the playhead: vi after V");
+        frame();
+        SDL_Rect ar = chd_rect_[2];
+        sim_drag(ar.x + ar.w - 2, sy, (int)frame_to_x(meter_beats_frame(&P, 14)), sy, 0);
+        check(fabs(P.chords[2].len - 2) < 1e-9, "dragging a chord's end resizes it");
+        frame();
+        history_check();
+        int u0 = nundo;
+        SDL_Rect cr = chd_rect_[0];
+        int dx = (int)frame_to_x(meter_bar_frame(&P, 4)) - (int)frame_to_x(meter_bar_frame(&P, 1));
+        sim_drag(cr.x + 4, sy, cr.x + 4 + dx, sy, 0);
+        frame();
+        history_check();
+        int at16 = chord_at(&P, 16.5);
+        check(chord_at(&P, 4.5) < 0 && at16 >= 0 && P.chords[at16].root == 0 && nundo == u0 + 1,
+              "dragging a chord moves it, in one undo step");
+        undo_redo(0);
+        check(chord_at(&P, 4.5) >= 0 && chord_at(&P, 16.5) < 0, "undo puts the chord back");
+        frame();
+        cr = chd_rect_[chord_at(&P, 4.5)];
+        sim(cr.x + 4, sy, 1, 0, 0, 0);           /* click it: selected */
+        sim(cr.x + 4, sy, 0, 1, 0, 0);
+        int n0 = P.nchords;
+        key((SDL_Keysym){.sym = SDLK_DELETE});
+        check(P.nchords == n0 - 1 && chord_at(&P, 4.5) < 0, "Delete with the pointer on the strip removes the selected chord");
+        undo_redo(0);
+        frame();
+        history_check();
+
+        /* keys: a change at bar 3 to D major, which Theory follows and edits */
+        int k = key_change_add(&P, 2);
+        key_set(&P, 2, 2, 0);
+        int kr, ks;
+        key_at_bar(&P, 1, &kr, &ks);
+        int before_ok = kr == 0 && ks == 0;
+        key_at_bar(&P, 5, &kr, &ks);
+        check(k == 0 && before_ok && kr == 2 && ks == 0, "a key change holds from its bar on");
+        char lab[32];
+        chord_numeral(&P, &P.chords[1], lab, sizeof lab);
+        check(!strcmp(lab, "IV"), "G in D major is IV");
+        chord_label(&P, &(Chord){0, 1, 9, CH_MAJ, 1}, lab, sizeof lab);
+        check(!strcmp(lab, "A/C#"), "slash chords are named with their bass note");
+        playhead_to(meter_bar_frame(&P, 3));
+        frame();
+        check(th_root == 2 && th_scale == 0, "Theory shows the key where the playhead is");
+        th_root = 4;                              /* changed in Theory: E */
+        frame();
+        check(P.nkeys == 1 && P.keys[0].root == 4 && P.key_root == 0, "changing the key in Theory changes that stretch's key");
+        playhead_to(0);
+        frame();
+        check(th_root == 0, "and Theory follows the playhead back");
+        th_root = 0;
+        frame();
+
+        /* rearranging the song carries the chords and keys along */
+        song_edit((SongEdit){SE_MOVE, 2, 3, 0});  /* bar 3 (G, the key change) to the front */
+        frame();
+        history_check();
+        int g0 = chord_at(&P, 0.5), c1 = chord_at(&P, 8.5);
+        key_at_bar(&P, 0, &kr, &ks);
+        int k0 = kr;
+        key_at_bar(&P, 1, &kr, &ks);
+        check(g0 >= 0 && P.chords[g0].root == 7 && c1 >= 0 && P.chords[c1].root == 0 && k0 == 4 && kr == 0,
+              "moving a section takes its chords and its key with it");
+        undo_redo(0);
+
+        /* saving */
+        char tp[1100], msg2[256];
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(tp, sizeof tp, "%s/tinydaw-chords-%u.tdaw", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        int ok = project_save(&P, tp, msg2, sizeof msg2) == 0;
+        Project *q = malloc(sizeof *q);
+        ok = ok && project_load(q, tp, msg2, sizeof msg2) == 0;
+        if (ok) {
+            ok = q->nchords == P.nchords && q->nkeys == P.nkeys && q->key_root == P.key_root && q->key_scale == P.key_scale &&
+                 !memcmp(q->keys, P.keys, (size_t)P.nkeys * sizeof(KeyChange));
+            for (int i = 0; ok && i < P.nchords; i++)
+                ok = fabs(q->chords[i].at - P.chords[i].at) < 1e-6 && fabs(q->chords[i].len - P.chords[i].len) < 1e-6 &&
+                     q->chords[i].root == P.chords[i].root && q->chords[i].type == P.chords[i].type && q->chords[i].bass == P.chords[i].bass;
+            project_free(q);
+        }
+        free(q);
+        remove(tp);
+        check(ok, "chords and key changes save and open again");
+
+        /* a part from the chords */
+        int nc0 = P.nclips, nn0 = P.nnotes, pc = chord_part();
+        int notes_ok = pc >= 0 && P.clips[pc].pattern > 0 && P.clips[pc].start == meter_bar_frame(&P, 1), cnt = 0;
+        for (int i = nn0; i < P.nnotes; i++) {
+            const Note *n = &P.notes[i];
+            if (n->pattern != P.clips[pc].pattern) continue;
+            cnt++;
+            int ci2 = chord_at(&P, meter_beats(&P, P.clips[pc].start + n->start) + 0.01);
+            const ChordType *ct = &CHORDS[P.chords[ci2 >= 0 ? ci2 : 0].type];
+            int in = 0;
+            for (int j = 0; j < ct->n; j++) in |= (P.chords[ci2].root + ct->iv[j]) % 12 == n->note % 12;
+            notes_ok &= ci2 >= 0 && in && n->note >= 52 && n->note <= 72;
+        }
+        check(P.nclips == nc0 + 1 && notes_ok && cnt == 9, "Make a part writes each chord's notes, in range, into a new note clip");
+
+        /* chords found in a note clip: a bar of Am, then a bar of F over A */
+        P.nchords = 0;
+        LOCK();
+        int pat = P.clips[pc].pattern;
+        int w2 = 0;
+        for (int i = 0; i < P.nnotes; i++)
+            if (P.notes[i].pattern != pat) P.notes[w2++] = P.notes[i];
+        P.nnotes = w2;
+        long b4 = meter_bar_frame(&P, 2) - meter_bar_frame(&P, 1);
+        int am[3] = {57, 60, 64}, fa[3] = {57, 60, 65};
+        for (int j = 0; j < 3; j++) {
+            P.notes[P.nnotes++] = (Note){pat, am[j], 0, b4, 0.8f};
+            P.notes[P.nnotes++] = (Note){pat, fa[j], b4, b4, 0.8f};
+        }
+        P.clips[pc].length = 2 * b4;
+        UNLOCK();
+        selected = pc;
+        int found = chords_from_clip(pc);
+        int a0 = chord_at(&P, 4.5), f0 = chord_at(&P, 8.5);
+        check(found == 2 && a0 >= 0 && P.chords[a0].root == 9 && P.chords[a0].type == CH_MIN && fabs(P.chords[a0].len - 4) < 1e-9 &&
+                  f0 >= 0 && P.chords[f0].root == 5 && P.chords[f0].type == CH_MAJ && P.chords[f0].bass == 9,
+              "chords are found in a note clip, a bar each when they hold: Am, then F/A");
+        chp_idx = a0;
+        chp_open = 1;
+        frame();
+        frame();
+        check(chp_open && chp_box.w > 0, "the chord picker opens over a chord");
+        key((SDL_Keysym){.sym = SDLK_ESCAPE});
+
+        /* Theory > Keys > Place puts the progression on the chord track too */
+        P.nchords = 0;
+        P.nkeys = 0;
+        th_root = 9;
+        th_track = 4;
+        playhead_to(meter_bar_frame(&P, 4));
+        place_progression(&PROGRESSIONS[1]);      /* I - V - vi - IV in A: A E F#m D */
+        check(P.nchords == 4 && P.chords[0].at == 16 && P.chords[0].root == 9 && P.chords[1].root == 4 && P.chords[2].root == 6 &&
+                  P.chords[2].type == CH_MIN && P.chords[3].root == 2, "placing a progression puts its chords on the chord track");
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
     /* ---- the Singer's pitch curve */
     {
         VocalSpec t;
@@ -13939,8 +14952,10 @@ static void place_progression(const Progression *pr)
         long at = meter_bar_frame(&P, b0 + i), bar = meter_bar_frame(&P, b0 + i + 1) - at;
         long len = P.samples[s].frames < bar ? P.samples[s].frames : bar;
         if (clip_add(s, th_track, at, 0, len) >= 0) placed++;
+        double qa = meter_beats(&P, at);         /* and on the chord track */
+        chord_put(&P, qa, meter_beats(&P, at + bar) - qa, (th_root + pr->root[i]) % 12, pr->type[i], -1);
     }
-    status("Placed %s in %s on track %d: %d bars from bar %.0f", pr->numerals, pitch_name(th_root, flats),
+    status("Placed %s in %s on track %d and the chord track: %d bars from bar %.0f", pr->numerals, pitch_name(th_root, flats),
            th_track + 1, placed, b0 + 1);
 }
 
@@ -14127,8 +15142,8 @@ static int tab_keys(int x, int y, int w)
         text(x, y, "+ adds the chords to the library. Roll puts one per", DIM);
         text(x, y + font_h + 2, "bar into the open piano roll.", DIM);
     } else {
-        text(x, y, "+ adds the chords to the library. Place puts one per", DIM);
-        text(x, y + font_h + 2, "bar on the timeline, from the bar nearest the playhead.", DIM);
+        text(x, y, "+ adds the chords to the library. Place puts one per bar", DIM);
+        text(x, y + font_h + 2, "on the track and the chord track, from the nearest bar.", DIM);
     }
     return y + 2 * font_h + 8;
 }
@@ -16620,6 +17635,7 @@ static void frame(void)
     SDL_RenderClear(ren);
     vis_update();
     tempo_check();
+    key_sync();
     dd_input();
     if (numedit.active && (lpress || rpress) && !hit(numedit.r)) numedit_end(1);
     if (tf.buf && (((lpress || rpress) && !hit(tf.r)) || !tf_drawn)) tf_end(1);   /* clicked away, or it's gone */
@@ -16628,7 +17644,7 @@ static void frame(void)
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
     int picking = SDL_AtomicGet(&fd_state) != 0;
-    int modal = export_open || export_pending || menu_open || met_open || confirm_act || picking || cm.open;
+    int modal = export_open || export_pending || menu_open || met_open || confirm_act || picking || cm.open || chp_open;
     if (modal) {
         mx = my = -10000;
         lpress = rpress = wheel_x = wheel_y = 0;
@@ -16689,6 +17705,7 @@ static void frame(void)
     if (cm.open && !picking) cm_draw();
     if (menu_open && !picking) file_menu();
     if (met_open && !picking) metronome_menu();
+    if (chp_open && !picking) chord_picker();
     dd_draw();
     if (confirm_act && !picking) confirm_dialog();
     if (picking) {
@@ -17048,6 +18065,11 @@ int main(int argc, char **argv)
         if (getenv("TINYDAW_SHOT_TYPE")) {      /* the BPM box being typed into */
             numedit_begin(&P.bpm, 40, 300);
             numedit_text("12");
+        }
+        if (getenv("TINYDAW_SHOT_CHORD") && P.nchords) {   /* the chord picker over chord n */
+            chp_idx = atoi(getenv("TINYDAW_SHOT_CHORD")) % P.nchords;
+            chd_sel = chp_idx;
+            chp_open = 1;
         }
         if (getenv("TINYDAW_SHOT_MET")) {
             met_open = 1;

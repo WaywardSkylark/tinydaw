@@ -13,6 +13,9 @@
 - `src/project.c`: the `.tdaw` format
 - `src/midi.c`: MIDI input (ALSA on Linux, winmm on Windows)
 - `src/theory.c`: scales, chords, progressions and the beat styles
+- `src/harmony.c`: the chord track and the song's key: which chord and key are where, voicing chords
+  so each voice moves as little as it can, and naming them (theory.c's `chord_guess` names the chord
+  a set of notes makes)
 - `src/voice.c`: the Singer: runs eSpeak NG for each syllable, then either re-pitches it with
   PSOLA (Clear) or sings it through a 28-band vocoder, stretching the vowel to the note's length
 - `src/synth.c`: the Generator's synth (unison oscillators, FM, a resonant filter with its own
@@ -30,7 +33,7 @@
 ## Tests
 
 ```sh
-./tinydaw --selftest                      # 373 checks, driving the real interface with simulated input
+./tinydaw --selftest                      # 401 checks, driving the real interface with simulated input
 ./tinydaw --demo --screenshot ui.bmp      # draw the window off-screen
 TINYDAW_DEBUG_INPUT=1 ./tinydaw           # print every key, controller and MIDI input
 TINYDAW_CHECK_TEXT=1 ./tinydaw            # report any text that overlaps other text or outgrows its button

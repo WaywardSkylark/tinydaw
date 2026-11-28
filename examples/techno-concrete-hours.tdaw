@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title Techno: Concrete Hours
 rate 48000
 bpm 130
@@ -10,6 +10,10 @@ playhead 0
 fx 5 0.5 0.4 0.6 1 0.85 0.3 0.75 0 140 2
 instrument 7 43 4
 change 24 133 4 4
+key 7 1
+harmony 32 32 7 1 -1
+harmony 64 32 7 1 -1
+harmony 96 32 7 1 -1
 dynamics 1 -22 4 6 110 7 1 -1
 track 0.9 0 0 Kick
 trackfx 0 0 1200 0.2 0 0 0 0.3 0 0 0

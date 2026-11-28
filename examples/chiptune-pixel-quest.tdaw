@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title Chiptune: Pixel Quest
 rate 48000
 bpm 150
@@ -11,6 +11,43 @@ fx 4 0.3 0.6 0.5 1 0.4 0.5 0.5 -1 180 2
 instrument 0 72 0
 change 20 170 3 4
 change 36 150 4 4
+keychange 12 2 0
+keychange 20 9 0
+keychange 36 0 0
+harmony 0 4 0 0 -1
+harmony 4 4 9 1 -1
+harmony 8 4 5 0 -1
+harmony 12 4 7 0 -1
+harmony 16 4 0 0 -1
+harmony 20 4 9 1 -1
+harmony 24 4 5 0 -1
+harmony 28 4 7 0 -1
+harmony 32 4 0 0 -1
+harmony 36 4 9 1 -1
+harmony 40 4 5 0 -1
+harmony 44 4 7 0 -1
+harmony 48 4 2 0 -1
+harmony 52 4 11 1 -1
+harmony 56 4 7 0 -1
+harmony 60 4 9 0 -1
+harmony 64 4 2 0 -1
+harmony 68 4 11 1 -1
+harmony 72 4 7 0 -1
+harmony 76 4 9 0 -1
+harmony 80 6 9 0 -1
+harmony 86 6 6 1 -1
+harmony 92 6 2 0 -1
+harmony 98 6 4 0 -1
+harmony 104 6 9 0 -1
+harmony 110 6 6 1 -1
+harmony 116 6 2 0 -1
+harmony 122 6 4 0 -1
+harmony 128 4 0 0 -1
+harmony 132 4 9 1 -1
+harmony 136 4 5 0 -1
+harmony 140 4 7 0 -1
+harmony 144 4 0 0 -1
+harmony 148 4 9 1 -1
 dynamics 1 -16 2 10 150 3 1 -1
 track 0.6 0 0 Lead
 trackfx 0.1 0 1200 0.2 0 0 0 0 0.2 0 0

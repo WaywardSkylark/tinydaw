@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title Hip-hop: Corner Store
 rate 48000
 bpm 88
@@ -9,6 +9,31 @@ loop 1 1570909 2094545
 playhead 0
 fx 4 0.42 0.35 0.6 0 0.55 0.6 0.7 -1 180 2
 instrument 4 60 2
+key 2 1
+harmony 0 4 2 18 -1
+harmony 4 4 7 8 -1
+harmony 8 4 10 6 -1
+harmony 12 4 9 7 -1
+harmony 16 4 2 18 -1
+harmony 20 4 7 8 -1
+harmony 24 4 10 6 -1
+harmony 28 4 9 7 -1
+harmony 32 4 2 18 -1
+harmony 36 4 7 8 -1
+harmony 40 4 10 6 -1
+harmony 44 4 9 7 -1
+harmony 48 4 2 18 -1
+harmony 52 4 7 8 -1
+harmony 56 4 10 6 -1
+harmony 60 4 9 7 -1
+harmony 64 4 2 18 -1
+harmony 68 4 7 8 -1
+harmony 72 4 10 6 -1
+harmony 76 4 9 7 -1
+harmony 80 4 2 18 -1
+harmony 84 4 7 8 -1
+harmony 88 4 10 6 -1
+harmony 92 4 9 7 -1
 dynamics 1 -18 2.5 15 180 3 1 -1
 track 0.8 0 0 Drums
 trackfx 0 0 1200 0.2 1 0 1 0.2 0 0.08 0

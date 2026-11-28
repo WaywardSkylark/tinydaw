@@ -1,5 +1,5 @@
 tinydaw-project 1
-saved-by tinydaw 0.7.5 (examples/make_examples.py)
+saved-by tinydaw 0.8.0 (examples/make_examples.py)
 title Rock: Highway Lights
 rate 48000
 bpm 128
@@ -9,6 +9,39 @@ loop 1 1080000 1800000
 playhead 0
 fx 4 0.3 0.5 0.5 0 0.65 0.45 0.7 -1 180 2
 instrument 7 52 2
+key 4 1
+harmony 0 4 4 1 -1
+harmony 4 4 0 0 -1
+harmony 8 4 7 0 -1
+harmony 12 4 2 0 -1
+harmony 16 4 4 1 -1
+harmony 20 4 0 0 -1
+harmony 24 4 7 0 -1
+harmony 28 4 2 0 -1
+harmony 32 4 4 1 -1
+harmony 36 4 0 0 -1
+harmony 40 4 7 0 -1
+harmony 44 4 2 0 -1
+harmony 48 4 4 1 -1
+harmony 52 4 0 0 -1
+harmony 56 4 7 0 -1
+harmony 60 4 2 0 -1
+harmony 64 4 4 1 -1
+harmony 68 4 0 0 -1
+harmony 72 4 7 0 -1
+harmony 76 4 2 0 -1
+harmony 80 4 4 1 -1
+harmony 84 4 0 0 -1
+harmony 88 4 7 0 -1
+harmony 92 4 2 0 -1
+harmony 96 4 4 1 -1
+harmony 100 4 0 0 -1
+harmony 104 4 7 0 -1
+harmony 108 4 2 0 -1
+harmony 112 4 4 1 -1
+harmony 116 4 0 0 -1
+harmony 120 4 7 0 -1
+harmony 124 4 2 0 -1
 dynamics 1 -18 2.5 15 180 3 1 -1
 track 0.85 0 0 Drums
 trackfx 0 0 1200 0.2 1 0 1 0 0 0.15 0

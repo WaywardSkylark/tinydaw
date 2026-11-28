@@ -134,6 +134,7 @@ session"; "Silent: the session plays alone").
 | Fill a slot | Drag a sound from the library onto it, or drop sound files on it from your file manager (several fill the empty slots after it). Or right-click it: **Paste here**, **Import a sound file here...**, **Put the selected clip here** (any clip: audio, notes or drums, with its pitch curve), **Loop the timeline here** (the section at the playhead) |
 | Copy and paste | Right-click a slot > **Copy**, or Ctrl+C with the pointer on it (Ctrl+X cuts). A copied slot pastes into another slot, onto the timeline (Ctrl+V there, at the playhead) or, as its sound, into the library or a pad. A slot takes whatever was copied last: a slot, clips copied on the timeline, or a sound copied from the library or a pad |
 | Move a slot | Drag it to another slot (with Ctrl: a copy). Delete with the pointer on it clears it |
+| How a slot plays | The button in its corner: **Loop** (round and round until something else is launched on the track), **Toggle** (click again to stop it), **Hold** (plays while you hold it down; holding a scene's name holds its Hold slots) or **Once** (one pass). When a Toggle, Hold or Once slot stops, its track goes back to the timeline |
 | Onto the timeline | Right-click > **Put it on the timeline at the playhead**: one pass of it, as clips |
 | Change a slot | Right-click: **Twice as long**, **Half as long**, **Clear the slot** |
 | Stop a track | The square beside its slots: it plays nothing, not even the timeline |
@@ -294,26 +295,43 @@ twice doesn't make a copy, and the Create button counts what you've added.
 
 ## Mixing
 
-**Mixer** (or F3) has five pages:
+**Mixer** (or F3) has six pages:
 
 | Page | What's there |
 |---|---|
-| Levels | Every track's fader (in dB, with its meter), pan, mute and solo, then the master and the loudness. Drag a fader or use the wheel over it (half a dB a notch, Shift for a tenth); double-click puts it back to 0 dB. A fader whose volume is automated follows its lane. Click a name for that track's effects |
+| Levels | Every track's fader (in dB, with its meter), pan, mute and solo, then the buses, the master and the loudness. Drag a fader or use the wheel over it (half a dB a notch, Shift for a tenth); double-click puts it back to 0 dB. A fader whose volume is automated follows its lane. Click a name for that track's effects |
 | Clip | Gain, pitch, fades and reverse for the selected clips, and a pitch bend drawn over them |
-| Track | Volume, pan, a filter (low-, high- or band-pass with cutoff and resonance), 3-band EQ, drive, how much it ducks, its sends to the delay and reverb, its stereo width (0 mono to 2 twice as wide) and its own compressor (threshold, ratio, attack, release, makeup, and how hard it's working) |
+| Track | Volume, pan, a filter (low-, high- or band-pass with cutoff and resonance), 3-band EQ, drive, how much it ducks, its sends to the delay and reverb, its stereo width (0 mono to 2 twice as wide) and its own compressor (threshold, ratio, attack, release, makeup, and how hard it's working). Below them: where the track plays (its **Output**), its sends to your buses, its **effect rack** and its macros |
 | Effects | The delay (in time with the tempo, 1/16 to 1/2 including dotted and triplet, feedback, tone, ping-pong), the reverb (size, damping), the sidechain (which track makes the others duck), and the master: **Off**, **Glue** or **Loud**, or set the compressor and the limiter's ceiling yourself, with a loudness meter |
+| Buses | The Delay and Reverb buses and your own, each with a level, pan, mute and an effect rack |
 | Live | How far pitch bend goes; the mod wheel opens the filter on the instrument's track |
+
+**The effect rack.** After a track's fixed strip comes a rack of up to eight effects, played in
+order: **EQ** (low shelf, mid peak, high shelf), **Filter** (low-, high- or band-pass), **Drive**,
+**Compressor**, **Delay** (in time with the tempo, with ping-pong), **Reverb**, **Chorus**, **Phaser**,
+**Bitcrusher** and **Gate**. **+ Add an effect** puts one at the end; each has **On** to hear the sound
+without it, arrows to move it earlier or later (drive then filter isn't filter then drive) and **x**
+to take it out. Click a number to type it, or drag it.
+
+**Buses.** A bus sums several tracks so they can be treated as one: set a track's **Output** to a bus
+(Drums, say) and one fader, pan, mute and rack then works on all of them. Or keep a track going to
+the master and **send** some of it to a bus, as you would to a reverb. **+ New bus** on the Buses page
+makes one (up to eight in all); a bus can send to the delay and reverb too. The shared delay and
+reverb are buses 1 and 2: every track's Delay and Reverb sends feed them, and their own racks come
+after the echoes and the room, so a filter on the Reverb bus darkens just the reverb. Removing a bus
+sends its tracks back to the master.
 
 **Presets.** The Track page's **Preset** list sets a track's whole chain at once (filter, EQ, drive,
 sends, duck, width, compressor and macros) while it keeps its name, level and pan: Clean, Warm tape,
-Telephone, Wide pad, Pumping, Lo-fi crush, Filter sweep, Vocal, Punchy drums and Dub send. **Save as**
+Telephone, Wide pad, Pumping, Lo-fi crush, Filter sweep, Vocal, Punchy drums, Dub send, Dreamy
+(chorus into reverb) and Bitcrushed. A preset includes the track's rack. **Save as**
 keeps the chain as a preset of your own, listed as "Saved:" in every project (they're small files in
 Music/tinydaw/Presets). The Effects page has the same for the shared delay (Slapback, Eighth echo,
 Dotted 8th, Triplet bounce, Dub quarter, Long half) and reverb (Room, Plate, Hall, Cathedral, Dark
 chamber).
 
 **Macros.** Each track has four macro knobs, at the bottom of the Track page. A macro turns up to
-four of the track's settings at once, each between two values you choose: **Links** opens it, **+
+four of the track's settings at once (any knob in its rack too), each between two values you choose: **Links** opens it, **+
 Link** adds a setting (then pick which, and its From and To), and the knob sweeps them all together.
 A linked setting follows its macro instead of its own box. Name a macro by typing in its box. Macros
 can be automated (the track's A lane lists them by name), and they're saved with presets, so a preset
@@ -332,7 +350,7 @@ bend one of them.
 
 **The mixing console** (the button at the top of Levels, or ☰ > Mixing console) opens in its own
 window you can put anywhere, even another screen: a strip a track, side by side, with EQ, compressor,
-width, sends, pan, a tall fader and meter, mute and solo, and a master strip with Off / Glue / Loud,
+width, sends, pan, a tall fader and meter, mute and solo; a strip a bus after them; and a master strip with Off / Glue / Loud,
 how hard the master is working, the loudness and the master fader. Esc closes it.
 
 Tracks with effects show `fx` under their name, and every track has a level meter. What you export

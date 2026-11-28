@@ -47,6 +47,7 @@ void project_init(Project *p)
     memset(p, 0, sizeof *p);
     p->bpm = 120;
     session_reset(p);
+    project_buses_default(p);
     p->ts_num = p->ts_den = 4;
     p->nchanges = 0;
     p->a4 = 440;

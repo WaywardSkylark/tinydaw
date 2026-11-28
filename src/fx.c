@@ -9,6 +9,7 @@
 #include "daw.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,6 +49,11 @@ struct Mixer {
     double tcomp_env[MAX_TRACKS], tcomp_gr[MAX_TRACKS];  /* each track's compressor */
     float lim_buf[2 * 2048], lim_req[2048];             /* the limiter's look-ahead: sound, and gain it needs */
     int lim_pos;
+    struct RackState *rst[MAX_TRACKS + MAX_BUSES][RACK_SLOTS];   /* each rack effect's state (made when first used) */
+    float bus_in[MAX_BUSES][2 * BLOCK];
+    float bgl[MAX_BUSES], bgr[MAX_BUSES];
+    int bg_ready[MAX_BUSES];
+    float bus_peak[MAX_BUSES][2];
 };
 
 static const int COMB_TUNING[NCOMB] = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
@@ -82,9 +88,13 @@ Mixer *mixer_new(void)
     return m;
 }
 
+static void rack_state_free(struct RackState *r);
+
 void mixer_free(Mixer *m)
 {
     if (!m) return;
+    for (int o = 0; o < MAX_TRACKS + MAX_BUSES; o++)
+        for (int s = 0; s < RACK_SLOTS; s++) rack_state_free(m->rst[o][s]);
     for (int c = 0; c < 2; c++) {
         free(m->dl[c]);
         for (int i = 0; i < NCOMB; i++) free(m->comb[c][i].buf);
@@ -106,6 +116,12 @@ void mixer_levels(Mixer *m, float out[][2])
 
 int project_has_tails(const Project *p)
 {
+    for (int b = 0; b < p->nbuses; b++)          /* echoes or a room in a rack, or a bus feeding the delay or reverb */
+        for (int s = 0; s < p->buses[b].rack.n; s++)
+            if (p->buses[b].rack.fx[s].kind == FXR_DELAY || p->buses[b].rack.fx[s].kind == FXR_REVERB) return 1;
+    for (int t = 0; t < p->ntracks; t++)
+        for (int s = 0; s < p->tracks[t].rack.n; s++)
+            if (p->tracks[t].rack.fx[s].kind == FXR_DELAY || p->tracks[t].rack.fx[s].kind == FXR_REVERB) return 1;
     for (int t = 0; t < p->ntracks; t++) {
         if (p->tracks[t].delay_send > 0 && p->fx.delay_level > 0) return 1;
         if (p->tracks[t].reverb_send > 0 && p->fx.reverb_level > 0) return 1;
@@ -145,6 +161,10 @@ float *track_param(Track *t, int tp)
     case TP_WIDTH: return &t->width;
     case TP_COMP: return &t->comp_thresh;
     }
+    if (tp >= TP_RACK && tp < TP_RACK + RACK_SLOTS * FXR_PARAMS) {   /* a knob in the rack */
+        int slot = (tp - TP_RACK) / FXR_PARAMS;
+        return slot < t->rack.n ? &t->rack.fx[slot].p[(tp - TP_RACK) % FXR_PARAMS] : NULL;
+    }
     return NULL;
 }
 
@@ -156,9 +176,11 @@ void macros_apply(Track *t, const float *values)
         v = v < 0 ? 0 : v > 1 ? 1 : v;
         for (int k = 0; k < mc->nlinks && k < MACRO_LINKS; k++) {
             const MacroLink *l = &mc->link[k];
-            float *dst = l->param >= 0 && l->param < TP_COUNT ? track_param(t, l->param) : NULL;
-            if (!dst) continue;
-            if (TRACK_PARAMS[l->param].log && l->lo > 0 && l->hi > 0) *dst = l->lo * powf(l->hi / l->lo, v);
+            float *dst = track_param_valid(l->param) ? track_param(t, l->param) : NULL;
+            float lo, hi;
+            int lg;
+            if (!dst || !track_param_info(t, l->param, NULL, 0, &lo, &hi, &lg, NULL)) continue;
+            if (lg && l->lo > 0 && l->hi > 0) *dst = l->lo * powf(l->hi / l->lo, v);
             else *dst = l->lo + (l->hi - l->lo) * v;
             if (l->param == TP_CUTOFF && t->filter == FILT_OFF) t->filter = FILT_LOW;   /* as automating it does */
             if (l->param == TP_COMP) t->comp_on = 1;
@@ -755,6 +777,375 @@ static void run_reverb(Mixer *m, const Project *p, const float *in, float *out, 
     }
 }
 
+/* ---------------------------------------------------------------- effect racks
+ *
+ * A track's rack runs after its strip; a bus's is all it has (the delay and reverb buses run their
+ * built-in effect first). Each effect's state is made the first time it plays and made again if its
+ * kind changes. */
+
+static const char *const FILT_CHOICES[] = {"Low-pass", "High-pass", "Band-pass", NULL};
+static const char *const ONOFF[] = {"Off", "On", NULL};
+
+const RackKind RACK_KINDS[FXR_KINDS] = {
+    [FXR_EQ] = {"EQ", "Three bands: low shelf, mid peak, high shelf", 3, {"Low", "Mid", "High"},
+                {-15, -15, -15}, {15, 15, 15}, {0, 0, 0}, {"%+.1f dB", "%+.1f dB", "%+.1f dB"}, {0}, {NULL}},
+    [FXR_FILTER] = {"Filter", "A resonant filter", 3, {"Type", "Cutoff", "Resonance"}, {0, 20, 0}, {2, 20000, 1},
+                    {0, 1200, 0.3f}, {NULL, "%.0f Hz", "%.2f"}, {0, 1, 0}, {FILT_CHOICES}},
+    [FXR_DRIVE] = {"Drive", "Saturation, with a tone control and a dry/wet mix", 3, {"Amount", "Tone", "Mix"},
+                   {0, 0, 0}, {1, 1, 1}, {0.4f, 0.7f, 1}, {"%.2f", "%.2f", "%.2f"}, {0}, {NULL}},
+    [FXR_COMP] = {"Compressor", "Evens out the level", 5, {"Threshold", "Ratio", "Attack", "Release", "Makeup"},
+                  {-48, 1, 0.5f, 20, 0}, {0, 20, 200, 2000, 24}, {-18, 4, 10, 150, 0},
+                  {"%.0f dB", "%.1f:1", "%.0f ms", "%.0f ms", "%+.1f dB"}, {0}, {NULL}},
+    [FXR_DELAY] = {"Delay", "Echoes in time with the tempo", 5, {"Time", "Feedback", "Tone", "Mix", "Ping-pong"},
+                   {0, 0, 0, 0, 0}, {DELAY_DIVS - 1, 0.95f, 1, 1, 1}, {2, 0.35f, 0.5f, 0.3f, 0},
+                   {NULL, "%.2f", "%.2f", "%.2f", NULL}, {0}, {DELAY_NAMES, NULL, NULL, NULL, ONOFF}},
+    [FXR_REVERB] = {"Reverb", "A room around it", 3, {"Size", "Damping", "Mix"}, {0, 0, 0}, {1, 1, 1},
+                    {0.6f, 0.4f, 0.3f}, {"%.2f", "%.2f", "%.2f"}, {0}, {NULL}},
+    [FXR_CHORUS] = {"Chorus", "Thickens it with slowly moving copies", 3, {"Rate", "Depth", "Mix"},
+                    {0.05f, 0, 0}, {5, 1, 1}, {0.8f, 0.5f, 0.5f}, {"%.2f Hz", "%.2f", "%.2f"}, {1, 0, 0}, {NULL}},
+    [FXR_PHASER] = {"Phaser", "Sweeping notches", 4, {"Rate", "Depth", "Feedback", "Mix"}, {0.05f, 0, 0, 0},
+                    {5, 1, 0.9f, 1}, {0.4f, 0.7f, 0.5f, 0.5f}, {"%.2f Hz", "%.2f", "%.2f", "%.2f"}, {1, 0, 0, 0}, {NULL}},
+    [FXR_CRUSH] = {"Bitcrusher", "Fewer bits and a lower sample rate: grit", 3, {"Bits", "Downsample", "Mix"},
+                   {2, 1, 0}, {16, 32, 1}, {8, 4, 1}, {"%.0f bits", "x%.0f", "%.2f"}, {0}, {NULL}},
+    [FXR_GATE] = {"Gate", "Silences it below a level", 3, {"Threshold", "Release", "Floor"}, {-80, 5, -80},
+                  {0, 1000, 0}, {-40, 80, -80}, {"%.0f dB", "%.0f ms", "%.0f dB"}, {0}, {NULL}},
+};
+
+void rack_fx_init(RackFx *f, int kind)
+{
+    memset(f, 0, sizeof *f);
+    f->kind = kind < 0 || kind >= FXR_KINDS ? FXR_EQ : kind;
+    f->on = 1;
+    for (int k = 0; k < RACK_KINDS[f->kind].np; k++) f->p[k] = RACK_KINDS[f->kind].def[k];
+}
+
+void project_buses_default(Project *p)
+{
+    memset(p->buses, 0, sizeof p->buses);
+    p->nbuses = 2;
+    snprintf(p->buses[BUS_DELAY].name, sizeof p->buses[0].name, "Delay");
+    snprintf(p->buses[BUS_REVERB].name, sizeof p->buses[0].name, "Reverb");
+    for (int b = 0; b < MAX_BUSES; b++) p->buses[b].volume = 1;
+}
+
+int track_param_valid(int tp)
+{
+    return (tp >= 0 && tp < TP_COUNT) || (tp >= TP_RACK && tp < TP_RACK + RACK_SLOTS * FXR_PARAMS);
+}
+
+int track_param_info(const Track *t, int tp, char *name, size_t nlen, float *lo, float *hi, int *log, const char **fmt)
+{
+    if (tp >= 0 && tp < TP_COUNT) {
+        const TrackParamInfo *pi = &TRACK_PARAMS[tp];
+        if (name) snprintf(name, nlen, "%s", pi->name);
+        *lo = pi->lo, *hi = pi->hi, *log = pi->log;
+        if (fmt) *fmt = pi->fmt;
+        return 1;
+    }
+    if (tp < TP_RACK || tp >= TP_RACK + RACK_SLOTS * FXR_PARAMS) return 0;
+    int slot = (tp - TP_RACK) / FXR_PARAMS, k = (tp - TP_RACK) % FXR_PARAMS;
+    int kind = t && slot < t->rack.n ? t->rack.fx[slot].kind : -1;
+    if (kind < 0 || k >= RACK_KINDS[kind].np) {   /* (an effect taken out since: keep the link harmless) */
+        if (name) snprintf(name, nlen, "Rack %d: (empty)", slot + 1);
+        *lo = 0, *hi = 1, *log = 0;
+        if (fmt) *fmt = "%.2f";
+        return 1;
+    }
+    const RackKind *rk = &RACK_KINDS[kind];
+    if (name) snprintf(name, nlen, "Rack %d: %s %s", slot + 1, rk->name, rk->pname[k]);
+    *lo = rk->lo[k], *hi = rk->hi[k], *log = rk->log[k];
+    if (fmt) *fmt = rk->fmt[k] ? rk->fmt[k] : "%.0f";
+    return 1;
+}
+
+typedef struct RackState {
+    int kind;
+    Biquad eq[3];
+    float eqset[3];
+    int eq_ready;
+    double ic1[2], ic2[2];                       /* filter */
+    double env, gain;                            /* compressor, gate */
+    float *buf[2];                               /* delay, chorus */
+    long len, pos;
+    float lp[2];
+    Comb comb[2][NCOMB];                         /* reverb */
+    Allpass ap[2][NAP];
+    double ph;                                   /* LFO */
+    double apz[2][6], fbv[2];                    /* phaser */
+    float hold[2];                               /* bitcrusher */
+    double cnt;
+} RackState;
+
+static void rack_state_free(RackState *r)
+{
+    if (!r) return;
+    free(r->buf[0]);
+    free(r->buf[1]);
+    for (int c = 0; c < 2; c++) {
+        for (int i = 0; i < NCOMB; i++) free(r->comb[c][i].buf);
+        for (int i = 0; i < NAP; i++) free(r->ap[c][i].buf);
+    }
+    free(r);
+}
+
+static RackState *rack_state(Mixer *m, int owner, int slot, int kind)
+{
+    RackState *r = m->rst[owner][slot];
+    if (r && r->kind == kind) return r;
+    rack_state_free(r);
+    r = calloc(1, sizeof *r);
+    m->rst[owner][slot] = r;
+    if (!r) return NULL;
+    r->kind = kind;
+    r->gain = 1;
+    if (kind == FXR_DELAY || kind == FXR_CHORUS) {
+        r->len = kind == FXR_DELAY ? (long)DELAY_SECONDS * m->rate : m->rate / 20;   /* 4 s, or 50 ms */
+        for (int c = 0; c < 2; c++) r->buf[c] = calloc((size_t)r->len, sizeof(float));
+        if (!r->buf[0] || !r->buf[1]) r->len = 0;
+    } else if (kind == FXR_REVERB) {
+        double scale = m->rate / 44100.0;
+        for (int c = 0; c < 2; c++) {
+            for (int i = 0; i < NCOMB; i++) {
+                r->comb[c][i].len = (int)((COMB_TUNING[i] + 23 * c) * scale);
+                r->comb[c][i].buf = calloc((size_t)r->comb[c][i].len, sizeof(float));
+            }
+            for (int i = 0; i < NAP; i++) {
+                r->ap[c][i].len = (int)((AP_TUNING[i] + 23 * c) * scale);
+                r->ap[c][i].buf = calloc((size_t)r->ap[c][i].len, sizeof(float));
+            }
+        }
+    }
+    return r;
+}
+
+static void rack_run(Mixer *m, const Project *p, long at, int owner, const Rack *rk, float *b, int n)
+{
+    for (int s = 0; s < rk->n && s < RACK_SLOTS; s++) {
+        const RackFx *f = &rk->fx[s];
+        if (!f->on || f->kind < 0 || f->kind >= FXR_KINDS) continue;
+        RackState *r = rack_state(m, owner, s, f->kind);
+        if (!r) continue;
+        const float *q = f->p;
+        switch (f->kind) {
+        case FXR_EQ: {
+            static const double freq[3] = {150, 1000, 6000};
+            for (int band = 0; band < 3; band++)
+                if (!r->eq_ready || r->eqset[band] != q[band]) {
+                    biquad_set(&r->eq[band], band, freq[band], q[band], m->rate);
+                    r->eqset[band] = q[band];
+                }
+            r->eq_ready = 1;
+            for (int band = 0; band < 3; band++)
+                if (fabsf(q[band]) > 0.05f) biquad_run(&r->eq[band], b, n);
+            break;
+        }
+        case FXR_FILTER: {
+            int type = (int)lroundf(q[0]);
+            double fc = q[1] < 20 ? 20 : q[1] > 0.45 * m->rate ? 0.45 * m->rate : q[1];
+            double g = tan(PI_F * fc / m->rate), k = 2 - 1.94 * q[2];
+            double a1 = 1 / (1 + g * (g + k)), a2 = g * a1, a3 = g * a2;
+            for (int c = 0; c < 2; c++)
+                for (int i = 0; i < n; i++) {
+                    double v0 = b[2 * i + c], v3 = v0 - r->ic2[c];
+                    double v1 = a1 * r->ic1[c] + a2 * v3, v2 = r->ic2[c] + a2 * r->ic1[c] + a3 * v3;
+                    r->ic1[c] = 2 * v1 - r->ic1[c];
+                    r->ic2[c] = 2 * v2 - r->ic2[c];
+                    b[2 * i + c] = (float)(type == 0 ? v2 : type == 2 ? v1 * k : v0 - k * v1 - v2);
+                }
+            break;
+        }
+        case FXR_DRIVE: {
+            float kd = 1 + 9 * q[0] * q[0], norm = 1.0f / tanhf(kd), makeup = 1 / (1 + 0.6f * q[0]);
+            float tone = 0.05f + 0.95f * q[1] * q[1];
+            for (int i = 0; i < n; i++)
+                for (int c = 0; c < 2; c++) {
+                    float x = b[2 * i + c], y = tanhf(kd * x) * norm * makeup;
+                    r->lp[c] += tone * (y - r->lp[c]);
+                    b[2 * i + c] = x + q[2] * (r->lp[c] - x);
+                }
+            break;
+        }
+        case FXR_COMP: {
+            double th = q[0], ratio = q[1] > 1 ? q[1] : 1;
+            double att = exp(-1.0 / (fmax(0.1, q[2]) * 0.001 * m->rate)), rel = exp(-1.0 / (fmax(1, q[3]) * 0.001 * m->rate));
+            double makeup = pow(10, q[4] / 20), env = r->env;
+            for (int i = 0; i < n; i++) {
+                double x = fmax(fabs(b[2 * i]), fabs(b[2 * i + 1]));
+                double db = x > 1e-9 ? 20 * log10(x) : -180, over = db - th, want = over > 0 ? over * (1 - 1 / ratio) : 0;
+                env = want > env ? want + (env - want) * att : want + (env - want) * rel;
+                double g = pow(10, -env / 20) * makeup;
+                b[2 * i] *= (float)g;
+                b[2 * i + 1] *= (float)g;
+            }
+            r->env = env;
+            break;
+        }
+        case FXR_DELAY: {
+            if (!r->len) break;
+            int div = (int)lroundf(q[0]);
+            div = div < 0 ? 0 : div >= DELAY_DIVS ? DELAY_DIVS - 1 : div;
+            long d = (long)(DELAY_BEATS[div] * 60.0 / meter_bpm_at(p, at) * m->rate);
+            d = d < 1 ? 1 : d > r->len - 1 ? r->len - 1 : d;
+            float fb = q[1] > 0.95f ? 0.95f : q[1], tone = 0.05f + 0.95f * q[2] * q[2];
+            int ping = q[4] > 0.5f;
+            for (int i = 0; i < n; i++) {
+                long rd = (r->pos - d + r->len) % r->len;
+                r->lp[0] += tone * (r->buf[0][rd] - r->lp[0]);
+                r->lp[1] += tone * (r->buf[1][rd] - r->lp[1]);
+                if (ping) {
+                    r->buf[0][r->pos] = 0.5f * (b[2 * i] + b[2 * i + 1]) + fb * r->lp[1];
+                    r->buf[1][r->pos] = fb * r->lp[0];
+                } else {
+                    r->buf[0][r->pos] = b[2 * i] + fb * r->lp[0];
+                    r->buf[1][r->pos] = b[2 * i + 1] + fb * r->lp[1];
+                }
+                r->pos = (r->pos + 1) % r->len;
+                b[2 * i] += q[3] * r->lp[0];
+                b[2 * i + 1] += q[3] * r->lp[1];
+            }
+            break;
+        }
+        case FXR_REVERB: {
+            if (!r->comb[0][0].buf) break;
+            float feedback = 0.7f + 0.28f * q[0], damp = 0.4f * q[1];
+            for (int i = 0; i < n; i++) {
+                float x = (b[2 * i] + b[2 * i + 1]) * 0.015f;
+                for (int c = 0; c < 2; c++) {
+                    float acc = 0;
+                    for (int k = 0; k < NCOMB; k++) {
+                        Comb *cb = &r->comb[c][k];
+                        float y = cb->buf[cb->pos];
+                        cb->lp = y * (1 - damp) + cb->lp * damp;
+                        cb->buf[cb->pos] = x + cb->lp * feedback;
+                        if (++cb->pos >= cb->len) cb->pos = 0;
+                        acc += y;
+                    }
+                    for (int k = 0; k < NAP; k++) {
+                        Allpass *a = &r->ap[c][k];
+                        float bo = a->buf[a->pos];
+                        a->buf[a->pos] = acc + bo * 0.5f;
+                        acc = bo - acc;
+                        if (++a->pos >= a->len) a->pos = 0;
+                    }
+                    b[2 * i + c] = b[2 * i + c] * (1 - q[2]) + q[2] * acc * 3.0f;
+                }
+            }
+            break;
+        }
+        case FXR_CHORUS: {
+            if (!r->len) break;
+            double inc = q[0] / m->rate;
+            for (int i = 0; i < n; i++) {
+                for (int c = 0; c < 2; c++) r->buf[c][r->pos] = b[2 * i + c];
+                for (int c = 0; c < 2; c++) {
+                    double lfo = sin(2 * PI_F * (r->ph + 0.25 * c));
+                    double dly = (0.012 + 0.008 * q[1] * lfo) * m->rate;   /* 4..20 ms, a quarter turn apart */
+                    double rp = r->pos - dly;
+                    while (rp < 0) rp += r->len;
+                    long i0 = (long)rp;
+                    double fr = rp - i0;
+                    float y = (float)(r->buf[c][i0 % r->len] * (1 - fr) + r->buf[c][(i0 + 1) % r->len] * fr);
+                    b[2 * i + c] = b[2 * i + c] * (1 - q[2]) + y * q[2];
+                }
+                r->pos = (r->pos + 1) % r->len;
+                r->ph += inc;
+                if (r->ph >= 1) r->ph -= 1;
+            }
+            break;
+        }
+        case FXR_PHASER: {
+            double inc = q[0] / m->rate;
+            for (int i = 0; i < n; i++) {
+                double lfo = 0.5 + 0.5 * sin(2 * PI_F * r->ph);
+                double fc = 200 * pow(10.0, lfo * q[1]);              /* 200 Hz .. 2 kHz, swept */
+                double t = tan(PI_F * fc / m->rate), a = (t - 1) / (t + 1);
+                for (int c = 0; c < 2; c++) {
+                    double x = b[2 * i + c] + q[2] * r->fbv[c], y = x;
+                    for (int k = 0; k < 6; k++) {                     /* six first-order allpasses */
+                        double z = a * y + r->apz[c][k];
+                        r->apz[c][k] = y - a * z;
+                        y = z;
+                    }
+                    r->fbv[c] = y;
+                    b[2 * i + c] = (float)(b[2 * i + c] * (1 - q[3]) + y * q[3]);
+                }
+                r->ph += inc;
+                if (r->ph >= 1) r->ph -= 1;
+            }
+            break;
+        }
+        case FXR_CRUSH: {
+            float levels = powf(2, q[0] - 1);
+            double step = q[1] < 1 ? 1 : q[1];
+            for (int i = 0; i < n; i++) {
+                r->cnt += 1;
+                if (r->cnt >= step) {
+                    r->cnt -= step;
+                    for (int c = 0; c < 2; c++) r->hold[c] = roundf(b[2 * i + c] * levels) / levels;
+                }
+                for (int c = 0; c < 2; c++) b[2 * i + c] = b[2 * i + c] * (1 - q[2]) + r->hold[c] * q[2];
+            }
+            break;
+        }
+        case FXR_GATE: {
+            double th = pow(10, q[0] / 20), floor_g = pow(10, q[2] / 20);
+            double att = exp(-1.0 / (0.001 * m->rate)), rel = exp(-1.0 / (fmax(1, q[1]) * 0.001 * m->rate));
+            for (int i = 0; i < n; i++) {
+                double x = fmax(fabs(b[2 * i]), fabs(b[2 * i + 1]));
+                r->env = x > r->env ? x : r->env * 0.9995;
+                double want = r->env > th ? 1 : floor_g;
+                r->gain = want > r->gain ? want + (r->gain - want) * att : want + (r->gain - want) * rel;
+                b[2 * i] *= (float)r->gain;
+                b[2 * i + 1] *= (float)r->gain;
+            }
+            break;
+        }
+        }
+    }
+}
+
+void mixer_bus_levels(Mixer *m, float out[][2])
+{
+    for (int b = 0; b < MAX_BUSES; b++) {
+        out[b][0] = m ? m->bus_peak[b][0] : 0;
+        out[b][1] = m ? m->bus_peak[b][1] : 0;
+        if (m) m->bus_peak[b][0] = m->bus_peak[b][1] = 0;
+    }
+}
+
+/* a bus's output into the mix: its rack, then its fader and pan (the plain case adds as is, as before buses) */
+static void bus_out(Mixer *m, const Project *p, long at, int b, float *in, float *o, int n)
+{
+    const Bus *bs = &p->buses[b];
+    if (bs->rack.n) rack_run(m, p, at, MAX_TRACKS + b, &bs->rack, in, n);
+    if (bs->mute) return;
+    int plain = bs->volume == 1 && bs->pan == 0;
+    double ang = (bs->pan + 1) * PI_F / 4;
+    float gl = plain ? 1 : bs->volume * (float)(cos(ang) * 1.41421356), gr = plain ? 1 : bs->volume * (float)(sin(ang) * 1.41421356);
+    if (!m->bg_ready[b]) {
+        m->bgl[b] = gl;
+        m->bgr[b] = gr;
+        m->bg_ready[b] = 1;
+    }
+    for (int i = 0; i < n; i++) {
+        float L, R;
+        if (plain && m->bgl[b] == 1 && m->bgr[b] == 1) {
+            L = in[2 * i];
+            R = in[2 * i + 1];
+        } else {
+            float k = (float)(i + 1) / n;
+            L = in[2 * i] * (m->bgl[b] + (gl - m->bgl[b]) * k);
+            R = in[2 * i + 1] * (m->bgr[b] + (gr - m->bgr[b]) * k);
+        }
+        o[2 * i] += L;
+        o[2 * i + 1] += R;
+        if (fabsf(L) > m->bus_peak[b][0]) m->bus_peak[b][0] = fabsf(L);
+        if (fabsf(R) > m->bus_peak[b][1]) m->bus_peak[b][1] = fabsf(R);
+    }
+    m->bgl[b] = gl;
+    m->bgr[b] = gr;
+}
+
 /* ---------------------------------------------------------------- the mix */
 
 void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int frames, int only_track, int voices)
@@ -768,7 +1159,8 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
 
     for (int done = 0; done < frames; done += BLOCK) {
         int n = frames - done < BLOCK ? frames - done : BLOCK;
-        float sends_d[2 * BLOCK] = {0}, sends_r[2 * BLOCK] = {0};
+        float *sends_d = m->bus_in[BUS_DELAY], *sends_r = m->bus_in[BUS_REVERB];   /* (the buses' inputs) */
+        for (int b = 0; b < MAX_BUSES; b++) memset(m->bus_in[b], 0, sizeof(float) * 2 * n);
         float *o = out + 2 * done;
         for (int t = 0; t < p->ntracks; t++) memset(m->trk[t], 0, sizeof(float) * 2 * n);
         if (clips && voices)                     /* live: queued launches switch on time */
@@ -783,6 +1175,15 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
                 p->sess_at[t] = q;
                 p->sess_q[t] = SESS_NONE;
                 p->sess_q_wrap[t] = 0;
+                int sc = p->sess_play[t];
+                if (sc >= 0 && sc < p->nscenes && p->slots[t][sc].mode == LAUNCH_ONCE) {   /* one pass, then the timeline */
+                    long end = q + slot_frames(p, &p->slots[t][sc], q);
+                    int wrap = p->loop && p->loop_end > p->loop_start && q < p->loop_end && end >= p->loop_end;
+                    if (wrap) end = p->loop_start + (end - p->loop_end) % (p->loop_end - p->loop_start);
+                    p->sess_q[t] = SESS_TIMELINE;
+                    p->sess_q_at[t] = end;
+                    p->sess_q_wrap[t] = wrap;
+                }
             }
         if (clips) add_clips(m, p, start + done, n, voices);
         if (voices) add_voices(m, p, n);
@@ -814,6 +1215,11 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
             if (only_track >= 0 ? t != only_track : (tr->mute || (any_solo && !tr->solo))) continue;
             float *b = m->trk[t];
             process_track(m, p, t, tr, b, n);
+            if (tr->rack.n) rack_run(m, p, start + done, t, &tr->rack, b, n);
+            int ob = tr->out - 1;                /* to the master, or into a bus */
+            float *dest = ob >= 0 && ob < p->nbuses ? m->bus_in[ob] : o;
+            int other_sends = 0;
+            for (int bb = 2; bb < p->nbuses; bb++) other_sends |= tr->send[bb] > 0;
             double ang = (tr->pan + 1) * PI_F / 4;
             float gl = tr->volume * (float)(cos(ang) * 1.41421356), gr = tr->volume * (float)(sin(ang) * 1.41421356);
             if (!m->g_ready[t]) {
@@ -827,8 +1233,13 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
                 float l = m->gl[t] + (gl - m->gl[t]) * k, r = m->gr[t] + (gr - m->gr[t]) * k;
                 float dk = 1 - duck * m->duck[i];
                 float L = b[2 * i] * l * dk, R = b[2 * i + 1] * r * dk;
-                o[2 * i] += L;
-                o[2 * i + 1] += R;
+                dest[2 * i] += L;
+                dest[2 * i + 1] += R;
+                if (other_sends)
+                    for (int bb = 2; bb < p->nbuses; bb++) {
+                        m->bus_in[bb][2 * i] += L * tr->send[bb];
+                        m->bus_in[bb][2 * i + 1] += R * tr->send[bb];
+                    }
                 if (fabsf(L) > m->peak[t][0]) m->peak[t][0] = fabsf(L);
                 if (fabsf(R) > m->peak[t][1]) m->peak[t][1] = fabsf(R);
                 sends_d[2 * i] += L * tr->delay_send;
@@ -840,11 +1251,36 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
             m->gr[t] = gr;
             sending |= tr->delay_send > 0 || tr->reverb_send > 0;
         }
+        for (int bb = 2; bb < p->nbuses; bb++) {   /* the group buses: their racks, then into the mix */
+            const Bus *bs = &p->buses[bb];
+            float *bi = m->bus_in[bb];
+            if (bs->send_d > 0 || bs->send_r > 0) sending = 1;
+            float tmp[2 * BLOCK] = {0};
+            bus_out(m, p, start + done, bb, bi, tmp, n);
+            for (int i = 0; i < 2 * n; i++) o[i] += tmp[i];
+            if (bs->send_d > 0 || bs->send_r > 0)    /* (post-fader, like a track's) */
+                for (int i = 0; i < 2 * n; i++) {
+                    sends_d[i] += tmp[i] * bs->send_d;
+                    sends_r[i] += tmp[i] * bs->send_r;
+                }
+        }
         if (sending) m->tail_left = 8L * m->rate;   /* keep running until the echoes die away */
-        if (m->tail_left > 0) {
-            run_delay(m, p, start + done, sends_d, o, n);
-            run_reverb(m, p, sends_r, o, n);
-            m->tail_left -= n;
+        int racked = p->buses[BUS_DELAY].rack.n || p->buses[BUS_REVERB].rack.n;
+        if (m->tail_left > 0 || racked) {
+            const Bus *bd = &p->buses[BUS_DELAY], *br = &p->buses[BUS_REVERB];
+            if (!bd->rack.n && !bd->mute && bd->volume == 1 && bd->pan == 0) run_delay(m, p, start + done, sends_d, o, n);
+            else {                               /* the delay bus's rack, fader and pan after its echoes */
+                float wet[2 * BLOCK] = {0};
+                run_delay(m, p, start + done, sends_d, wet, n);
+                bus_out(m, p, start + done, BUS_DELAY, wet, o, n);
+            }
+            if (!br->rack.n && !br->mute && br->volume == 1 && br->pan == 0) run_reverb(m, p, sends_r, o, n);
+            else {
+                float wet[2 * BLOCK] = {0};
+                run_reverb(m, p, sends_r, wet, n);
+                bus_out(m, p, start + done, BUS_REVERB, wet, o, n);
+            }
+            if (m->tail_left > 0) m->tail_left -= n;
         }
     }
 }

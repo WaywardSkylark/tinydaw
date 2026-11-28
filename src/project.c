@@ -78,6 +78,15 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
             for (int k = 0; k < mc->nlinks; k++)
                 fprintf(f, "mlink %d %d %.9g %.9g\n", m, mc->link[k].param, mc->link[k].lo, mc->link[k].hi);
         }
+        if (tr->out) fprintf(f, "trackout %d\n", tr->out);   /* (into a bus) */
+        for (int b = 2; b < MAX_BUSES; b++)
+            if (tr->send[b] > 0) fprintf(f, "tsend %d %.9g\n", b, tr->send[b]);
+        for (int k = 0; k < tr->rack.n; k++) {      /* its rack, in order */
+            const RackFx *x = &tr->rack.fx[k];
+            fprintf(f, "rack %d %d", x->kind, x->on);
+            for (int j = 0; j < FXR_PARAMS; j++) fprintf(f, " %.9g", x->p[j]);
+            fprintf(f, "\n");
+        }
         fprintf(f, "trackdyn %.9g %d %.9g %.9g %.9g %.9g %.9g\n", tr->width, tr->comp_on, tr->comp_thresh,
                 tr->comp_ratio, tr->comp_attack, tr->comp_release, tr->comp_makeup);
     }
@@ -145,6 +154,16 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     for (int i = 0; i < p->nsections; i++)
         fprintf(f, "section %d %d %s\n", p->sections[i].bar, p->sections[i].bars, p->sections[i].name);
     if (p->tags[0]) fprintf(f, "tags %s\n", p->tags);
+    for (int b = 0; b < p->nbuses; b++) {        /* buses (0 the delay, 1 the reverb), each then its rack */
+        const Bus *bs = &p->buses[b];
+        fprintf(f, "bus %d %.9g %.9g %d %.9g %.9g %s\n", b, bs->volume, bs->pan, bs->mute, bs->send_d, bs->send_r, bs->name);
+        for (int k = 0; k < bs->rack.n; k++) {
+            const RackFx *x = &bs->rack.fx[k];
+            fprintf(f, "busrack %d %d %d", b, x->kind, x->on);
+            for (int j = 0; j < FXR_PARAMS; j++) fprintf(f, " %.9g", x->p[j]);
+            fprintf(f, "\n");
+        }
+    }
     for (int i = 0; i < p->nscenes; i++) fprintf(f, "scene %d %s\n", i, p->scene_names[i]);
     for (int t = 0; t < p->ntracks; t++)
         for (int i = 0; i < p->nscenes; i++) {
@@ -153,6 +172,7 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
             const Clip *c = &sl->clip;
             fprintf(f, "slot %d %d %d %.9g %d %d %d %d %ld %ld %.9g %d %s\n", t, i, sl->kind, sl->beats, sl->bar, c->sample,
                     c->pattern, c->root, c->offset, c->length, c->gain_db, c->bend, sl->name);
+            if (sl->mode) fprintf(f, "slotmode %d %d %d\n", t, i, sl->mode);
         }
     if (p->key_root || p->key_scale) fprintf(f, "key %d %d\n", p->key_root, p->key_scale);
     for (int i = 0; i < p->nkeys; i++) fprintf(f, "keychange %d %d %d\n", p->keys[i].bar, p->keys[i].root, p->keys[i].scale);
@@ -365,6 +385,47 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                             &t->eq[0], &t->eq[1], &t->eq[2], &t->drive, &t->delay_send, &t->reverb_send, &t->duck) == 11;
                 if (t->filter < 0 || t->filter >= FILT_TYPES) t->filter = FILT_OFF;
             }
+        } else if (!strcmp(word, "trackout")) {
+            int o = 0;
+            ok = ntracks > 0 && sscanf(line, "trackout %d", &o) == 1 && o >= 0 && o <= MAX_BUSES;
+            if (ok) p->tracks[ntracks - 1].out = o;
+        } else if (!strcmp(word, "tsend")) {
+            int b = -1;
+            float v = 0;
+            ok = ntracks > 0 && sscanf(line, "tsend %d %f", &b, &v) == 2 && b >= 0 && b < MAX_BUSES && v >= 0 && v <= 2;
+            if (ok) p->tracks[ntracks - 1].send[b] = v;
+        } else if (!strcmp(word, "rack") || !strcmp(word, "busrack")) {
+            RackFx x;
+            memset(&x, 0, sizeof x);
+            int b = -1, bus = word[0] == 'b', got;
+            float *q = x.p;
+            if (bus)
+                got = sscanf(line, "busrack %d %d %d %f %f %f %f %f %f", &b, &x.kind, &x.on, &q[0], &q[1], &q[2], &q[3], &q[4], &q[5]);
+            else
+                got = sscanf(line, "rack %d %d %f %f %f %f %f %f", &x.kind, &x.on, &q[0], &q[1], &q[2], &q[3], &q[4], &q[5]) + 1;
+            ok = got >= 3 && x.kind >= 0 && x.kind < FXR_KINDS && (bus ? b >= 0 && b < MAX_BUSES : ntracks > 0);
+            Rack *rk = ok ? (bus ? &p->buses[b].rack : &p->tracks[ntracks - 1].rack) : NULL;
+            if (rk && rk->n < RACK_SLOTS) {
+                for (int j = 0; j < FXR_PARAMS; j++) {   /* in range, whatever the file says */
+                    const RackKind *k = &RACK_KINDS[x.kind];
+                    if (j < k->np) x.p[j] = x.p[j] < k->lo[j] ? k->lo[j] : x.p[j] > k->hi[j] ? k->hi[j] : x.p[j];
+                }
+                rk->fx[rk->n++] = x;
+            }
+        } else if (!strcmp(word, "bus")) {
+            int b = -1, nm = 0;
+            Bus bs;
+            memset(&bs, 0, sizeof bs);
+            ok = sscanf(line, "bus %d %f %f %d %f %f %n", &b, &bs.volume, &bs.pan, &bs.mute, &bs.send_d, &bs.send_r, &nm) >= 6 &&
+                 b >= 0 && b < MAX_BUSES;
+            if (ok) {
+                Rack keep = p->buses[b].rack;     /* (a busrack line could come first: keep it) */
+                if (nm > 0) snprintf(bs.name, sizeof bs.name, "%.31s", line + nm);
+                bs.name[strcspn(bs.name, "\r\n")] = 0;
+                bs.rack = keep;
+                p->buses[b] = bs;
+                if (b + 1 > p->nbuses) p->nbuses = b + 1;
+            }
         } else if (!strcmp(word, "macro")) {
             int m = -1, nm = 0;
             float v = 0;
@@ -379,7 +440,7 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
             int m = -1;
             MacroLink l;
             ok = ntracks > 0 && sscanf(line, "mlink %d %d %f %f", &m, &l.param, &l.lo, &l.hi) == 4 && m >= 0 &&
-                 m < TRACK_MACROS && l.param >= 0 && l.param < TP_COUNT;
+                 m < TRACK_MACROS && track_param_valid(l.param);
             Macro *mc = ok ? &p->tracks[ntracks - 1].macro[m] : NULL;
             if (mc && mc->nlinks < MACRO_LINKS) mc->link[mc->nlinks++] = l;
         } else if (!strcmp(word, "track")) {
@@ -533,6 +594,11 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
         } else if (!strcmp(word, "tags")) {
             snprintf(p->tags, sizeof p->tags, "%.127s", line[4] ? line + 5 : "");
             p->tags[strcspn(p->tags, "\r\n")] = 0;
+        } else if (!strcmp(word, "slotmode")) {
+            int t = -1, i = -1, m = 0;
+            ok = sscanf(line, "slotmode %d %d %d", &t, &i, &m) == 3 && t >= 0 && t < MAX_TRACKS && i >= 0 && i < MAX_SCENES &&
+                 m >= 0 && m < LAUNCH_MODES;
+            if (ok) p->slots[t][i].mode = m;
         } else if (!strcmp(word, "scene")) {
             int i = -1, nm = 0;
             ok = sscanf(line, "scene %d %n", &i, &nm) >= 1 && i >= 0 && i < MAX_SCENES;

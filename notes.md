@@ -7,6 +7,69 @@ way they are.
 
 ## Unreleased (after 0.8.5)
 
+### 2026-11-28: Buses and an effect rack
+
+Asked for: buses and a flexible effect chain ("the biggest musical gap"). The user chose "strip +
+effect rack" and "group + return buses".
+
+- **Rack:** `Rack` (up to 8 `RackFx`: kind, on, 6 knobs) on every track and bus, run after the fixed
+  strip. Ten kinds in fx.c's `RACK_KINDS` table (names, ranges, formats, log scales, choices): EQ,
+  Filter (SVF), Drive, Compressor, Delay (tempo divisions, ping-pong), Reverb (its own Freeverb),
+  Chorus, Phaser (6 allpasses), Bitcrusher, Gate. State lives in the Mixer per owner (track, or
+  MAX_TRACKS + bus) and slot; it's reallocated when the kind in a slot changes.
+- **Buses:** `Project.buses[8]`, `nbuses`. Bus 0 is the shared delay, bus 1 the reverb (their racks
+  run after the built-in effect). `Track.out` (0 master, b+1 bus b) and `Track.send[b]` for b >= 2;
+  buses 0/1 keep using `delay_send` and `reverb_send`. Group buses can send to the delay and reverb.
+- **Bit-exact:** a bus at unity, centred, unmuted, with an empty rack takes the old code path, so the
+  examples render identically (checked on five songs by comparing the WAV data with a pre-change
+  build at 32-bit float).
+- **Files:** `bus`, `busrack`, `trackout`, `tsend` and `rack` lines; old files get the two default
+  buses from `project_init`. Presets save the rack; two new built-ins (Dreamy, Bitcrushed). Macros
+  can link to rack knobs (`TP_RACK + slot*6 + knob`, `track_param_info`, `track_param_valid`).
+- **UI:** Mixer > Track has Output, sends to user buses and the rack editor; new Mixer > Buses page
+  (Live moved to index 5); bus rows in Levels and bus strips in the console; faders take
+  `-2 - b` for bus b.
+- **Tests:** 19 checks: every kind changes the sound and does nothing when off, order matters,
+  group/fader/mute/pan/rack/sends, the delay bus, saving, macros on rack knobs, the preset, undo.
+- **Found along the way:** eSpeak NG renders the syllable "a" (with `-z -b 1`) differently from run
+  to run, so the Breakcore example's robot vocal isn't byte-identical between renders. Not ours;
+  that song is left out of bit-exact comparisons.
+
+### 2026-11-28: main.c split into modules; tests in their own file
+
+`main.c` had grown to 22,000 lines. It took about 100 s to compile (one translation unit, one core)
+and caused stale-build mix-ups.
+
+- **How:** a script split it, not hand edits. It scans the top-level items (comments, strings,
+  braces and preprocessor lines respected, and inside function bodies only the first branch of an
+  `#if` is counted). Types, macros, includes and size-less constant tables go to `src/ui.h` in their
+  original order. Every global gets an `extern` there and every function a prototype. Definitions
+  move, minus `static`, to the module for their section. Anonymous-struct globals got named types
+  (`T_<name>`). Globals declared twice in the old file (legal within one translation unit) are now
+  defined once. Top-level `#if` blocks (the file dialogs) stay whole, and their header lines carry
+  the same guards. 17 modules, see docs/developers.md.
+- **Building:** one object per file in `build/`, `MAKEFLAGS += -j$(nproc)` by default; `selftest.o`
+  is built at -O1 (one huge function). A clean build takes about 42 s; after an edit, a few seconds
+  for most files and about 30 s for selftest.c. The Windows target still compiles everything in one
+  command.
+- **Rule from here on:** tests live in `src/selftest.c`, as their own blocks.
+- Nothing changed in behaviour: the same 473 checks pass before and after.
+
+### 2026-11-28: Slot launch modes: loop, toggle, hold, once
+
+Asked for: toggle, loop and hold options in the session view. Once was added as the counterpart to
+loop, so slots match the pads' One-shot, Hold and Loop modes.
+
+- `Slot.mode` (LAUNCH_LOOP, TOGGLE, HOLD, ONCE), saved as a separate `slotmode t s m` line so older
+  builds aren't confused. A button in the slot's corner cycles through the modes.
+- **Toggle:** a click on the playing (or queued) slot queues the timeline. **Hold:** it launches on
+  press and stops on release, right away (`sess_release_now`); holding a scene's name (`D_SCENE`)
+  holds its Hold slots. **Once:** when the audio thread makes the switch, it queues the timeline at
+  the end of one pass, wrapping round the loop when the pass ends past `loop_end`.
+- When a slot stops by itself, its track goes back to the timeline (silent in "session only").
+- **Tests:** 7 checks. The hold tests accept "queued or already switched", because the self-test's
+  dummy audio device really runs once playback starts.
+
 ### 2026-11-28: Session and timeline together or apart; slot copy, paste, import; examples with scenes
 
 Asked for: the session and the timeline playable on their own or together, with the user always aware

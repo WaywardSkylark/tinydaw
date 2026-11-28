@@ -1,4 +1,5 @@
 /tinydaw
+/build/
 *.o
 *.tmp
 *.wav

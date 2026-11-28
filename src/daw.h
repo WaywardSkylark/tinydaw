@@ -238,8 +238,43 @@ enum { FILT_OFF, FILT_LOW, FILT_HIGH, FILT_BAND, FILT_TYPES };
  * from 0 to 1 (the cutoff on a log scale). A linked parameter follows its macro, not its own knob. */
 enum { TP_VOLUME, TP_PAN, TP_CUTOFF, TP_RESO, TP_EQ_LOW, TP_EQ_MID, TP_EQ_HIGH, TP_DRIVE, TP_DELAY, TP_REVERB,
        TP_DUCK, TP_WIDTH, TP_COMP, TP_COUNT };
+#define TP_RACK 100             /* + slot * FXR_PARAMS + knob: a knob in the track's rack */
 typedef struct { const char *name; float lo, hi; int log; const char *fmt; } TrackParamInfo;
 extern const TrackParamInfo TRACK_PARAMS[TP_COUNT];
+/* An effect rack: up to RACK_SLOTS effects after a track's strip (or on a bus), in order, each with
+ * its own on/off and knobs. RACK_KINDS says what each kind's knobs are. */
+enum { FXR_EQ, FXR_FILTER, FXR_DRIVE, FXR_COMP, FXR_DELAY, FXR_REVERB, FXR_CHORUS, FXR_PHASER, FXR_CRUSH, FXR_GATE,
+       FXR_KINDS };
+#define RACK_SLOTS 8
+#define FXR_PARAMS 6
+typedef struct { int kind, on; float p[FXR_PARAMS]; } RackFx;
+typedef struct { int n; RackFx fx[RACK_SLOTS]; } Rack;
+typedef struct {
+    const char *name, *about;
+    int np;
+    const char *pname[FXR_PARAMS];
+    float lo[FXR_PARAMS], hi[FXR_PARAMS], def[FXR_PARAMS];
+    const char *fmt[FXR_PARAMS];            /* NULL: a choice, named by choices[] */
+    int log[FXR_PARAMS];
+    const char *const *choices[FXR_PARAMS];
+} RackKind;
+extern const RackKind RACK_KINDS[FXR_KINDS];
+void rack_fx_init(RackFx *f, int kind);         /* a kind with its default knobs, on */
+
+/* Buses: tracks can play into one (a group) and send to any. Buses 0 and 1 are the shared delay and
+ * reverb (their built-in effect, then their rack); the rest are made by the user. A bus plays into
+ * the master. */
+#define MAX_BUSES 8
+typedef struct {
+    char name[32];
+    float volume, pan;                      /* 0..1.5, -1..1 */
+    int mute;
+    float send_d, send_r;                   /* a group bus's sends to the delay and the reverb */
+    Rack rack;
+} Bus;
+#define BUS_DELAY 0
+#define BUS_REVERB 1
+
 #define TRACK_MACROS 4
 #define MACRO_LINKS 4
 typedef struct { int param; float lo, hi; } MacroLink;          /* param: TP_* */
@@ -265,6 +300,9 @@ typedef struct {
     int comp_on;            /* the track's own compressor */
     float comp_thresh, comp_ratio, comp_attack, comp_release, comp_makeup;   /* dB, :1, ms, ms, dB */
     Macro macro[TRACK_MACROS];
+    Rack rack;              /* effects after the strip */
+    int out;                /* where it plays: 0 the master, b + 1 bus b */
+    float send[MAX_BUSES];  /* to each bus, post-fader (the delay and reverb use delay_send and reverb_send) */
 } Track;
 
 /* The shared effects every track can send to, plus the sidechain and live controls. */
@@ -345,12 +383,17 @@ typedef struct { int bar, root, scale; } KeyChange;
  * the track's own timeline (so a song's sections can become scenes). */
 #define MAX_SCENES 16
 enum { SLOT_EMPTY, SLOT_CLIP, SLOT_RANGE };
+/* how a slot plays when launched: round and round until something else is (loop); the same, but a second
+ * click stops it (toggle); only while held down (hold); one pass (once). A slot that stops by itself
+ * (toggle, hold, once) hands its track back to the timeline. */
+enum { LAUNCH_LOOP, LAUNCH_TOGGLE, LAUNCH_HOLD, LAUNCH_ONCE, LAUNCH_MODES };
 typedef struct {
     int kind;
     char name[24];
     double beats;           /* how long a pass is, in quarter notes */
     Clip clip;              /* SLOT_CLIP: what it plays (its start and track aren't used) */
     int bar;                /* SLOT_RANGE: the track's timeline from this bar (0-based), `beats` long */
+    int mode;               /* LAUNCH_* */
 } Slot;
 enum { SESS_TIMELINE = -1, SESS_STOPPED = -2, SESS_NONE = -3 };
 /* what plays live: tracks with a launched slot play it and the rest the timeline (both), only the
@@ -399,6 +442,8 @@ typedef struct {
     Bend bends[MAX_BENDS];                  /* pitch curves, referred to by clips */
     int nbends;
     char tags[128];                         /* words to find it by in the project browser, comma-separated */
+    Bus buses[MAX_BUSES];                   /* 0 the delay, 1 the reverb, then the user's */
+    int nbuses;
     Slot slots[MAX_TRACKS][MAX_SCENES];     /* the session view */
     int nscenes;
     char scene_names[MAX_SCENES][24];
@@ -551,6 +596,7 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
 int project_has_tails(const Project *p);        /* any delay or reverb in use */
 /* Each track's loudest sample (left, right) since the last call, after its fader; then resets. */
 void mixer_levels(Mixer *m, float out[][2]);
+void mixer_bus_levels(Mixer *m, float out[][2]);   /* each bus's loudest sample since the last call */
 
 /* ---- automation and note clips (fx.c) ---- */
 float auto_to_value(int param, float v);        /* 0..1 to the parameter's own units */
@@ -559,7 +605,11 @@ void auto_sort(Project *p);                     /* after adding or moving points
 int auto_lane(const Project *p, int track, int param, int *first);   /* how many points; first index */
 float auto_at(const Project *p, int track, int param, long at, int *has);   /* 0..1 at frame `at` */
 void auto_apply(const Project *p, int track, long at, Track *out);  /* the track with its automation and macros */
-float *track_param(Track *t, int tp);           /* where a TP_* parameter lives in a track */
+float *track_param(Track *t, int tp);           /* where a TP_* (or TP_RACK + ...) parameter lives in a track */
+/* What a parameter is: its name ("Drive", "Rack 2: Chorus rate"), range, scale and format. 0 if it isn't one. */
+int track_param_info(const Track *t, int tp, char *name, size_t nlen, float *lo, float *hi, int *log, const char **fmt);
+int track_param_valid(int tp);                  /* a number a macro link may hold */
+void project_buses_default(Project *p);         /* the delay and reverb buses, as a new song has them */
 void macros_apply(Track *t, const float *values);   /* the macros (at these values, or their own) set what they're linked to */
 int sample_root(const Sample *s);              /* the note a sound plays at, for note clips */
 long pattern_end(const Project *p, int pattern);

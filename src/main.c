@@ -488,6 +488,10 @@ static void mixwin_frame(void);
 static SDL_Rect lv_fader[MAX_TRACKS], cs_fader[MAX_TRACKS], cs_mute[MAX_TRACKS];   /* where they were drawn (self-test) */
 static int ed_clip = -1, ed_handle;
 static Clip ed_last, ed_orig;            /* the clip as last seen (to find it again), and at a drag's start */
+#define ED_LIB (-2)                     /* ed_clip: the editor has a library sound, as ed_lib */
+static Clip ed_lib;                     /* the part of it being kept, its gain and fades */
+static Clip *ed_c(void);
+static void editor_open_sound(int s);
 static int ed_nclips;
 static long ed_v0, ed_v1;                /* the part of the sound shown, in frames */
 static SDL_Rect ed_wave, ed_btn[8];
@@ -4072,10 +4076,15 @@ static void waiting_overlay(const char *msg)
 
 /* ---- clip edits: pitch and reverse swap in a variant of the sound; gain and fades are numbers */
 
+static void clip_variant_c(Clip *c, int semis, int reverse);
 static void clip_variant(int ci, int semis, int reverse)
 {
-    if (ci < 0 || ci >= P.nclips) return;
-    Clip *c = &P.clips[ci];
+    if (ci == ED_LIB) clip_variant_c(&ed_lib, semis, reverse);
+    else if (ci >= 0 && ci < P.nclips) clip_variant_c(&P.clips[ci], semis, reverse);
+}
+
+static void clip_variant_c(Clip *c, int semis, int reverse)
+{
     const Sample *old = &P.samples[c->sample];
     int old_rev = old->pitched ? old->reversed : 0;
     int base = sample_base(&P, c->sample);
@@ -5238,7 +5247,7 @@ static struct {
     int has, sample, from_pad;
     Pad pad;                            /* a pad's settings, when copied from a pad */
 } sclip;
-enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR, CMA_PIN, CMA_SAVE };
+enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR, CMA_PIN, CMA_SAVE, CMA_EDIT };
 static struct {
     int open, kind, idx, n;
     int act[6], enabled[6];
@@ -5560,17 +5569,20 @@ static void cm_open(int kind, int idx)
     }
     cm.enabled[2] = has;
     cm.n = 3;
-    if (kind == CM_LIB && has) {                /* pin and save, before Remove */
-        snprintf(cm.label[4], sizeof cm.label[4], "%s", cm.label[2]);
-        cm.act[4] = cm.act[2];
-        cm.enabled[4] = 1;
-        snprintf(cm.label[2], sizeof cm.label[2], P.samples[s].pinned ? "Unpin" : "Pin to the top");
-        cm.act[2] = CMA_PIN;
-        cm.enabled[2] = 1;
-        snprintf(cm.label[3], sizeof cm.label[3], P.samples[s].saved ? "Forget the saved copy" : "Save for future sessions");
-        cm.act[3] = CMA_SAVE;
+    if (kind == CM_LIB && has) {                /* the clip editor, pin and save, before Remove */
+        snprintf(cm.label[5], sizeof cm.label[5], "%s", cm.label[2]);
+        cm.act[5] = cm.act[2];
+        cm.enabled[5] = 1;
+        snprintf(cm.label[2], sizeof cm.label[2], "Open in the clip editor");
+        cm.act[2] = CMA_EDIT;
+        cm.enabled[2] = P.samples[s].data && P.samples[s].frames > 0;
+        snprintf(cm.label[3], sizeof cm.label[3], P.samples[s].pinned ? "Unpin" : "Pin to the top");
+        cm.act[3] = CMA_PIN;
         cm.enabled[3] = 1;
-        cm.n = 5;
+        snprintf(cm.label[4], sizeof cm.label[4], P.samples[s].saved ? "Forget the saved copy" : "Save for future sessions");
+        cm.act[4] = CMA_SAVE;
+        cm.enabled[4] = 1;
+        cm.n = 6;
     }
     int w = 0;
     for (int i = 0; i < cm.n; i++) w = text_w(cm.label[i]) > w ? text_w(cm.label[i]) : w;
@@ -5602,6 +5614,7 @@ static void cm_draw(void)
         case CMA_PASTE: sound_paste(cm.kind, cm.idx); break;
         case CMA_REMOVE: remove_sound(cm.idx); break;
         case CMA_PIN: sound_pin(cm.idx, !P.samples[cm.idx].pinned); break;
+        case CMA_EDIT: editor_open_sound(cm.idx); break;
         case CMA_SAVE:
             if (P.samples[cm.idx].saved) sound_unsave(cm.idx);
             else if (sound_save(cm.idx) == 0)
@@ -12392,15 +12405,16 @@ static int selftest(void)
                         sim(mi.x + 10, mi.y + 4, 1, 0, 0, 0); sim(mi.x + 10, mi.y + 4, 0, 1, 0, 0); } while (0)
         SDL_Rect r = lib_rects[b];
         sim(r.x + 30, r.y + 5, 0, 0, 1, 0);      /* right-click: Pin */
-        int five = cm.open && cm.n == 5 && cm.act[2] == CMA_PIN && cm.act[3] == CMA_SAVE && cm.act[4] == CMA_REMOVE;
-        CM_PICK(2);
+        int five = cm.open && cm.n == 6 && cm.act[2] == CMA_EDIT && cm.act[3] == CMA_PIN && cm.act[4] == CMA_SAVE &&
+                   cm.act[5] == CMA_REMOVE;
+        CM_PICK(3);
         frame();
         check(five && P.samples[b].pinned && P.samples[b].saved && file_exists(P.samples[b].path) && in_saved_dir(P.samples[b].path),
               "right-click > Pin keeps a sound and saves a copy of it");
         check(lib_rects[b].y < lib_rects[a].y, "a pinned sound is at the top of the library");
         r = lib_rects[a];
         sim(r.x + 30, r.y + 5, 0, 0, 1, 0);      /* right-click: Save */
-        CM_PICK(3);
+        CM_PICK(4);
         check(P.samples[a].saved && !P.samples[a].pinned && file_exists(P.samples[a].path), "Save keeps a copy without pinning");
         new_project();                           /* a later session */
         frame();
@@ -12415,7 +12429,7 @@ static int selftest(void)
         snprintf(moved, sizeof moved, "%s", qb >= 0 ? P.samples[qb].path : "");
         r = lib_rects[qb];
         sim(r.x + 30, r.y + 5, 0, 0, 1, 0);      /* right-click: Forget the saved copy */
-        CM_PICK(3);
+        CM_PICK(4);
         int gone = qb >= 0 && !P.samples[qb].saved && !P.samples[qb].pinned && !file_exists(moved) && file_exists(P.samples[qb].path);
         char unsaved_file[1024];
         snprintf(unsaved_file, sizeof unsaved_file, "%s", P.samples[qb].path);
@@ -12441,6 +12455,48 @@ static int selftest(void)
         SDL_setenv("TINYDAW_SAVED_DIR", "", 1);
         new_project();
         make_demo();
+        frame();
+        history_check();
+    }
+
+
+    /* ---- a library sound in the clip editor */
+    {
+        new_project();
+        make_demo();
+        show_panel(RI_SOUNDS);
+        sounds_sub = 0;
+        frame();
+        history_check();
+        int a = -1;
+        for (int i = 0; i < P.nsamples && a < 0; i++)
+            if (lib_rects[i].w && P.samples[i].frames > SR / 2) a = i;
+        long af = P.samples[a].frames;
+        int ns0 = P.nsamples, nc0 = P.nclips;
+        SDL_Rect r = lib_rects[a];
+        sim(r.x + 30, r.y + 5, 0, 0, 1, 0);
+        SDL_Rect mi = {cm.box.x + 4, cm.box.y + 4 + 2 * (font_h + 12), cm.box.w - 8, font_h + 12};
+        int is_edit = cm.act[2] == CMA_EDIT;
+        sim(mi.x + 10, mi.y + 4, 1, 0, 0, 0);
+        sim(mi.x + 10, mi.y + 4, 0, 1, 0, 0);
+        check(is_edit && ewin && ed_clip == ED_LIB && ed_lib.sample == a && ed_lib.length == af,
+              "right-click > Open in the clip editor opens a library sound in the editor");
+        ed_lib.offset = SR / 10;                 /* keep a part, quieter, faded out */
+        ed_lib.length = SR / 4;
+        ed_lib.gain_db = -6;
+        ed_lib.fade_out = SR / 20;
+        ed_sim(0, 0, 0, 0);
+        SDL_Rect sb = ed_btn[2];
+        ed_sim(sb.x + 5, sb.y + 5, 1, 0);
+        ed_sim(sb.x + 5, sb.y + 5, 0, 1);
+        int ns = P.nsamples - 1;
+        float want = P.samples[a].data[2 * (SR / 10 + 100)] * powf(10, -6.0f / 20);
+        check(P.nsamples == ns0 + 1 && P.samples[ns].frames == SR / 4 && fabsf(P.samples[ns].data[200] - want) < 1e-3f &&
+                  fabsf(P.samples[ns].data[2 * (SR / 4 - 1)]) < 1e-3f && P.samples[a].frames == af && P.nclips == nc0 &&
+                  file_exists(P.samples[ns].path),
+              "Save as a new sound keeps the edited part as a sound of its own; the original and the song stay as they were");
+        remove(P.samples[ns].path);
+        editor_close();
         frame();
         history_check();
     }
@@ -14596,9 +14652,11 @@ static void editor_close(void)
     ed_clip = -1;
 }
 
+static Clip *ed_c(void) { return ed_clip == ED_LIB ? &ed_lib : &P.clips[ed_clip]; }
+
 static void editor_view_clip(void)
 {
-    const Clip *c = &P.clips[ed_clip];
+    const Clip *c = ed_c();
     long frames = P.samples[c->sample].frames, pad = c->length / 6 + SR / 20;
     ed_v0 = c->offset - pad < 0 ? 0 : c->offset - pad;
     ed_v1 = c->offset + c->length + pad > frames ? frames : c->offset + c->length + pad;
@@ -14619,9 +14677,24 @@ static void editor_open(int c)
     status("Editing \"%s\" in its own window", P.samples[sample_base(&P, P.clips[c].sample)].name);
 }
 
+/* A library sound in the editor: trim it, fade it, change its gain, pitch or direction, and keep
+ * the result as a new sound (the original stays as it is). */
+static void editor_open_sound(int s)
+{
+    if (s < 0 || s >= P.nsamples) return;
+    ed_clip = ED_LIB;
+    ed_lib = (Clip){.sample = s, .track = sel_track >= 0 && sel_track < P.ntracks ? sel_track : 0, .length = P.samples[s].frames};
+    editor_view_clip();
+    char title[160];
+    snprintf(title, sizeof title, "%s - clip editor - tinydaw", P.samples[s].name);
+    if (!pop_open(POP_EDITOR, title, 840, 660, 640, 560)) return;
+    status("Editing the sound \"%s\": Save as a new sound keeps what you make of it", P.samples[s].name);
+}
+
 /* the clip the editor shows may have moved in the list (clips deleted, undo): find it again */
 static int editor_find(void)
 {
+    if (ed_clip == ED_LIB) return ed_lib.sample >= 0 && ed_lib.sample < P.nsamples && P.samples[ed_lib.sample].data;
     if (ed_clip >= 0 && ed_clip < P.nclips && P.nclips == ed_nclips && P.clips[ed_clip].pattern == 0) return 1;
     for (int i = 0; i < P.nclips; i++)
         if (P.clips[i].pattern == 0 && P.clips[i].start == ed_last.start && P.clips[i].track == ed_last.track &&
@@ -14636,7 +14709,7 @@ static int editor_find(void)
 static long ed_x_to_frame(int x)
 {
     long f = ed_v0 + (long)((double)(x - ed_wave.x) * (ed_v1 - ed_v0) / (ed_wave.w > 1 ? ed_wave.w : 1));
-    long frames = P.samples[P.clips[ed_clip].sample].frames;
+    long frames = P.samples[ed_c()->sample].frames;
     return f < 0 ? 0 : f > frames ? frames : f;
 }
 
@@ -14644,8 +14717,8 @@ static int ed_frame_to_x(long f) { return ed_wave.x + (int)((double)(f - ed_v0) 
 
 static void editor_drag(void)            /* a handle on the waveform, following the mouse */
 {
-    if (ed_clip < 0 || ed_clip >= P.nclips) return;
-    Clip *c = &P.clips[ed_clip];
+    if (ed_clip != ED_LIB && (ed_clip < 0 || ed_clip >= P.nclips)) return;
+    Clip *c = ed_c();
     const Clip *o = &ed_orig;
     long f = ed_x_to_frame(mx), frames = P.samples[c->sample].frames, min = SR / 100;
     LOCK();
@@ -14653,7 +14726,7 @@ static void editor_drag(void)            /* a handle on the waveform, following 
     case 1: {                            /* the start: the end stays put */
         long off = f < 0 ? 0 : f > o->offset + o->length - min ? o->offset + o->length - min : f;
         long d = off - o->offset;
-        if (o->start + d < 0) d = -o->start;
+        if (o->start + d < 0 && ed_clip != ED_LIB) d = -o->start;
         c->offset = o->offset + d;
         c->start = o->start + d;
         c->length = o->length - d;
@@ -14681,7 +14754,7 @@ static void editor_drag(void)            /* a handle on the waveform, following 
 
 static void editor_play_region(long from)  /* hear the clip from `from` (a frame in its sound) */
 {
-    const Clip *c = &P.clips[ed_clip];
+    const Clip *c = ed_c();
     const Sample *s = &P.samples[c->sample];
     if (from < c->offset || from >= c->offset + c->length) from = c->offset;
     long n = c->offset + c->length - from;
@@ -14702,14 +14775,18 @@ static void editor_play_region(long from)  /* hear the clip from `from` (a frame
 static void editor_draw(void)
 {
     char buf[200];
-    Clip *c = &P.clips[ed_clip];
+    int lib = ed_clip == ED_LIB;
+    Clip *c = ed_c();
     const Sample *s = &P.samples[c->sample];
     int x = 16, w = W - 32, y = 12, hw, tw;
     fill((SDL_Rect){0, 0, W, H}, PANEL);
     snprintf(buf, sizeof buf, "%s", P.samples[sample_base(&P, c->sample)].name);
     text(x, y + 4, buf, HEAD);
-    snprintf(buf, sizeof buf, "track %d (%s)   %.2f s of a %.2f s sound", c->track + 1, P.tracks[c->track].name,
-             (double)c->length / SR, (double)s->frames / SR);
+    if (lib)
+        snprintf(buf, sizeof buf, "a library sound   keeping %.2f s of %.2f s", (double)c->length / SR, (double)s->frames / SR);
+    else
+        snprintf(buf, sizeof buf, "track %d (%s)   %.2f s of a %.2f s sound", c->track + 1, P.tracks[c->track].name,
+                 (double)c->length / SR, (double)s->frames / SR);
     text(x + text_w(P.samples[sample_base(&P, c->sample)].name) + 16, y + 4, buf, DIM);
     if (button((SDL_Rect){W - 16 - 90, y, 90, 28}, "Close", 0)) {
         editor_close();
@@ -14749,7 +14826,7 @@ static void editor_draw(void)
     fill(hfo, ACCENT);
     outline(hfi, DARK);
     outline(hfo, DARK);
-    if (P.playing && P.playhead >= c->start && P.playhead < c->start + c->length) {   /* where the song is */
+    if (!lib && P.playing && P.playhead >= c->start && P.playhead < c->start + c->length) {   /* where the song is */
         int px = ed_frame_to_x(c->offset + P.playhead - c->start);
         line(px, ed_wave.y, px, ed_wave.y + ed_wave.h, HEAD);
     }
@@ -14799,9 +14876,33 @@ static void editor_draw(void)
     /* the numbers */
     hw = (w - 16) / 3;
     tw = hw;
-    y = section(x, y, w, "WHERE IT PLAYS");
     double bf = beat_frames();
     static double st_b, len_b, off_ms;
+    if (lib) {                                   /* which part of the sound is kept */
+        static double from_ms, len_ms;
+        y = section(x, y, w, "THE PART TO KEEP");
+        if (!(drag.kind == D_NUM && drag.num == &from_ms) && !(numedit.active && numedit.v == &from_ms)) from_ms = c->offset * 1000.0 / SR;
+        if (!(drag.kind == D_NUM && drag.num == &len_ms) && !(numedit.active && numedit.v == &len_ms)) len_ms = c->length * 1000.0 / SR;
+        number((SDL_Rect){x, y, tw, 26}, "From", &from_ms, 0, s->frames * 1000.0 / SR, 2, "%.0f ms");
+        number((SDL_Rect){x + tw + 8, y, tw, 26}, "Length", &len_ms, 10, (s->frames - c->offset) * 1000.0 / SR, 2, "%.0f ms");
+        long no = (long)llround(from_ms * SR / 1000), nl = (long)llround(len_ms * SR / 1000);
+        if (no > s->frames - SR / 100) no = s->frames - SR / 100;
+        if (no < 0) no = 0;
+        if (nl > s->frames - no) nl = s->frames - no;
+        if (nl < SR / 100) nl = SR / 100;
+        if (no != c->offset || nl != c->length) {
+            c->offset = no;
+            c->length = nl;
+            if (c->fade_in + c->fade_out > c->length) c->fade_in = c->fade_out = 0;
+        }
+        if (button((SDL_Rect){x + 2 * (tw + 8), y, w - 2 * (tw + 8), 26}, "The whole sound", 0)) {
+            c->offset = 0;
+            c->length = s->frames;
+            editor_view_clip();
+        }
+        y += 42;
+    } else {
+    y = section(x, y, w, "WHERE IT PLAYS");
     if (!(drag.kind == D_NUM && drag.num == &st_b) && !(numedit.active && numedit.v == &st_b)) st_b = c->start / bf + 1;
     if (!(drag.kind == D_NUM && drag.num == &len_b) && !(numedit.active && numedit.v == &len_b)) len_b = c->length / bf;
     if (!(drag.kind == D_NUM && drag.num == &off_ms) && !(numedit.active && numedit.v == &off_ms)) off_ms = c->offset * 1000.0 / SR;
@@ -14828,6 +14929,7 @@ static void editor_draw(void)
     if (button((SDL_Rect){x + tw - 60, y, 28, 26}, "<", 0) && c->track > 0) c->track--;
     if (button((SDL_Rect){x + tw - 28, y, 28, 26}, ">", 0) && c->track < P.ntracks - 1) c->track++;
     y += 40;
+    }
 
     y = section(x, y, w, "HOW IT SOUNDS");
     fnumber((SDL_Rect){x, y, tw, 26}, "Gain", &c->gain_db, -36, 12, 0.05, "%+.1f dB");
@@ -14835,9 +14937,11 @@ static void editor_draw(void)
     if (!(drag.kind == D_NUM && drag.num == &semis) && !(numedit.active && numedit.v == &semis)) semis = clip_semis(c);
     number((SDL_Rect){x + tw + 8, y, tw, 26}, "Pitch", &semis, -24, 24, 0.08, "%+.0f st");
     if (drag.kind != D_NUM && (int)lround(semis) != clip_semis(c)) clip_variant(ed_clip, (int)lround(semis), clip_rev(c));
-    c = &P.clips[ed_clip];
+    c = ed_c();
+    s = &P.samples[c->sample];
     if (button((SDL_Rect){x + 2 * (tw + 8), y, tw, 26}, "Reverse", clip_rev(c))) clip_variant(ed_clip, clip_semis(c), !clip_rev(c));
-    c = &P.clips[ed_clip];
+    c = ed_c();
+    s = &P.samples[c->sample];
     y += 34;
     static double fin, fout;
     if (!(drag.kind == D_NUM && drag.num == &fin) && !(numedit.active && numedit.v == &fin)) fin = c->fade_in * 1000.0 / SR;
@@ -14857,6 +14961,77 @@ static void editor_draw(void)
         }
     }
     y += 42;
+
+    if (lib) {                                   /* a library sound's actions */
+        static const char *const LACT[4] = {"Play it", "Normalize (peak -1 dB)", "Save as a new sound", "Put on the timeline"};
+        int bw4 = (w - 3 * 6) / 4, la = -1;
+        for (int i = 0; i < 4; i++) {
+            ed_btn[i] = (SDL_Rect){x + i * (bw4 + 6), y, i == 3 ? w - 3 * (bw4 + 6) : bw4, 30};
+            if (button(ed_btn[i], LACT[i], i == 2)) la = i;
+        }
+        tip(ed_btn[2], "Adds what you hear (this part, its gain, fades, pitch and direction) to the library as a sound "
+                       "of its own. The original stays as it was");
+        tip(ed_btn[3], "A clip of this part on track %d at the playhead", c->track + 1);
+        switch (la) {
+        case 0: editor_play_region(c->offset); break;
+        case 1: {
+            float lo, hi;
+            sample_minmax(s, c->offset, c->offset + c->length, &lo, &hi);
+            float pk = fmaxf(fabsf(lo), fabsf(hi));
+            if (pk > 1e-6f) c->gain_db = fmaxf(-36, fminf(12, -1 - 20 * log10f(pk)));
+            break;
+        }
+        case 2: {
+            long n = c->length;
+            float *b = malloc((size_t)n * 2 * sizeof(float));
+            if (!b) break;
+            float g = powf(10, c->gain_db / 20);
+            for (long i = 0; i < n; i++) {
+                float e = 1;
+                if (c->fade_in > 0 && i < c->fade_in) e = (float)i / c->fade_in;
+                if (c->fade_out > 0 && n - i < c->fade_out) e = fminf(e, (float)(n - i) / c->fade_out);
+                b[2 * i] = s->data[2 * (c->offset + i)] * g * e;
+                b[2 * i + 1] = s->data[2 * (c->offset + i) + 1] * g * e;
+            }
+            char dir[900], path[1200], name[96], err[300], base[90];
+            user_dir("music", dir, sizeof dir);
+            snprintf(dir + strlen(dir), sizeof dir - strlen(dir), "/tinydaw/Edited sounds");
+            ensure_dir(dir);
+            snprintf(name, sizeof name, "%.80s (edited)", P.samples[sample_base(&P, c->sample)].name);
+            snprintf(base, sizeof base, "%.80s", name);
+            for (char *q = base; *q; q++)
+                if (strchr("/\\:*?\"<>|", *q) || (unsigned char)*q < 32) *q = '_';
+            snprintf(path, sizeof path, "%s/%s.wav", dir, base);
+            for (int k = 2; file_exists(path) && k < 1000; k++) snprintf(path, sizeof path, "%s/%s %d.wav", dir, base, k);
+            int ns = sample_record(&P, b, n, path, name, err, sizeof err);
+            free(b);
+            if (ns < 0) status("Couldn't keep it: %s", err);
+            else {
+                lib_flash = ns;
+                lib_flash_at = SDL_GetTicks();
+                status("\"%s\" is in the library (%.2f s)", name, (double)n / SR);
+            }
+            break;
+        }
+        case 3: {
+            int t = c->track < P.ntracks ? c->track : 0;
+            int k = clip_add(c->sample, t, snap(P.playhead), c->offset, c->length);
+            if (k >= 0) {
+                LOCK();
+                P.clips[k].gain_db = c->gain_db;
+                P.clips[k].fade_in = c->fade_in;
+                P.clips[k].fade_out = c->fade_out;
+                UNLOCK();
+                status("Put it on %s at the playhead", P.tracks[t].name);
+            }
+            break;
+        }
+        }
+        y += 40;
+        text(x, y, "Drag the edges to trim, the squares on top to fade, the wheel to zoom (Shift to scroll).", DIM);
+        text(x, y + font_h + 3, "Click the waveform to hear it from there. Esc closes.", DIM);
+        return;
+    }
 
     /* actions */
     static const char *const ACT[6] = {"Play the clip", "Normalize (peak -1 dB)", "Fit to whole bars",
@@ -15254,7 +15429,7 @@ static void mixwin_frame(void)
 static void editor_post(void)              /* remember the clip, to find it again next frame */
 {
     editor_draw();
-    if (ewin && ed_clip >= 0 && ed_clip < P.nclips) {
+    if (ewin && ed_clip >= 0 && ed_clip < P.nclips) {   /* (a library sound has nothing to find again) */
         ed_last = P.clips[ed_clip];
         ed_nclips = P.nclips;
     }
@@ -15273,7 +15448,7 @@ static void editor_frame(void)
 static void frame(void)
 {
     static int min_for = -1;            /* the pane needs a wider window (or the size changed) */
-    int need = 70 + (theory_open || pads_open || mixer_open || vis_open || sounds_open ? PANE_W : settings_open ? 440 : 0) + 520;
+    int need = 70 + (theory_open || pads_open || drums_open || mixer_open || vis_open || sounds_open ? PANE_W : settings_open ? 440 : 0) + 520;
     if (min_for != need + (int)(ui_user * 1000) * 10000) {              /* the panel plus a usable timeline */
         min_for = need + (int)(ui_user * 1000) * 10000;
         SDL_SetWindowMinimumSize(win, (int)(need * ui_user), (int)(560 * ui_user));
@@ -15882,8 +16057,10 @@ int main(int argc, char **argv)
                 return ok ? 0 : 1;
             }
         }
-        if (getenv("TINYDAW_SHOT_EDITOR")) {     /* the clip editor window, for clip N */
-            editor_open(atoi(getenv("TINYDAW_SHOT_EDITOR")));
+        if (getenv("TINYDAW_SHOT_EDITOR")) {     /* the clip editor window, for clip N (or "lib:N", sound N) */
+            const char *ev = getenv("TINYDAW_SHOT_EDITOR");
+            if (!strncmp(ev, "lib:", 4)) editor_open_sound(atoi(ev + 4));
+            else editor_open(atoi(ev));
             if (ewin) {
                 for (int i = 0; i < 2; i++) editor_frame();
                 SDL_Renderer *m = ren;           /* draw it once more and keep the pixels */

@@ -144,6 +144,15 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     }
     for (int i = 0; i < p->nsections; i++)
         fprintf(f, "section %d %d %s\n", p->sections[i].bar, p->sections[i].bars, p->sections[i].name);
+    for (int i = 0; i < p->nscenes; i++) fprintf(f, "scene %d %s\n", i, p->scene_names[i]);
+    for (int t = 0; t < p->ntracks; t++)
+        for (int i = 0; i < p->nscenes; i++) {
+            const Slot *sl = &p->slots[t][i];
+            if (sl->kind == SLOT_EMPTY) continue;
+            const Clip *c = &sl->clip;
+            fprintf(f, "slot %d %d %d %.9g %d %d %d %d %ld %ld %.9g %d %s\n", t, i, sl->kind, sl->beats, sl->bar, c->sample,
+                    c->pattern, c->root, c->offset, c->length, c->gain_db, c->bend, sl->name);
+        }
     if (p->key_root || p->key_scale) fprintf(f, "key %d %d\n", p->key_root, p->key_scale);
     for (int i = 0; i < p->nkeys; i++) fprintf(f, "keychange %d %d %d\n", p->keys[i].bar, p->keys[i].root, p->keys[i].scale);
     for (int i = 0; i < p->nchords; i++) {
@@ -153,7 +162,7 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     for (int i = 0; i < p->nbends; i++) {        /* pitch curves the clips use, before the clips */
         const Bend *b = &p->bends[i];
         int used = 0;
-        for (int c = 0; c < p->nclips && !used; c++) used = p->clips[c].bend == b->id;
+        used = bend_used(p, b->id);
         if (!used) continue;
         fprintf(f, "bend %d %d\n", b->id, b->keep_time);
         for (int k = 0; k < b->n; k++) fprintf(f, "bpt %.9g %.6g\n", b->at[k], b->semis[k]);
@@ -520,6 +529,31 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 b->at[b->n] = at;
                 b->semis[b->n++] = st;
             }
+        } else if (!strcmp(word, "scene")) {
+            int i = -1, nm = 0;
+            ok = sscanf(line, "scene %d %n", &i, &nm) >= 1 && i >= 0 && i < MAX_SCENES;
+            if (ok) {
+                snprintf(p->scene_names[i], sizeof p->scene_names[i], "%.23s", nm > 0 ? line + nm : "");
+                p->scene_names[i][strcspn(p->scene_names[i], "\r\n")] = 0;
+                if (i + 1 > p->nscenes) p->nscenes = i + 1;
+            }
+        } else if (!strcmp(word, "slot")) {
+            int t = -1, i = -1, nm = 0;
+            Slot sl;
+            memset(&sl, 0, sizeof sl);
+            Clip *c = &sl.clip;
+            ok = sscanf(line, "slot %d %d %d %lf %d %d %d %d %ld %ld %f %d %n", &t, &i, &sl.kind, &sl.beats, &sl.bar,
+                        &c->sample, &c->pattern, &c->root, &c->offset, &c->length, &c->gain_db, &c->bend, &nm) >= 12 &&
+                 t >= 0 && t < MAX_TRACKS && i >= 0 && i < MAX_SCENES && sl.kind > SLOT_EMPTY && sl.kind <= SLOT_RANGE &&
+                 sl.beats > 0 && sl.beats < 100000 && sl.bar >= 0 && c->sample >= 0 && c->sample < p->nsamples;
+            if (ok && c->pattern < 0 && !drum_find(p, -c->pattern)) ok = 0;
+            if (ok) {
+                if (nm > 0) snprintf(sl.name, sizeof sl.name, "%.23s", line + nm);
+                sl.name[strcspn(sl.name, "\r\n")] = 0;
+                if (c->offset < 0) c->offset = 0;
+                p->slots[t][i] = sl;
+                if (i + 1 > p->nscenes) p->nscenes = i + 1;
+            }
         } else if (!strcmp(word, "key")) {
             int r = 0, sc = 0;
             ok = sscanf(line, "key %d %d", &r, &sc) == 2 && r >= 0 && r < 12 && sc >= 0 && sc < NSCALES;
@@ -624,6 +658,9 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
     auto_sort(p);
     for (int c = 0; c < p->nclips; c++)          /* a curve that didn't come back: the clip plays straight */
         if (p->clips[c].bend && !bend_find_c(p, p->clips[c].bend)) p->clips[c].bend = 0;
+    for (int t = 0; t < MAX_TRACKS; t++)
+        for (int i = 0; i < MAX_SCENES; i++)
+            if (p->slots[t][i].clip.bend && !bend_find_c(p, p->slots[t][i].clip.bend)) p->slots[t][i].clip.bend = 0;
     keys_tidy(p);
     chords_sort(p);
     for (int i = 0; i + 1 < p->nchords; i++)     /* never overlapping */

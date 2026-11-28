@@ -31,6 +31,16 @@ static int nmaps;
 static Shifted shifted[64];
 static int nshifted;
 
+int bend_used(const Project *p, int id)            /* by a clip, or a slot in the session */
+{
+    for (int c = 0; c < p->nclips; c++)
+        if (p->clips[c].bend == id) return 1;
+    for (int t = 0; t < MAX_TRACKS; t++)
+        for (int i = 0; i < p->nscenes && i < MAX_SCENES; i++)
+            if (p->slots[t][i].kind == SLOT_CLIP && p->slots[t][i].clip.bend == id) return 1;
+    return 0;
+}
+
 float bend_at(const Bend *b, double sec)
 {
     if (!b || b->n <= 0) return 0;
@@ -60,7 +70,7 @@ int bend_new(Project *p)
         int w = 0;
         for (int i = 0; i < p->nbends; i++) {
             int used = 0;
-            for (int c = 0; c < p->nclips && !used; c++) used = p->clips[c].bend == p->bends[i].id;
+            used = bend_used(p, p->bends[i].id);
             if (used) p->bends[w++] = p->bends[i];
         }
         p->nbends = w;
@@ -218,6 +228,17 @@ static float *shift_sound(const Sample *s, const Bend *b, int sample_rate)
     return out;
 }
 
+/* every clip that can play: the timeline's, and the session's slots */
+static int all_clips(const Project *p, const Clip **out, int max)
+{
+    int n = 0;
+    for (int c = 0; c < p->nclips && n < max; c++) out[n++] = &p->clips[c];
+    for (int t = 0; t < MAX_TRACKS; t++)
+        for (int i = 0; i < p->nscenes && i < MAX_SCENES && n < max; i++)
+            if (p->slots[t][i].kind == SLOT_CLIP) out[n++] = &p->slots[t][i].clip;
+    return n;
+}
+
 struct BendWork {
     BendMap maps[MAX_BENDS];
     int nmaps;
@@ -232,11 +253,13 @@ BendWork *bends_build(const Project *p)
     int stale = 0;
     for (int i = 0; i < p->nbends && !stale; i++) {
         int used = 0;
-        for (int c = 0; c < p->nclips && !used; c++) used = p->clips[c].bend == p->bends[i].id;
+        used = bend_used(p, p->bends[i].id);
         if (used && p->bends[i].n > 0 && !bend_map(p, p->bends[i].id)) stale = 1;
     }
-    for (int c = 0; c < p->nclips && !stale; c++) {
-        const Clip *cl = &p->clips[c];
+    static const Clip *every[MAX_CLIPS + MAX_TRACKS * MAX_SCENES];
+    int nevery = all_clips(p, every, MAX_CLIPS + MAX_TRACKS * MAX_SCENES);
+    for (int c = 0; c < nevery && !stale; c++) {
+        const Clip *cl = every[c];
         const Bend *b = bend_find_c(p, cl->bend);
         if (b && b->n > 0 && b->keep_time && !cl->pattern && !bend_shifted(p, cl->bend, cl->sample)) stale = 1;
     }
@@ -251,7 +274,7 @@ BendWork *bends_build(const Project *p)
     for (int i = 0; i < p->nbends && w->nmaps < MAX_BENDS; i++) {
         const Bend *b = &p->bends[i];
         int used = 0;
-        for (int c = 0; c < p->nclips && !used; c++) used = p->clips[c].bend == b->id;
+        used = bend_used(p, b->id);
         if (!used || b->n <= 0) continue;
         const BendMap *have = bend_map(p, b->id);
         if (have) {                               /* current: keep it (copied, freed with the old set) */
@@ -264,8 +287,8 @@ BendWork *bends_build(const Project *p)
             w->maps[w->nmaps++] = build_map(b);
         }
     }
-    for (int c = 0; c < p->nclips && w->nshifted < 64; c++) {
-        const Clip *cl = &p->clips[c];
+    for (int c = 0; c < nevery && w->nshifted < 64; c++) {
+        const Clip *cl = every[c];
         const Bend *b = bend_find_c(p, cl->bend);
         if (!b || b->n <= 0 || !b->keep_time || cl->pattern || cl->sample < 0 || cl->sample >= p->nsamples) continue;
         int dup = 0;

@@ -7,6 +7,47 @@ way they are.
 
 ## Unreleased (after 0.8.0)
 
+### 2026-11-28: The session view (clip launcher)
+
+Asked for: an Ableton-style grid of scenes x tracks, launch a scene, jam, capture to the timeline.
+Agreed: the same tracks and mixer, and **per-track** playback (a track plays the timeline until a slot
+is launched on it).
+
+- **Layout:** tracks stay as rows (their headers and mixer controls stay put); scenes are columns.
+  That's Ableton's grid turned sideways to fit tinydaw. Tab or the "Session view" button (where
+  "TRACKS" was) toggles it.
+- **Slots** (`Slot`, `P.slots[track][scene]`): `SLOT_CLIP` holds a copy of any clip (sample,
+  pattern, root, offset, gain, pitch curve); `SLOT_RANGE` loops a stretch of the track's own
+  timeline (bar, beats). Range slots are what make "From sections" possible: every song becomes a
+  playable session with no setup. A pass's length is `slot_frames` (range: by the tempo map; clip: beats
+  at the tempo where it was launched).
+- **Live state** (in Project, not saved): `sess_play[t]` (SESS_TIMELINE, SESS_STOPPED or a scene),
+  `sess_at[t]`, and a queue (`sess_q`, `sess_q_at`). The UI queues for the next bar or beat; the
+  **audio thread** makes the switch inside `mixer_run`, so it lands on the bar exactly.
+- **Rendering (fx.c):** `add_clips` was split into `add_clip` (one clip) plus a loop. A playing slot
+  is drawn as temporary clips, one per pass from the launch (`add_session`); a range slot copies the
+  track's clips in that stretch, trimmed and moved, so notes, drums, bends, layers, macros and effects
+  all just work. Passes are counted with floor division, so moving the playhead back before the launch
+  keeps the loop in step. A range slot also reads the track's automation at its source time. **Only live
+  playback uses the session** (`mixer_run`'s `voices` flag); export and offline renders play the timeline.
+- **Capture:** `sess_track()` runs every frame and logs segments (track, a copy of the slot, from,
+  to), closing and reopening them when the transport loops. `sess_capture` first builds every clip to
+  write (a range slot is read from the timeline *before* it's replaced, in case it loops the bars
+  being written over), then clears those stretches on those tracks (split and delete), then adds
+  them. It's one undo step. Pieces under 20 ms are skipped.
+- **Undo:** scenes, names and slots are in `State` (slots copied only when there are scenes).
+- **Pitch curves:** `bend_used()` counts slot clips, so their curves are saved and get playback
+  tables and keep-timing renders.
+- **File format:** `scene i name` and `slot t s kind beats bar sample pattern root offset length gain
+  bend name`. Older builds ignore them. Opening a song puts every track on the timeline.
+- **Tests:** 12 checks: From sections; a range slot replacing the timeline; export ignoring the
+  session; a queued launch switching exactly on its bar; stop and back to the timeline; a clip slot
+  looping; Tab; clicking a scene launching on the next bar; capture landing where it played, as one
+  undo step; save and load.
+- **Not done:** moving sections doesn't update range slots' bars; there's no MIDI or pad launching
+  of slots yet; Parts can't write into a slot yet; a slot's notes can't be edited in the piano roll
+  in place (put the clip on the timeline, edit it, then put it back).
+
 ### 2026-11-28: Effect presets and macro knobs
 
 Asked for: presets for the delay, reverb and filter, tracks exposing a few macro knobs bound to effect

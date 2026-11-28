@@ -418,61 +418,130 @@ static void add_drums(Mixer *m, const Project *p, const Clip *cl, long start, in
     }
 }
 
-static void add_clips(Mixer *m, const Project *p, long start, int n)
+static void add_clip(Mixer *m, const Project *p, const Clip *cl, long start, int n)
+{
+    if (cl->pattern > 0) {
+        add_pattern(m, p, cl, start, n);
+        return;
+    }
+    if (cl->pattern < 0) {
+        add_drums(m, p, cl, start, n);
+        return;
+    }
+    long a = start > cl->start ? start : cl->start;
+    long b = start + n < cl->start + cl->length ? start + n : cl->start + cl->length;
+    if (a >= b) return;
+    const Sample *s = &p->samples[cl->sample];
+    float *out = m->trk[cl->track];
+    float gain = cl->gain_db == 0 ? 1.0f : powf(10.0f, cl->gain_db / 20.0f);
+    const float *data = s->data;
+    const BendMap *bm = NULL;
+    if (cl->bend) {                          /* a pitch curve: a render that keeps the timing, or tape */
+        const Bend *bd = bend_find_c(p, cl->bend);
+        if (bd && bd->keep_time) {
+            const float *sh = bend_shifted(p, cl->bend, cl->sample);
+            if (sh) data = sh;
+        } else if (bd) {
+            bm = bend_map(p, cl->bend);
+        }
+    }
+    for (long f = a; f < b; f++) {
+        long rel = f - cl->start, src = cl->offset + rel;
+        float fr = 0;
+        if (bm) {
+            double pos = bend_warp(bm, (double)(cl->offset + rel));
+            src = (long)floor(pos);
+            fr = (float)(pos - src);
+            if (src >= s->frames - 1) continue;
+        }
+        if (src < 0 || src >= s->frames) continue;
+        float g = gain;
+        long right = cl->length - 1 - rel;
+        if (rel < CLIP_EDGE) g *= (float)rel / CLIP_EDGE;
+        if (right < CLIP_EDGE) g *= (float)right / CLIP_EDGE;
+        if (cl->fade_in > 0 && rel < cl->fade_in) g *= (float)rel / cl->fade_in;
+        if (cl->fade_out > 0 && right < cl->fade_out) g *= (float)right / cl->fade_out;
+        if (fr > 0) {
+            out[2 * (f - start)] += (data[2 * src] + (data[2 * src + 2] - data[2 * src]) * fr) * g;
+            out[2 * (f - start) + 1] += (data[2 * src + 1] + (data[2 * src + 3] - data[2 * src + 1]) * fr) * g;
+        } else {
+            out[2 * (f - start)] += data[2 * src] * g;
+            out[2 * (f - start) + 1] += data[2 * src + 1] * g;
+        }
+    }
+}
+
+long slot_frames(const Project *p, const Slot *s, long at)
+{
+    if (s->kind == SLOT_RANGE) {
+        long a = meter_bar_frame(p, s->bar);
+        return meter_beats_frame(p, meter_beats(p, a) + s->beats) - a;
+    }
+    return (long)(s->beats * 60.0 / meter_bpm_at(p, at) * SR);
+}
+
+void session_reset(Project *p)
+{
+    for (int t = 0; t < MAX_TRACKS; t++) {
+        p->sess_play[t] = SESS_TIMELINE;
+        p->sess_q[t] = SESS_NONE;
+        p->sess_at[t] = p->sess_q_at[t] = 0;
+    }
+}
+
+/* A track's launched slot, as copies of clips placed pass after pass from when it was launched. */
+static void add_session(Mixer *m, const Project *p, int t, long start, int n)
+{
+    int sc = p->sess_play[t];
+    if (sc < 0 || sc >= p->nscenes) return;
+    const Slot *sl = &p->slots[t][sc];
+    long at = p->sess_at[t], L = slot_frames(p, sl, at);
+    if (sl->kind == SLOT_EMPTY || L < 64) return;
+    /* the passes this block touches (and the one before, ringing on); before the launch too, so moving
+     * the playhead back keeps the loop going in step */
+    long k0 = (long)floor((double)(start - at) / L) - 1, k1 = (long)floor((double)(start + n - at) / L);
+    for (long k = k0; k <= k1; k++) {
+        long pass = at + k * L;
+        if (sl->kind == SLOT_CLIP) {
+            Clip c = sl->clip;
+            c.track = t;
+            c.start = pass;
+            long room = c.pattern ? L : p->samples[c.sample].frames - c.offset;
+            c.length = room < L ? room : L;
+            if (c.length > 0) add_clip(m, p, &c, start, n);
+        } else {                                 /* the timeline's own clips between a and a + L, moved here */
+            long a = meter_bar_frame(p, sl->bar), z = a + L;
+            for (int ci = 0; ci < p->nclips; ci++) {
+                Clip c = p->clips[ci];
+                if (c.track != t || c.start >= z || c.start + c.length <= a) continue;
+                if (c.start < a) {
+                    long cut = a - c.start;
+                    c.start = a;
+                    c.offset += cut;
+                    c.length -= cut;
+                    c.fade_in = 0;
+                }
+                if (c.start + c.length > z) {
+                    c.length = z - c.start;
+                    c.fade_out = 0;
+                }
+                c.start += pass - a;
+                add_clip(m, p, &c, start, n);
+            }
+        }
+    }
+}
+
+static void add_clips(Mixer *m, const Project *p, long start, int n, int live)
 {
     for (int c = 0; c < p->nclips; c++) {
         const Clip *cl = &p->clips[c];
         if (cl->track < 0 || cl->track >= p->ntracks) continue;
-        if (cl->pattern > 0) {
-            add_pattern(m, p, cl, start, n);
-            continue;
-        }
-        if (cl->pattern < 0) {
-            add_drums(m, p, cl, start, n);
-            continue;
-        }
-        long a = start > cl->start ? start : cl->start;
-        long b = start + n < cl->start + cl->length ? start + n : cl->start + cl->length;
-        if (a >= b) continue;
-        const Sample *s = &p->samples[cl->sample];
-        float *out = m->trk[cl->track];
-        float gain = cl->gain_db == 0 ? 1.0f : powf(10.0f, cl->gain_db / 20.0f);
-        const float *data = s->data;
-        const BendMap *bm = NULL;
-        if (cl->bend) {                          /* a pitch curve: a render that keeps the timing, or tape */
-            const Bend *bd = bend_find_c(p, cl->bend);
-            if (bd && bd->keep_time) {
-                const float *sh = bend_shifted(p, cl->bend, cl->sample);
-                if (sh) data = sh;
-            } else if (bd) {
-                bm = bend_map(p, cl->bend);
-            }
-        }
-        for (long f = a; f < b; f++) {
-            long rel = f - cl->start, src = cl->offset + rel;
-            float fr = 0;
-            if (bm) {
-                double pos = bend_warp(bm, (double)(cl->offset + rel));
-                src = (long)floor(pos);
-                fr = (float)(pos - src);
-                if (src >= s->frames - 1) continue;
-            }
-            if (src < 0 || src >= s->frames) continue;
-            float g = gain;
-            long right = cl->length - 1 - rel;
-            if (rel < CLIP_EDGE) g *= (float)rel / CLIP_EDGE;
-            if (right < CLIP_EDGE) g *= (float)right / CLIP_EDGE;
-            if (cl->fade_in > 0 && rel < cl->fade_in) g *= (float)rel / cl->fade_in;
-            if (cl->fade_out > 0 && right < cl->fade_out) g *= (float)right / cl->fade_out;
-            if (fr > 0) {
-                out[2 * (f - start)] += (data[2 * src] + (data[2 * src + 2] - data[2 * src]) * fr) * g;
-                out[2 * (f - start) + 1] += (data[2 * src + 1] + (data[2 * src + 3] - data[2 * src + 1]) * fr) * g;
-            } else {
-                out[2 * (f - start)] += data[2 * src] * g;
-                out[2 * (f - start) + 1] += data[2 * src + 1] * g;
-            }
-        }
+        if (live && p->sess_play[cl->track] != SESS_TIMELINE) continue;   /* the track is playing the session */
+        add_clip(m, p, cl, start, n);
     }
+    for (int t = 0; live && t < p->ntracks; t++)
+        if (p->sess_play[t] >= 0) add_session(m, p, t, start, n);
 }
 
 #define VOICE_FADE (SR / 100)       /* matches voice_stop in audio.c */
@@ -700,7 +769,14 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
         float sends_d[2 * BLOCK] = {0}, sends_r[2 * BLOCK] = {0};
         float *o = out + 2 * done;
         for (int t = 0; t < p->ntracks; t++) memset(m->trk[t], 0, sizeof(float) * 2 * n);
-        if (clips) add_clips(m, p, start + done, n);
+        if (clips && voices)                     /* live: queued launches switch on time */
+            for (int t = 0; t < p->ntracks; t++)
+                if (p->sess_q[t] != SESS_NONE && p->sess_q_at[t] < start + done + n) {
+                    p->sess_play[t] = p->sess_q[t];
+                    p->sess_at[t] = p->sess_q_at[t];
+                    p->sess_q[t] = SESS_NONE;
+                }
+        if (clips) add_clips(m, p, start + done, n, voices);
         if (voices) add_voices(m, p, n);
 
         /* sidechain: follow the source track's level (before its effects) */
@@ -718,7 +794,14 @@ void mixer_run(Mixer *m, Project *p, long start, int clips, float *out, int fram
         int sending = 0;
         for (int t = 0; t < p->ntracks; t++) {
             Track eff;                           /* the track as its automation has it now */
-            auto_apply(p, t, start + done, &eff);
+            long when = start + done;
+            if (voices && clips && p->sess_play[t] >= 0 && p->sess_play[t] < p->nscenes &&
+                p->slots[t][p->sess_play[t]].kind == SLOT_RANGE) {   /* looping the timeline: its automation too */
+                const Slot *sl = &p->slots[t][p->sess_play[t]];
+                long L = slot_frames(p, sl, p->sess_at[t]), into = when - p->sess_at[t];
+                if (L > 0 && into >= 0) when = meter_bar_frame(p, sl->bar) + into % L;
+            }
+            auto_apply(p, t, when, &eff);
             const Track *tr = &eff;
             if (only_track >= 0 ? t != only_track : (tr->mute || (any_solo && !tr->solo))) continue;
             float *b = m->trk[t];

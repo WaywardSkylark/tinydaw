@@ -7,6 +7,7 @@ Everything tinydaw does, panel by panel. New here? Start with [Your first minute
 - [Finding your way around](#finding-your-way-around)
 - [Arranging](#arranging)
 - [Chords and keys](#chords-and-keys)
+- [The session view](#the-session-view)
 - [Notes and automation](#notes-and-automation)
 - [Making sounds and parts](#making-sounds-and-parts)
 - [Mixing](#mixing)
@@ -106,6 +107,27 @@ part-way through (the last chorus up a step), right-click the chord strip > **A 
 then pick the new key in Theory > Keys with the playhead after it. A key change is a flag on the
 chord strip: click it to go there, right-click to remove it. Chords are named and numbered in the
 key where they are.
+
+## The session view
+
+**Session view** (top left, or **Tab**) swaps the timeline for a grid to jam with: scenes across,
+tracks down the side (the same tracks, mixer, effects and macros). Each cell is a slot. Click a slot to
+launch it on the next bar: its track plays it round and round instead of the timeline. Click a scene's
+name to launch the whole row (an empty slot leaves its track as it is).
+
+| To | Do this |
+|---|---|
+| Get going | **From sections** makes a scene for each of the song's sections, each track's slot looping its own part of that section. Every example song works this way |
+| Fill a slot | Drag a sound from the library onto it, or right-click it: **Put the selected clip here** (any clip: audio, notes or drums, with its pitch curve), or **Loop the timeline here** (the section at the playhead) |
+| Change a slot | Right-click: **Twice as long**, **Half as long**, **Clear the slot** |
+| Stop a track | The square beside its slots: it plays nothing, not even the timeline |
+| Back to the timeline | The arrow beside its slots, or **All timeline** for every track |
+| When launches start | **Launch: next bar**, **next beat** or **at once** |
+| Scenes | **+** beside SCENES adds one; double-click a scene's name to rename it; right-click it to insert, remove or launch |
+| Keep what you played | **Capture** writes everything you launched onto the timeline, where it played, replacing what the timeline had on those tracks there. One Ctrl+Z takes it off again |
+
+The session plays while you listen; exporting always plays the timeline (capture first to keep a jam).
+Scenes and slots are saved with the song.
 
 ## Notes and automation
 

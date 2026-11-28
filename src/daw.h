@@ -339,6 +339,21 @@ typedef struct {
 #define MAX_KEYS 64
 typedef struct { int bar, root, scale; } KeyChange;
 
+/* The session view: a grid of slots, tracks down the side and scenes across, launched live beside the
+ * timeline. A track plays the timeline until a slot is launched on it, then that slot, round and round,
+ * until it's stopped or sent back to the timeline. A slot plays a clip of its own, or loops a stretch of
+ * the track's own timeline (so a song's sections can become scenes). */
+#define MAX_SCENES 16
+enum { SLOT_EMPTY, SLOT_CLIP, SLOT_RANGE };
+typedef struct {
+    int kind;
+    char name[24];
+    double beats;           /* how long a pass is, in quarter notes */
+    Clip clip;              /* SLOT_CLIP: what it plays (its start and track aren't used) */
+    int bar;                /* SLOT_RANGE: the track's timeline from this bar (0-based), `beats` long */
+} Slot;
+enum { SESS_TIMELINE = -1, SESS_STOPPED = -2, SESS_NONE = -3 };
+
 /* The project. The audio thread reads it; the UI changes it only while holding the
  * audio device lock (see LOCK/UNLOCK in main.c). */
 typedef struct {
@@ -380,6 +395,13 @@ typedef struct {
     int nchords;
     Bend bends[MAX_BENDS];                  /* pitch curves, referred to by clips */
     int nbends;
+    Slot slots[MAX_TRACKS][MAX_SCENES];     /* the session view */
+    int nscenes;
+    char scene_names[MAX_SCENES][24];
+    /* what each track is playing live (not saved): SESS_TIMELINE, SESS_STOPPED or a scene; since when;
+     * and what it switches to at sess_q_at (SESS_NONE: nothing queued). The audio thread makes the switch. */
+    int sess_play[MAX_TRACKS], sess_q[MAX_TRACKS];
+    long sess_at[MAX_TRACKS], sess_q_at[MAX_TRACKS];
     Voice voices[MAX_VOICES];
     float bend;             /* live pitch wheel, -1..1 (not saved) */
     float modwheel;         /* live mod wheel 0..1: opens the instrument track's filter (not saved) */
@@ -545,6 +567,8 @@ long meter_bar_frame(const Project *p, double bar);
 void meter_at(const Project *p, long frame, double *bpm, int *num, int *den, int *bar, long *bar_start, long *bar_len);
 double meter_bpm_at(const Project *p, long frame);   /* the end of its last note, in frames */
 int pattern_new_id(const Project *p);
+long slot_frames(const Project *p, const Slot *s, long at);   /* how long a pass of a slot is, launched at `at` */
+void session_reset(Project *p);                  /* every track back on the timeline, nothing queued */
 DrumPat *drum_find(Project *p, int id);
 const DrumPat *drum_find_c(const Project *p, int id);
 /* Whether step `k` (counted from the clip's origin, across repeats) of row `r` plays: its chance,
@@ -578,7 +602,8 @@ int chord_voice(const SongChord *c, const int *prev, int nprev, int lo, int hi, 
 /* ---- pitch curves on clips (bend.c) ---- */
 typedef struct BendMap BendMap;
 typedef struct BendWork BendWork;
-float bend_at(const Bend *b, double sec);      /* semitones at a time from the clip's origin */
+float bend_at(const Bend *b, double sec);
+int bend_used(const Project *p, int id);        /* by a clip or a session slot */      /* semitones at a time from the clip's origin */
 const Bend *bend_find_c(const Project *p, int id);
 Bend *bend_find(Project *p, int id);
 int bend_new(Project *p);                       /* a new empty curve's id (keeping the timing), or 0 */

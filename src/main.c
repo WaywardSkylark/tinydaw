@@ -2179,6 +2179,7 @@ typedef struct {
     int nchords;
     Bend *bends;
     int nbends;
+    char tags[128];
     Slot *slots;                        /* the session's grid (NULL while it has no scenes) */
     int nscenes;
     char scene_names[MAX_SCENES][24];
@@ -2256,6 +2257,7 @@ static void state_capture(State *s)
     free(s->bends);
     s->bends = dup_mem(P.bends, (size_t)P.nbends * sizeof(Bend));
     s->nbends = s->bends ? P.nbends : 0;
+    memcpy(s->tags, P.tags, sizeof s->tags);
     free(s->slots);
     s->slots = P.nscenes ? dup_mem(P.slots, sizeof P.slots) : NULL;
     s->nscenes = P.nscenes;
@@ -2300,7 +2302,7 @@ static int state_same(const State *s)
            s->nsections == P.nsections && !memcmp(s->sections, P.sections, (size_t)P.nsections * sizeof(Section)) &&
            s->nchords == P.nchords && !memcmp(s->chords, P.chords, (size_t)P.nchords * sizeof(SongChord)) &&
            s->nbends == P.nbends && !memcmp(s->bends, P.bends, (size_t)P.nbends * sizeof(Bend)) &&
-           s->nscenes == P.nscenes && (!P.nscenes || (s->slots && !memcmp(s->slots, P.slots, sizeof P.slots))) &&
+           !strcmp(s->tags, P.tags) && s->nscenes == P.nscenes && (!P.nscenes || (s->slots && !memcmp(s->slots, P.slots, sizeof P.slots))) &&
            !memcmp(s->scene_names, P.scene_names, sizeof s->scene_names) &&
            s->key_root == P.key_root && s->key_scale == P.key_scale && s->nkeys == P.nkeys &&
            !memcmp(s->keys, P.keys, (size_t)P.nkeys * sizeof(KeyChange)) &&
@@ -2329,6 +2331,7 @@ static void state_restore(const State *s)
     P.nchords = s->nchords;
     memcpy(P.bends, s->bends, (size_t)s->nbends * sizeof(Bend));
     P.nbends = s->nbends;
+    memcpy(P.tags, s->tags, sizeof P.tags);
     if (s->slots) memcpy(P.slots, s->slots, sizeof P.slots);
     else memset(P.slots, 0, sizeof P.slots);
     P.nscenes = s->nscenes;
@@ -2382,6 +2385,8 @@ static void describe(const State *s, char *buf, size_t n)
     else if (s->nscenes != P.nscenes || (P.nscenes && (!s->slots || memcmp(s->slots, P.slots, sizeof P.slots))) ||
              memcmp(s->scene_names, P.scene_names, sizeof s->scene_names))
         snprintf(buf, n, "session");
+    else if (strcmp(s->tags, P.tags))
+        snprintf(buf, n, "tags");
     else if (s->nchords != P.nchords || memcmp(s->chords, P.chords, (size_t)P.nchords * sizeof(SongChord)))
         snprintf(buf, n, "%s", P.nchords > s->nchords ? "add chord" : P.nchords < s->nchords ? "remove chord" : "chords");
     else if (s->key_root != P.key_root || s->key_scale != P.key_scale || s->nkeys != P.nkeys ||
@@ -2579,6 +2584,8 @@ static void update_title(void)
     }
 }
 
+static void recent_add(const char *path);
+
 static int save_to(const char *path)
 {
     char msg[1200];
@@ -2589,6 +2596,7 @@ static int save_to(const char *path)
     char *full = full_path(path);
     snprintf(proj_path, sizeof proj_path, "%s", full ? full : path);
     free(full);
+    recent_add(proj_path);
     mark_saved();
     remove(autosave_file());            /* everything is in the real file now */
     status("%s", msg);
@@ -2643,6 +2651,7 @@ static int open_project(const char *path, int as_recovery)
         char *full = full_path(path);
         snprintf(proj_path, sizeof proj_path, "%s", full ? full : path);
         free(full);
+        recent_add(proj_path);
         status("%s", msg);
     }
     return 0;
@@ -4042,6 +4051,475 @@ static void examples_scan(void)
             }
 }
 
+/* ---- recent projects, and the project browser (Ctrl+O): your projects in Music/tinydaw, the ones you
+ * opened lately and the examples, each as a card with a picture of its first bars, what it is, and tags */
+
+#include <sys/stat.h>
+#define RECENT_MAX 20
+static char recent[RECENT_MAX][1024];
+static int nrecent, recent_read, recent_pick = -1, recent_map_[RECENT_MAX];
+static Col sec_col(const char *name);
+
+static const char *recent_file(void)
+{
+    static char path[1024];
+    const char *e = SDL_getenv("TINYDAW_RECENT_FILE");
+    if (e && *e) return e;
+    if (!path[0]) {
+        char dir[900];
+        user_dir("config", dir, sizeof dir);
+        snprintf(path, sizeof path, "%s/recent.txt", dir);
+    }
+    return path;
+}
+
+static void recent_load(void)
+{
+    recent_read = 1;
+    nrecent = 0;
+    if (headless && !SDL_getenv("TINYDAW_RECENT_FILE")) return;
+    FILE *f = fopen(recent_file(), "r");
+    char line_[1100];
+    while (f && nrecent < RECENT_MAX && fgets(line_, sizeof line_, f)) {
+        line_[strcspn(line_, "\r\n")] = 0;
+        if (line_[0]) snprintf(recent[nrecent++], sizeof recent[0], "%.1023s", line_);
+    }
+    if (f) fclose(f);
+}
+
+static void recent_add(const char *path)        /* to the front of the list (opened or saved) */
+{
+    if (!recent_read) recent_load();
+    if (!path || !path[0] || (headless && !SDL_getenv("TINYDAW_RECENT_FILE"))) return;
+    char keep[1024];
+    snprintf(keep, sizeof keep, "%s", path);
+    int w = 0;
+    for (int i = 0; i < nrecent; i++)
+        if (strcmp(recent[i], keep)) memmove(recent[w++], recent[i], sizeof recent[0]);
+    nrecent = w < RECENT_MAX - 1 ? w : RECENT_MAX - 1;
+    memmove(recent[1], recent[0], (size_t)nrecent * sizeof recent[0]);
+    snprintf(recent[0], sizeof recent[0], "%s", keep);
+    nrecent++;
+    FILE *f = fopen(recent_file(), "w");
+    if (!f) return;
+    for (int i = 0; i < nrecent; i++) fprintf(f, "%s\n", recent[i]);
+    fclose(f);
+}
+
+static long file_mtime(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? (long)st.st_mtime : -1;
+}
+
+typedef struct { char path[1024]; long mtime; int ok; ProjectInfo info; } BrowseItem;
+static BrowseItem *bcache;                      /* every project looked at so far, read again when it changes */
+static int nbcache, capbcache;
+static int bitems[512], nbitems;                /* the tab's projects, as indexes into bcache */
+static int browse_open, browse_tab, browse_scroll, browse_content_h, browse_editing = -1;
+static char browse_q[64], browse_tag[48], browse_tags_buf[128];
+static SDL_Rect browse_card_r[512];
+
+static int browse_item(const char *path)        /* the cached look at a project (read now if new or changed) */
+{
+    long mt = file_mtime(path);
+    if (mt < 0) return -1;
+    for (int i = 0; i < nbcache; i++)
+        if (!strcmp(bcache[i].path, path)) {
+            if (bcache[i].mtime != mt) {
+                bcache[i].mtime = mt;
+                bcache[i].ok = project_peek(path, &bcache[i].info) == 0;
+            }
+            return bcache[i].ok ? i : -1;
+        }
+    if (nbcache >= capbcache) {
+        int nc = capbcache ? capbcache * 2 : 32;
+        BrowseItem *nb = realloc(bcache, sizeof(BrowseItem) * (size_t)nc);
+        if (!nb) return -1;
+        bcache = nb;
+        capbcache = nc;
+    }
+    BrowseItem *b = &bcache[nbcache];
+    snprintf(b->path, sizeof b->path, "%s", path);
+    b->mtime = mt;
+    b->ok = project_peek(path, &b->info) == 0;
+    return b->ok ? nbcache++ : -1;
+}
+
+static void browse_walk(const char *dir, int depth)   /* every .tdaw in a folder and the ones under it */
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    while (d && (e = readdir(d)) && nbitems < 512) {
+        if (e->d_name[0] == '.') continue;
+        char p[1100];
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        size_t n = strlen(e->d_name);
+        if (n > 5 && !strcmp(e->d_name + n - 5, ".tdaw")) {
+            int i = browse_item(p);
+            if (i >= 0) bitems[nbitems++] = i;
+        } else if (depth > 0) {
+            struct stat st;
+            if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) browse_walk(p, depth - 1);
+        }
+    }
+    if (d) closedir(d);
+}
+
+static int browse_cmp_mtime(const void *a, const void *b)
+{
+    long x = bcache[*(const int *)a].mtime, y = bcache[*(const int *)b].mtime;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void browse_projects_dir(char *buf, size_t n)
+{
+    const char *e = SDL_getenv("TINYDAW_PROJECTS_DIR");
+    if (e && *e) {
+        snprintf(buf, n, "%s", e);
+        return;
+    }
+    char m[900];
+    user_dir("music", m, sizeof m);
+    snprintf(buf, n, "%s/tinydaw", m);
+}
+
+static void browse_scan(void)
+{
+    nbitems = 0;
+    if (browse_tab == 0) {                       /* recent: in the order they were last used */
+        if (!recent_read) recent_load();
+        for (int i = 0; i < nrecent && nbitems < 512; i++) {
+            int k = browse_item(recent[i]);
+            if (k >= 0) bitems[nbitems++] = k;
+        }
+    } else if (browse_tab == 1) {                /* yours: newest first */
+        char d[1000];
+        browse_projects_dir(d, sizeof d);
+        browse_walk(d, 2);
+        qsort(bitems, (size_t)nbitems, sizeof(int), browse_cmp_mtime);
+    } else {
+        examples_scan();
+        for (int i = 0; i < nexamples && nbitems < 512; i++) {
+            int k = browse_item(example_path[i]);
+            if (k >= 0) bitems[nbitems++] = k;
+        }
+    }
+}
+
+static void browse_show(void)
+{
+    if (!recent_read) recent_load();
+    browse_open = 1;
+    browse_scroll = 0;
+    browse_editing = -1;
+    if (!nrecent && browse_tab == 0) browse_tab = 1;
+    browse_scan();
+}
+
+static void browse_name(const BrowseItem *b, char *buf, size_t n)   /* its title, or its file name */
+{
+    if (b->info.title[0]) {
+        snprintf(buf, n, "%s", b->info.title);
+        return;
+    }
+    const char *base = path_base(b->path);
+    size_t len = strlen(base);
+    snprintf(buf, n, "%.*s", (int)(len > 5 ? len - 5 : len), base);
+}
+
+static int has_tag(const char *tags, const char *tag)   /* comma-separated, any case */
+{
+    char tmp[128];
+    snprintf(tmp, sizeof tmp, "%s", tags);
+    for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) {
+        while (*t == ' ') t++;
+        size_t n = strlen(t);
+        while (n && t[n - 1] == ' ') t[--n] = 0;
+        if (!strcasecmp(t, tag)) return 1;
+    }
+    return 0;
+}
+
+static int browse_matches(const BrowseItem *b)
+{
+    if (browse_tag[0] && !has_tag(b->info.tags, browse_tag)) return 0;
+    if (!browse_q[0]) return 1;
+    char name[128], hay[400];
+    browse_name(b, name, sizeof name);
+    snprintf(hay, sizeof hay, "%.127s %.120s %.127s", name, path_base(b->path), b->info.tags);
+    for (char *q = hay; *q; q++) *q = (char)tolower((unsigned char)*q);
+    char nd[64];
+    snprintf(nd, sizeof nd, "%s", browse_q);
+    for (char *q = nd; *q; q++) *q = (char)tolower((unsigned char)*q);
+    return strstr(hay, nd) != NULL;
+}
+
+static void browse_thumb(SDL_Rect r, const ProjectInfo *in)   /* its first 16 bars: sections, then each track's clips */
+{
+    fill(r, PANEL2);
+    double fpb = in->ts_num * 4.0 / (in->ts_den ? in->ts_den : 4) * 60.0 / (in->bpm > 0 ? in->bpm : 120) * in->rate;
+    double span = 16 * fpb;
+    for (int b = 1; b < 16; b++) {
+        int x = r.x + (int)(b * fpb / span * r.w);
+        line(x, r.y, x, r.y + r.h - 1, b % 4 ? tone(PANEL2, 1.08f) : tone(PANEL2, 1.25f));
+    }
+    for (int i = 0; i < in->npsec; i++) {
+        int x0 = r.x + (int)(in->sections[i].bar * fpb / span * r.w), x1 = r.x + (int)((in->sections[i].bar + in->sections[i].bars) * fpb / span * r.w);
+        if (x0 >= r.x + r.w) continue;
+        if (x1 > r.x + r.w) x1 = r.x + r.w;
+        fill((SDL_Rect){x0, r.y, x1 - x0 - 1, 4}, sec_col(in->sections[i].name));
+    }
+    int rows = in->ntracks > 0 ? (in->ntracks < 12 ? in->ntracks : 12) : 1, top = r.y + 6, rh = (r.h - 7) / rows;
+    for (int i = 0; i < in->npeek; i++) {
+        int t = in->clips[i].track;
+        if (t >= rows) continue;
+        int x0 = r.x + (int)(in->clips[i].start / span * r.w), x1 = r.x + (int)((in->clips[i].start + in->clips[i].length) / span * r.w);
+        if (x0 >= r.x + r.w) continue;
+        if (x1 > r.x + r.w) x1 = r.x + r.w;
+        if (x1 - x0 < 2) x1 = x0 + 2;
+        fill((SDL_Rect){x0, top + t * rh, x1 - x0, rh > 2 ? rh - 1 : 1}, TRACK_COL[t % 16]);
+    }
+    outline(r, LINE);
+}
+
+static void browse_when(long mt, char *buf, size_t n)   /* "today 14:02", "yesterday", "3 Nov 2026" */
+{
+    time_t now = time(NULL), t = (time_t)mt;
+    struct tm a = *localtime(&now), b = *localtime(&t);
+    if (a.tm_year == b.tm_year && a.tm_yday == b.tm_yday) strftime(buf, n, "today %H:%M", &b);
+    else if (a.tm_year == b.tm_year && a.tm_yday - b.tm_yday == 1) snprintf(buf, n, "yesterday");
+    else strftime(buf, n, "%d %b %Y", &b);
+}
+
+static void browse_open_item(int k)
+{
+    const BrowseItem *b = &bcache[k];
+    browse_open = 0;
+    if (browse_tab == 2) {                        /* an example: an untitled copy, as the menu does */
+        snprintf(act_path, sizeof act_path, "%s", b->path);
+        request(ACT_OPEN_EXAMPLE, b->path);
+    } else {
+        request(ACT_OPEN_PATH, b->path);
+    }
+}
+
+static void browse_tags_commit(int k)
+{
+    BrowseItem *b = &bcache[k];
+    char clean[128];                             /* "a, b ,c" as "a, b, c" */
+    int w = 0;
+    char tmp[128];
+    snprintf(tmp, sizeof tmp, "%s", browse_tags_buf);
+    clean[0] = 0;
+    for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) {
+        while (*t == ' ') t++;
+        size_t n = strlen(t);
+        while (n && t[n - 1] == ' ') t[--n] = 0;
+        if (!n) continue;
+        w += snprintf(clean + w, sizeof clean - (size_t)w, w ? ", %s" : "%s", t);
+        if (w >= (int)sizeof clean - 1) break;
+    }
+    char *full = full_path(b->path);
+    int open_now = proj_path[0] && full && !strcmp(full, proj_path);
+    free(full);
+    if (project_set_tags(b->path, clean) != 0) {
+        status("Couldn't write the tags into %s", path_base(b->path));
+        return;
+    }
+    if (open_now) snprintf(P.tags, sizeof P.tags, "%s", clean);   /* (and the open copy, so a save keeps them) */
+    snprintf(b->info.tags, sizeof b->info.tags, "%s", clean);
+    b->mtime = file_mtime(b->path);
+    status(clean[0] ? "Tags on %s: %s" : "No tags on %s now", path_base(b->path), clean);
+}
+
+static void browse_draw(void)
+{
+    SDL_Rect all = {0, 0, W, H};
+    fill(all, BG);
+    int x = 20, y = 14, w = W - 40;
+    text(x, y + 6, "PROJECTS", DIM);
+    static const char *const TABS[3] = {"Recent", "My projects", "Examples"};
+    int tab = browse_tab;
+    subtabs(x + 100, y, 420, TABS, 3, &tab);
+    if (tab != browse_tab) {
+        browse_tab = tab;
+        browse_scroll = 0;
+        browse_editing = -1;
+        browse_tag[0] = 0;
+        tf_end(1);
+        browse_scan();
+    }
+    SDL_Rect sq = {x + 540, y, w - 540 - 260, 30};
+    if (sq.w > 120) textfield(sq, browse_q, sizeof browse_q, 0, "search by name or tag");
+    if (button((SDL_Rect){x + w - 250, y, 150, 30}, "Another file...", 0)) {
+        browse_open = 0;
+        request(ACT_OPEN, NULL);
+    }
+    tip((SDL_Rect){x + w - 250, y, 150, 30}, "Open a project from anywhere with your system's file dialog");
+    if (button((SDL_Rect){x + w - 92, y, 92, 30}, "Close", 0)) browse_open = 0;
+    y += 44;
+
+    /* the tags in this tab, to filter by */
+    char seen[40][48];
+    int nseen = 0, tx = x;
+    for (int i = 0; i < nbitems && nseen < 40; i++) {
+        char tmp[128];
+        snprintf(tmp, sizeof tmp, "%s", bcache[bitems[i]].info.tags);
+        for (char *t = strtok(tmp, ","); t && nseen < 40; t = strtok(NULL, ",")) {
+            while (*t == ' ') t++;
+            size_t n = strlen(t);
+            while (n && t[n - 1] == ' ') t[--n] = 0;
+            int dup = !n;
+            for (int k = 0; k < nseen && !dup; k++) dup = !strcasecmp(seen[k], t);
+            if (!dup) snprintf(seen[nseen++], sizeof seen[0], "%.47s", t);
+        }
+    }
+    if (nseen) {
+        text(tx, y + 5, "Tags:", DIM);
+        tx += text_w("Tags:") + 10;
+        for (int k = 0; k < nseen; k++) {
+            int cw = text_w(seen[k]) + 16;
+            if (tx + cw > x + w) break;
+            int on = !strcasecmp(browse_tag, seen[k]);
+            if (button((SDL_Rect){tx, y, cw, 24}, seen[k], on)) {
+                if (on) browse_tag[0] = 0;
+                else snprintf(browse_tag, sizeof browse_tag, "%.47s", seen[k]);
+                browse_scroll = 0;
+            }
+            tx += cw + 6;
+        }
+        y += 32;
+    }
+
+    /* the cards */
+    SDL_Rect area = {x, y, w, H - y - 10};
+    int cw = 300, ch = 172, gap = 14, cols = (w + gap) / (cw + gap);
+    cols = cols < 1 ? 1 : cols;
+    cw = (w - (cols - 1) * gap) / cols;
+    int shown[512], ns = 0;
+    for (int i = 0; i < nbitems; i++)
+        if (browse_matches(&bcache[bitems[i]])) shown[ns++] = bitems[i];
+    browse_content_h = ((ns + cols - 1) / cols) * (ch + gap);
+    int maxs = browse_content_h - area.h > 0 ? browse_content_h - area.h : 0;
+    if (hit(area) && wheel_y) {
+        browse_scroll -= wheel_y * 60;
+        wheel_y = 0;
+    }
+    browse_scroll = browse_scroll < 0 ? 0 : browse_scroll > maxs ? maxs : browse_scroll;
+    if (!ns) {
+        const char *why = browse_tab == 0 ? "Nothing opened or saved lately: projects you open or save show up here."
+                        : browse_tab == 1 ? "No projects yet in Music/tinydaw: save one (Ctrl+S) and it shows up here."
+                                          : "No examples found next to the program.";
+        text(x, y + 10, browse_q[0] || browse_tag[0] ? "Nothing matches." : why, DIM);
+    }
+    SDL_RenderSetClipRect(ren, &area);
+    char buf[200], nm[128], when[48];
+    char *open_full = proj_path[0] ? full_path(proj_path) : NULL;
+    for (int i = 0; i < ns; i++) {
+        int k = shown[i];
+        const BrowseItem *b = &bcache[k];
+        const ProjectInfo *in = &b->info;
+        SDL_Rect r = {x + (i % cols) * (cw + gap), y + (i / cols) * (ch + gap) - browse_scroll, cw, ch};
+        browse_card_r[i] = r;
+        if (r.y + r.h < area.y || r.y > area.y + area.h) continue;
+        int hov = hit(r) && hit(area) && browse_editing != k;
+        fill(r, hov ? PANEL3 : PANEL);
+        outline(r, hov ? ACCENT : LINE);
+        browse_thumb((SDL_Rect){r.x + 8, r.y + 8, r.w - 16, 66}, in);
+        browse_name(b, nm, sizeof nm);
+        int is_open = open_full && !strcmp(open_full, b->path);
+        int ty = r.y + 82;
+        text_clip((SDL_Rect){r.x + 10, ty, r.w - 20, font_h + 2}, r.x + 10, ty, nm, is_open ? ACCENT : HEAD);
+        ty += font_h + 6;
+        char key[40] = "";
+        if (in->has_key && in->key_scale >= 0 && in->key_scale < NSCALES)
+            snprintf(key, sizeof key, " · %s %s", pitch_name(in->key_root, key_uses_flats(in->key_root, in->key_scale)),
+                     SCALES[in->key_scale].name);
+        snprintf(buf, sizeof buf, "%.0f BPM%s · %d:%02d · %d track%s%s", in->bpm, key, (int)in->seconds / 60,
+                 (int)in->seconds % 60, in->ntracks, in->ntracks == 1 ? "" : "s", in->nscenes ? " · session" : "");
+        text_clip((SDL_Rect){r.x + 10, ty, r.w - 20, font_h + 2}, r.x + 10, ty, buf, TEXT);
+        ty += font_h + 5;
+        browse_when(b->mtime, when, sizeof when);
+        snprintf(buf, sizeof buf, "%s%s", is_open ? "open now · " : "", when);
+        text_clip((SDL_Rect){r.x + 10, ty, r.w - 20, font_h + 2}, r.x + 10, ty, buf, DIM);
+        ty += font_h + 7;
+        SDL_Rect tb = {r.x + r.w - 62, ty - 2, 54, 22};   /* tags, and the button that edits them */
+        if (browse_editing == k) {
+            SDL_Rect fr = {r.x + 8, ty - 2, r.w - 16, 24};
+            textfield(fr, browse_tags_buf, sizeof browse_tags_buf, 0, "tags, with commas");
+            if (tf.buf != browse_tags_buf) {      /* Enter or a click away keeps them; Esc leaves them */
+                if (strcmp(browse_tags_buf, b->info.tags)) browse_tags_commit(k);
+                browse_editing = -1;
+            }
+            continue;
+        }
+        int cx = r.x + 10;
+        if (in->tags[0]) {
+            char tmp[128];
+            snprintf(tmp, sizeof tmp, "%s", in->tags);
+            for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) {
+                while (*t == ' ') t++;
+                int tw2 = text_w(t) + 12;
+                if (cx + tw2 > tb.x - 4) break;
+                fill((SDL_Rect){cx, ty - 1, tw2, font_h + 4}, wash(ACCENT, 0.35f));
+                text(cx + 6, ty + 1, t, TEXT);
+                cx += tw2 + 4;
+            }
+        } else if (browse_tab != 2) {
+            text(cx, ty + 1, "no tags", tone(DIM, 0.8f));
+        }
+        if (browse_tab != 2) {                    /* (the examples' tags stay as they come) */
+            if (button(tb, "Tags", 0)) {
+                browse_editing = k;
+                snprintf(browse_tags_buf, sizeof browse_tags_buf, "%s", in->tags);
+                tf_end(1);
+                tf.buf = browse_tags_buf;
+                tf.cap = sizeof browse_tags_buf;
+                tf.path = 0;
+                tf.caret = (size_t)-1;
+                tf_drawn = 1;
+                tf.r = (SDL_Rect){r.x + 8, ty - 2, r.w - 16, 24};
+                snprintf(tf.orig, sizeof tf.orig, "%s", browse_tags_buf);
+                SDL_StartTextInput();
+            }
+            tip(tb, "Words to find it by, with commas between them (they're kept in the project file)");
+        }
+        if (hov && lpress) {
+            lpress = 0;
+            free(open_full);
+            open_full = NULL;
+            SDL_RenderSetClipRect(ren, NULL);
+            browse_open_item(k);
+            return;
+        }
+        if (hov) tip(r, "%s: click to open it%s", b->path, browse_tab == 2 ? " (as an untitled copy)" : "");
+    }
+    free(open_full);
+    SDL_RenderSetClipRect(ren, NULL);
+    lpress = rpress = 0;                         /* nothing under the browser takes clicks */
+}
+
+static void recent_menu(SDL_Rect anchor)        /* the newest few, as a drop-down */
+{
+    if (!recent_read) recent_load();
+    int n = 0;
+    for (int i = 0; i < nrecent && n < 10; i++)
+        if (file_mtime(recent[i]) >= 0) {
+            recent_map_[n] = i;
+            snprintf(dd.items[n++], sizeof dd.items[0], "%.46s", path_base(recent[i]));
+        }
+    if (!n) {
+        status("Nothing opened or saved lately");
+        return;
+    }
+    dd.open = 1;
+    dd.sel = &recent_pick;
+    recent_pick = -1;
+    dd.n = n;
+    dd.anchor = anchor;
+}
+
 static void examples_menu(SDL_Rect anchor)   /* the list of examples, as a drop-down */
 {
     examples_scan();
@@ -4061,7 +4539,8 @@ static void file_menu(void)
 {
     int w = 270, ih = 30;
     static const struct { const char *label, *keys; } ITEMS[] = {
-        {"New", "Ctrl+N"}, {"Open...", "Ctrl+O"}, {"Save", "Ctrl+S"}, {"Save As...", "Ctrl+Shift+S"},
+        {"New", "Ctrl+N"}, {"Browse projects...", "Ctrl+O"}, {"Open a recent project", NULL}, {"Open a file...", NULL},
+        {"Save", "Ctrl+S"}, {"Save As...", "Ctrl+Shift+S"},
         {"Recover unsaved work", NULL}, {NULL, NULL}, {"Export audio...", "Ctrl+E"}, {NULL, NULL},
         {"Settings", "Ctrl+,"}, {"Full-screen show", "F11"}, {NULL, NULL}, {"Quit", "Ctrl+Q"},
         {NULL, NULL}, {"Open an example song", NULL}, {"Import a MIDI file...", NULL}, {"Export MIDI...", NULL},
@@ -4078,7 +4557,7 @@ static void file_menu(void)
             y += 9;
             continue;
         }
-        int enabled = i != 4 || autosave_exists();
+        int enabled = i != 6 || autosave_exists();
         if (menu_item((SDL_Rect){m.x + 1, y, w - 2, ih}, ITEMS[i].label, ITEMS[i].keys, enabled)) act = i;
         y += ih;
     }
@@ -4088,18 +4567,20 @@ static void file_menu(void)
     lpress = rpress = 0;
     switch (act) {
     case 0: request(ACT_NEW, NULL); break;
-    case 1: request(ACT_OPEN, NULL); break;
-    case 2: save_project(0); break;
-    case 3: save_project(1); break;
-    case 4: request(ACT_RECOVER, NULL); break;
-    case 6: open_export(); break;
-    case 8: if (!settings_open) open_panel(RI_SETTINGS); break;
-    case 9: show_toggle(); break;
-    case 11: request(ACT_QUIT, NULL); break;
-    case 13: examples_menu((SDL_Rect){m.x + m.w - 4, y - 4 * ih - font_h, 4, 4}); break;
-    case 14: midi_file_dialog(0); break;
-    case 15: midi_file_dialog(1); break;
-    case 16: mixwin_open(); break;
+    case 1: browse_show(); break;
+    case 2: recent_menu((SDL_Rect){m.x + m.w - 4, m.y + 4 + 2 * ih, 4, 4}); break;
+    case 3: request(ACT_OPEN, NULL); break;
+    case 4: save_project(0); break;
+    case 5: save_project(1); break;
+    case 6: request(ACT_RECOVER, NULL); break;
+    case 8: open_export(); break;
+    case 10: if (!settings_open) open_panel(RI_SETTINGS); break;
+    case 11: show_toggle(); break;
+    case 13: request(ACT_QUIT, NULL); break;
+    case 15: examples_menu((SDL_Rect){m.x + m.w - 4, y - 4 * ih - font_h, 4, 4}); break;
+    case 16: midi_file_dialog(0); break;
+    case 17: midi_file_dialog(1); break;
+    case 18: mixwin_open(); break;
     }
 }
 
@@ -12251,6 +12732,10 @@ static void key(SDL_Keysym k)
 {
     int ctrl = k.mod & KMOD_CTRL, hk = 0, hi = 0;
     long nudge = snap_frames() ? snap_frames() : SR / 100;
+    if (browse_open) {                  /* the project browser takes the keyboard: Esc closes it */
+        if (k.sym == SDLK_ESCAPE) browse_open = 0;
+        return;
+    }
     if (export_open) {                  /* the dialog takes the keyboard */
         if (SDL_AtomicGet(&fd_state) != 0) return;          /* the system file dialog is up */
         if (k.sym == SDLK_ESCAPE) export_open = 0;
@@ -12301,7 +12786,7 @@ static void key(SDL_Keysym k)
         case SDLK_z: undo_redo(shift != 0); return;
         case SDLK_y: undo_redo(1); return;
         case SDLK_s: save_project(shift != 0); return;
-        case SDLK_o: request(ACT_OPEN, NULL); return;
+        case SDLK_o: browse_show(); return;
         case SDLK_n: request(ACT_NEW, NULL); return;
         case SDLK_r:                    /* reverse: every selected clip follows the one clicked last */
             if (selected >= 0) {
@@ -16951,6 +17436,112 @@ static int selftest(void)
         history_check();
     }
 
+    /* ---- the project browser and recent projects */
+    {
+        examples_scan();
+        int dk = -1;
+        for (int i = 0; i < nexamples; i++)
+            if (strstr(example_title[i], "Disco")) dk = i;
+        ProjectInfo *pi = malloc(sizeof *pi);
+        int peeked = dk >= 0 && project_peek(example_path[dk], pi) == 0;
+        check(peeked && !strcmp(pi->title, "Disco: Mirror Ball") && pi->bpm == 120 && pi->ntracks == 8 && pi->npeek > 10 &&
+                  pi->npsec == 5 && pi->has_key && pi->key_root == 9 && pi->seconds > 50,
+              "a quick look at a project file: its title, tempo, key, tracks, sections and first clips");
+        char td2[900], pa[1200], pb[1200], rf[1200];
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        snprintf(td2, sizeof td2, "%s/tinydaw-browse-%u", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        ensure_dir(td2);
+        snprintf(pa, sizeof pa, "%s/alpha.tdaw", td2);
+        snprintf(pb, sizeof pb, "%s/beta.tdaw", td2);
+        snprintf(rf, sizeof rf, "%s/recent.txt", td2);
+        new_project();
+        make_demo();
+        save_to(pa);                             /* (not in the recent list: the test's file isn't set yet) */
+        snprintf(P.tags, sizeof P.tags, "demo");
+        save_to(pb);
+        FILE *fa = fopen(pa, "rb");
+        char before[200000];
+        size_t nbefore = fa ? fread(before, 1, sizeof before - 1, fa) : 0;
+        if (fa) fclose(fa);
+        before[nbefore] = 0;
+        int st = project_set_tags(pa, "lo-fi, sketch") == 0;
+        fa = fopen(pa, "rb");
+        char after[200000];
+        size_t nafter = fa ? fread(after, 1, sizeof after - 1, fa) : 0;
+        if (fa) fclose(fa);
+        after[nafter] = 0;
+        int ntag = 0;
+        for (char *q = after; (q = strstr(q, "\ntags ")); q++) ntag++;
+        Project *q = malloc(sizeof *q);
+        char msg2[256];
+        int ld = project_load(q, pa, msg2, sizeof msg2) == 0;
+        check(st && ntag == 1 && nafter == nbefore + strlen("tags lo-fi, sketch\n") && ld && !strcmp(q->tags, "lo-fi, sketch"),
+              "tags go into a project file as one line, the rest left as it was, and open with it");
+        if (ld) project_free(q);
+        project_set_tags(pa, "lo-fi");
+        ld = project_load(q, pa, msg2, sizeof msg2) == 0;
+        check(ld && !strcmp(q->tags, "lo-fi"), "changing the tags replaces the line");
+        if (ld) project_free(q);
+        free(q);
+        SDL_setenv("TINYDAW_RECENT_FILE", rf, 1);
+        recent_read = 0;
+        nrecent = 0;
+        recent_add(pa);
+        recent_add(pb);
+        recent_add(pa);
+        recent_load();
+        check(nrecent == 2 && !strcmp(recent[0], pa) && !strcmp(recent[1], pb), "recent projects: newest first, each once, kept on disk");
+        /* the browser */
+        SDL_setenv("TINYDAW_PROJECTS_DIR", td2, 1);
+        browse_tab = 1;
+        key((SDL_Keysym){.sym = SDLK_o, .mod = KMOD_CTRL});
+        frame();
+        check(browse_open && nbitems == 2, "Ctrl+O opens the project browser, with your projects in it");
+        snprintf(browse_q, sizeof browse_q, "beta");
+        frame();
+        int one = browse_card_r[0].w > 0;
+        snprintf(browse_q, sizeof browse_q, "zzz");
+        frame();
+        int none = 1;
+        for (int i = 0; i < nbitems; i++) none &= !browse_matches(&bcache[bitems[i]]);
+        browse_q[0] = 0;
+        snprintf(browse_tag, sizeof browse_tag, "LO-FI");
+        int by_tag = 0;
+        for (int i = 0; i < nbitems; i++) by_tag += browse_matches(&bcache[bitems[i]]);
+        browse_tag[0] = 0;
+        check(one && none && by_tag == 1, "searching by name and filtering by a tag narrow the list");
+        new_project();
+        frame();
+        history_check();
+        int which = -1;
+        for (int i = 0; i < nbitems; i++)
+            if (!strcmp(bcache[bitems[i]].path, pb)) which = i;
+        frame();
+        SDL_Rect cr = browse_card_r[which >= 0 ? which : 0];
+        sim(cr.x + cr.w / 2, cr.y + 30, 1, 0, 0, 0);
+        sim(cr.x + cr.w / 2, cr.y + 30, 0, 1, 0, 0);
+        check(!browse_open && !strcmp(path_base(proj_path), "beta.tdaw") && !strcmp(P.tags, "demo"),
+              "clicking a project's card opens it");
+        browse_show();
+        frame();
+        key((SDL_Keysym){.sym = SDLK_ESCAPE});
+        check(!browse_open, "Esc closes the browser");
+        remove(pa);
+        remove(pb);
+        remove(rf);
+        rmdir(td2);
+        SDL_setenv("TINYDAW_RECENT_FILE", "", 1);
+        SDL_setenv("TINYDAW_PROJECTS_DIR", "", 1);
+        recent_read = 0;
+        nrecent = 0;
+        browse_tab = 0;
+        free(pi);
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
     /* ---- the Singer's pitch curve */
     {
         VocalSpec t;
@@ -20062,7 +20653,7 @@ static void frame(void)
     /* while the export dialog is open, the rest of the window gets no input */
     int smx = mx, smy = my, slp = lpress, srp = rpress, swx = wheel_x, swy = wheel_y;
     int picking = SDL_AtomicGet(&fd_state) != 0;
-    int modal = export_open || export_pending || menu_open || met_open || confirm_act || picking || cm.open || chp_open;
+    int modal = export_open || export_pending || menu_open || met_open || confirm_act || picking || cm.open || chp_open || browse_open;
     if (modal) {
         mx = my = -10000;
         lpress = rpress = wheel_x = wheel_y = 0;
@@ -20121,6 +20712,7 @@ static void frame(void)
         if (picking) lpress = rpress = 0;  /* the system file dialog has the mouse */
         export_dialog();
     }
+    if (browse_open && !picking && !confirm_act) browse_draw();   /* over everything else */
     if (cm.open && !picking) cm_draw();
     if (menu_open && !picking) file_menu();
     if (met_open && !picking) metronome_menu();
@@ -20163,6 +20755,10 @@ static void frame(void)
         do_export_now();
     }
 
+    if (dd.changed_for == &recent_pick) {    /* a recent project was picked from the list */
+        dd.changed_for = NULL;
+        if (recent_pick >= 0 && recent_pick < nrecent) request(ACT_OPEN_PATH, recent[recent_map_[recent_pick]]);
+    }
     if (dd.changed_for == &example_pick) {   /* an example was picked from the list */
         dd.changed_for = NULL;
         if (example_pick >= 0 && example_pick < nexamples) request(ACT_OPEN_EXAMPLE, example_path[example_pick]);
@@ -20621,6 +21217,12 @@ int main(int argc, char **argv)
             chp_idx = atoi(getenv("TINYDAW_SHOT_CHORD")) % P.nchords;
             chd_sel = chp_idx;
             chp_open = 1;
+        }
+        if (getenv("TINYDAW_SHOT_BROWSE")) {     /* the project browser on tab n (2: the examples) */
+            browse_tab = atoi(getenv("TINYDAW_SHOT_BROWSE"));
+            browse_show();
+            browse_tab = atoi(getenv("TINYDAW_SHOT_BROWSE"));
+            browse_scan();
         }
         if (getenv("TINYDAW_SHOT_SESSION")) {    /* the session view, scenes from sections, two slots playing */
             session_view = 1;

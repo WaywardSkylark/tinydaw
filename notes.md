@@ -5,6 +5,33 @@ what was decided along the way. Newest first. It's here to give context to whoev
 next. The manual (`docs/manual.md`) says how things work for users; this says why they're built the
 way they are.
 
+## Unreleased (after 0.8.5)
+
+### 2026-11-28: Recent projects and a project browser
+
+Asked for: a way to find the dozens of .tdaw files in Music/tinydaw: a browser with a list,
+thumbnails of the first bars, and tags.
+
+- **Browser** (`browse_draw`, a full-window view; Ctrl+O now opens it, and the system dialog is
+  "Another file..." in it or "Open a file..." in the menu): tabs Recent, My projects (Music/tinydaw
+  walked two folders deep, newest first; `TINYDAW_PROJECTS_DIR` overrides it) and Examples (open as
+  untitled copies, like the menu). It has search over name, file name and tags, tag chips to filter by,
+  and a click to open (through `request()`, so unsaved changes are asked about). Esc closes it.
+- **Cards** come from `project_peek()` (project.c): a quick line scan (title, tempo, meter, key,
+  tags, track, clip, section, chord and scene counts, the clips in the first 16 bars, the length) that
+  makes no sounds. They're cached by path and modification time in `bcache`. The thumbnail places clips
+  by the opening tempo and meter (an approximation if the tempo changes early). A file with chords but
+  no `key` line is C major.
+- **Tags** live in the project (`Project.tags`, a `tags a, b` line), so they travel with the file, and
+  they're part of undo and dirty. Editing a closed project's tags uses `project_set_tags()`, which
+  rewrites only that line (a temp file then a rename). If it's the open project, `P.tags` follows so a
+  later save keeps them. The examples' tags can't be edited.
+- **Recent:** `recent.txt` in the config folder, newest first, 20 at most, added on every open and save
+  (`TINYDAW_RECENT_FILE` overrides it; headless runs don't touch it). ☰ > Open a recent project lists
+  the newest 10 that still exist.
+- **Tests:** 8 checks: peek, tags written as one line (the rest byte for byte) and replaced, recent
+  order, Ctrl+O, search, tag filter, clicking a card opening it, Esc.
+
 ## 0.8.5 (released 2026-11-28)
 
 ### 2026-11-28: The session view (clip launcher)

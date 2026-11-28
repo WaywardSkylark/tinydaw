@@ -144,6 +144,7 @@ int project_save(const Project *p, const char *path, char *msg, size_t msglen)
     }
     for (int i = 0; i < p->nsections; i++)
         fprintf(f, "section %d %d %s\n", p->sections[i].bar, p->sections[i].bars, p->sections[i].name);
+    if (p->tags[0]) fprintf(f, "tags %s\n", p->tags);
     for (int i = 0; i < p->nscenes; i++) fprintf(f, "scene %d %s\n", i, p->scene_names[i]);
     for (int t = 0; t < p->ntracks; t++)
         for (int i = 0; i < p->nscenes; i++) {
@@ -529,6 +530,9 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
                 b->at[b->n] = at;
                 b->semis[b->n++] = st;
             }
+        } else if (!strcmp(word, "tags")) {
+            snprintf(p->tags, sizeof p->tags, "%.127s", line[4] ? line + 5 : "");
+            p->tags[strcspn(p->tags, "\r\n")] = 0;
         } else if (!strcmp(word, "scene")) {
             int i = -1, nm = 0;
             ok = sscanf(line, "scene %d %n", &i, &nm) >= 1 && i >= 0 && i < MAX_SCENES;
@@ -692,4 +696,114 @@ fail:
     project_free(p);
     g_rate = old_rate;
     return -1;
+}
+
+/* ---- the project browser's quick look */
+
+int project_peek(const char *path, ProjectInfo *o)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    memset(o, 0, sizeof *o);
+    o->bpm = 120;
+    o->ts_num = o->ts_den = 4;
+    o->rate = 48000;
+    char line[2048];
+    int ok = fgets(line, sizeof line, f) && !strncmp(line, MAGIC, strlen(MAGIC) - 1);
+    long end = 0, bar16 = 0;
+    int in_sample = 0;
+    while (ok && fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char word[16] = "";
+        sscanf(line, "%15s", word);
+        if (!strcmp(word, "sample")) in_sample = 1;
+        else if (!strcmp(word, "end")) in_sample = 0;
+        if (in_sample) continue;
+        if (!strcmp(word, "rate")) sscanf(line, "rate %d", &o->rate);
+        else if (!strcmp(word, "bpm")) sscanf(line, "bpm %lf", &o->bpm);
+        else if (!strcmp(word, "meter")) sscanf(line, "meter %d %d", &o->ts_num, &o->ts_den);
+        else if (!strcmp(word, "title")) snprintf(o->title, sizeof o->title, "%.95s", line + 6);
+        else if (!strcmp(word, "tags")) snprintf(o->tags, sizeof o->tags, "%.127s", line[4] ? line + 5 : "");
+        else if (!strcmp(word, "key")) o->has_key = sscanf(line, "key %d %d", &o->key_root, &o->key_scale) == 2;
+        else if (!strcmp(word, "track")) o->ntracks++;
+        else if (!strcmp(word, "harmony")) o->nchords++;
+        else if (!strcmp(word, "scene")) o->nscenes++;
+        else if (!strcmp(word, "section")) {
+            int b, n, nm = 0;
+            if (sscanf(line, "section %d %d %n", &b, &n, &nm) >= 2 && o->npsec < 16) {
+                o->sections[o->npsec].bar = b;
+                o->sections[o->npsec].bars = n;
+                snprintf(o->sections[o->npsec].name, sizeof o->sections[0].name, "%.23s", nm > 0 ? line + nm : "");
+                o->npsec++;
+            }
+            o->nsections++;
+        } else if (!strcmp(word, "clip")) {
+            int sm, tr;
+            long st, off, len;
+            if (sscanf(line, "clip %d %d %ld %ld %ld", &sm, &tr, &st, &off, &len) != 5) continue;
+            o->nclips++;
+            if (st + len > end) end = st + len;
+            if (!bar16) bar16 = (long)(16.0 * o->ts_num * 4.0 / o->ts_den * 60.0 / (o->bpm > 0 ? o->bpm : 120) * o->rate);
+            if (st < bar16 && o->npeek < PEEK_CLIPS) {
+                o->clips[o->npeek].track = (short)tr;
+                o->clips[o->npeek].start = st;
+                o->clips[o->npeek].length = len;
+                o->npeek++;
+            }
+        }
+    }
+    fclose(f);
+    if (!ok) return -1;
+    o->seconds = o->rate > 0 ? (double)end / o->rate : 0;
+    if (o->nchords) o->has_key = 1;               /* chords and no key line: C major, the one that isn't written */
+    return 0;
+}
+
+int project_set_tags(const char *path, const char *tags)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)n + 1);
+    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        free(buf);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    buf[n] = 0;
+    if (strncmp(buf, MAGIC, strlen(MAGIC) - 1)) {
+        free(buf);
+        return -1;
+    }
+    char tmp[1100];
+    snprintf(tmp, sizeof tmp, "%s.tags-tmp", path);
+    FILE *o = fopen(tmp, "wb");
+    if (!o) {
+        free(buf);
+        return -1;
+    }
+    int wrote = 0;
+    char *p = buf;
+    while (*p) {                                 /* line by line: the old tags line goes, the new one goes in once */
+        char *e = strchr(p, '\n');
+        size_t len = e ? (size_t)(e - p + 1) : strlen(p);
+        int is_tags = !strncmp(p, "tags ", 5) || !strncmp(p, "tags\n", 5) || !strncmp(p, "tags\r", 5);
+        int is_track = !strncmp(p, "track ", 6);
+        if (!wrote && (is_tags || is_track)) {   /* before the first track, if there was no tags line */
+            if (tags[0]) fprintf(o, "tags %s\n", tags);
+            wrote = 1;
+        }
+        if (!is_tags) fwrite(p, 1, len, o);
+        p += len;
+    }
+    if (!wrote && tags[0]) fprintf(o, "tags %s\n", tags);
+    free(buf);
+    if (fclose(o) != 0) {
+        remove(tmp);
+        return -1;
+    }
+    return replace_file(tmp, path);
 }

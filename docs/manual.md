@@ -363,6 +363,15 @@ Pads play through their track's effects.
 
 ## Saving and exporting
 
+**Finding a project.** **☰ > Browse projects** (Ctrl+O) shows your projects as cards: a picture of
+the first 16 bars (each track's clips, the sections along the top), the tempo, key, length and track
+count, when it was last changed, and its tags. **Recent** has the ones you opened or saved lately,
+**My projects** everything in Music/tinydaw (and the folders in it), newest first, and **Examples** the
+example songs. Type to search names and tags, click a tag at the top to see only projects with it, and
+click a card to open it. **Tags** on a card adds words to find it by (lo-fi, demo, finished...); they're
+kept in the project file. **Another file...** opens one from anywhere with your system's dialog, and
+**☰ > Open a recent project** lists the latest few.
+
 Projects are small `.tdaw` files, saved in `Music/tinydaw` by default. They store how each sound was
 made rather than the audio, so they open at full quality at any sample rate. Imported audio files
 are linked, not copied; if one moves, its clips play silence until it's back.

@@ -395,6 +395,7 @@ typedef struct {
     int nchords;
     Bend bends[MAX_BENDS];                  /* pitch curves, referred to by clips */
     int nbends;
+    char tags[128];                         /* words to find it by in the project browser, comma-separated */
     Slot slots[MAX_TRACKS][MAX_SCENES];     /* the session view */
     int nscenes;
     char scene_names[MAX_SCENES][24];
@@ -648,6 +649,23 @@ void project_free(Project *p);                   /* frees sample memory */
 int project_save(const Project *p, const char *path, char *msg, size_t msglen);
 /* Loads into dst (freshly initialised). Sets the project rate to the file's. */
 int project_load(Project *dst, const char *path, char *msg, size_t msglen);
+
+/* What the project browser shows of a project, read quickly (no sounds are made). The clips are the
+ * ones starting in its first 16 bars, by the opening tempo and time signature. */
+#define PEEK_CLIPS 512
+typedef struct {
+    char title[96], tags[128];
+    double bpm, seconds;
+    int ts_num, ts_den, rate, key_root, key_scale, has_key;
+    int ntracks, nclips, nsections, nchords, nscenes;
+    struct { short track; long start, length; } clips[PEEK_CLIPS];
+    int npeek;
+    struct { int bar, bars; char name[24]; } sections[16];
+    int npsec;
+} ProjectInfo;
+int project_peek(const char *path, ProjectInfo *out);
+/* Rewrites only the tags line of a project file (the rest stays byte for byte). */
+int project_set_tags(const char *path, const char *tags);
 
 float soft_clip(float v);
 /* Adds the output for [start, start + frames) into out (stereo). only_track < 0 mixes every

@@ -2385,6 +2385,7 @@ static void open_audio(void);
 static void play_scratch(float *buf, long frames);
 
 /* Replaces the project with `np` (which it takes), freeing the old one. */
+static int saved_sync(void);
 static void replace_project(Project *np)
 {
     play_scratch(NULL, 0);
@@ -2402,6 +2403,7 @@ static void replace_project(Project *np)
     view_start = 0;
     lib_scroll = 0;
     drag.kind = D_NONE;
+    saved_sync();                               /* the saved sounds are in every project */
     history_reset();
 }
 
@@ -5236,11 +5238,11 @@ static struct {
     int has, sample, from_pad;
     Pad pad;                            /* a pad's settings, when copied from a pad */
 } sclip;
-enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR };
+enum { CMA_COPY, CMA_PASTE, CMA_REMOVE, CMA_CLEAR, CMA_PIN, CMA_SAVE };
 static struct {
     int open, kind, idx, n;
-    int act[4], enabled[4];
-    char label[4][80];
+    int act[6], enabled[6];
+    char label[6][80];
     SDL_Rect box;
 } cm;
 static int lib_flash = -1;              /* a sound just pasted into the library: lit for a moment */
@@ -5314,6 +5316,187 @@ static void sound_paste(int kind, int idx)
     }
 }
 
+
+/* ---- saved and pinned sounds
+ *
+ * Save puts a copy of a sound in Music/tinydaw/Saved sounds; everything in that folder is in the
+ * library of every project. Pin keeps a sound at the top of the list, and saves it. The pinned ones
+ * are listed in pinned.txt in the same folder. */
+
+static int saved_enabled;               /* off for screenshots and command-line exports */
+static char pins[256][200];             /* file names of pinned sounds */
+static int npins, pins_read;
+
+static void saved_dir(char *buf, size_t n)
+{
+    const char *e = SDL_getenv("TINYDAW_SAVED_DIR");
+    if (e && *e) {
+        snprintf(buf, n, "%s", e);
+        return;
+    }
+    char m[900];
+    user_dir("music", m, sizeof m);
+    snprintf(buf, n, "%s/tinydaw/Saved sounds", m);
+}
+
+static int in_saved_dir(const char *path)
+{
+    char d[1024];
+    saved_dir(d, sizeof d);
+    size_t n = strlen(d);
+    return path[0] && !strncmp(path, d, n) && (path[n] == '/' || path[n] == '\\');
+}
+
+static void pins_load(void)
+{
+    char d[1024], f[1100], line_[256];
+    saved_dir(d, sizeof d);
+    snprintf(f, sizeof f, "%s/pinned.txt", d);
+    npins = 0;
+    pins_read = 1;
+    FILE *fp = fopen(f, "r");
+    if (!fp) return;
+    while (npins < 256 && fgets(line_, sizeof line_, fp)) {
+        line_[strcspn(line_, "\r\n")] = 0;
+        if (line_[0]) snprintf(pins[npins++], sizeof pins[0], "%.199s", line_);
+    }
+    fclose(fp);
+}
+
+static void pins_save(void)
+{
+    char d[1024], f[1100];
+    saved_dir(d, sizeof d);
+    ensure_dir(d);
+    snprintf(f, sizeof f, "%s/pinned.txt", d);
+    FILE *fp = fopen(f, "w");
+    if (!fp) return;
+    for (int i = 0; i < npins; i++) fprintf(fp, "%s\n", pins[i]);
+    fclose(fp);
+}
+
+static int pin_find(const char *file)
+{
+    if (!pins_read) pins_load();
+    for (int i = 0; i < npins; i++)
+        if (!strcmp(pins[i], file)) return i;
+    return -1;
+}
+
+static void pin_set(const char *file, int on)
+{
+    int i = pin_find(file);
+    if (on && i < 0 && npins < 256) snprintf(pins[npins++], sizeof pins[0], "%.199s", file);
+    if (!on && i >= 0) {
+        memmove(pins[i], pins[i + 1], (size_t)(npins - i - 1) * sizeof pins[0]);
+        npins--;
+    }
+    pins_save();
+}
+
+/* Everything in the Saved sounds folder into the library (once each), marked saved and pinned. */
+static int saved_sync(void)
+{
+    if (!saved_enabled) return 0;
+    int was_clean = !is_dirty(), added = 0;
+    char d[1024];
+    saved_dir(d, sizeof d);
+    pins_load();
+    for (int i = 0; i < P.nsamples; i++) {      /* sounds already here */
+        Sample *sm = &P.samples[i];
+        sm->saved = in_saved_dir(sm->path) && file_exists(sm->path);
+        sm->pinned = sm->saved && pin_find(path_base(sm->path)) >= 0;
+    }
+    DIR *dir = opendir(d);
+    if (!dir) return 0;
+    struct dirent *e;
+    while ((e = readdir(dir))) {
+        const char *nm = e->d_name, *dot = strrchr(nm, '.');
+        if (nm[0] == '.' || !dot || (strcasecmp(dot, ".wav") && strcasecmp(dot, ".flac") && strcasecmp(dot, ".ogg") &&
+                                     strcasecmp(dot, ".mp3") && strcasecmp(dot, ".aiff") && strcasecmp(dot, ".aif")))
+            continue;
+        char path[1300], err[300];
+        snprintf(path, sizeof path, "%s/%s", d, nm);
+        int have = 0;
+        for (int i = 0; i < P.nsamples && !have; i++) have = !strcmp(P.samples[i].path, path);
+        if (have) continue;
+        LOCK();
+        int idx = sample_import(&P, path, err, sizeof err);
+        if (idx >= 0) {
+            Sample *sm = &P.samples[idx];
+            snprintf(sm->name, sizeof sm->name, "%.*s", (int)(dot - nm) < 90 ? (int)(dot - nm) : 90, nm);
+            sm->saved = 1;
+            sm->pinned = pin_find(nm) >= 0;
+            added++;
+        }
+        UNLOCK();
+    }
+    closedir(dir);
+    if (was_clean) saved_nsamples = P.nsamples;   /* the saved sounds don't make a project "changed" */
+    return added;
+}
+
+/* Saves a copy of sound i in the folder (if it isn't there yet). Returns 0 when it's saved. */
+static int sound_save(int i)
+{
+    Sample *sm = &P.samples[i];
+    if (sm->saved && file_exists(sm->path)) return 0;
+    char d[1024], base[100], path[1300], err[300];
+    saved_dir(d, sizeof d);
+    ensure_dir(d);
+    snprintf(base, sizeof base, "%.80s", sm->name);
+    for (char *q = base; *q; q++)
+        if (strchr("/\\:*?\"<>|", *q) || (unsigned char)*q < 32) *q = '_';
+    snprintf(path, sizeof path, "%s/%s.wav", d, base);
+    for (int k = 2; file_exists(path) && k < 1000; k++) snprintf(path, sizeof path, "%s/%s %d.wav", d, base, k);
+    if (sample_write_wav(sm, path, err, sizeof err) != 0) {
+        status("Couldn't save \"%s\": %s", sm->name, err);
+        return -1;
+    }
+    LOCK();
+    snprintf(sm->path, sizeof sm->path, "%.1023s", path);
+    sm->saved = 1;
+    UNLOCK();
+    return 0;
+}
+
+static void sound_pin(int i, int on)
+{
+    Sample *sm = &P.samples[i];
+    if (on && sound_save(i) != 0) return;
+    if (sm->saved) pin_set(path_base(sm->path), on);
+    sm->pinned = on && sm->saved;
+    status(on ? "Pinned \"%s\": it stays at the top of the library, in every project" : "Unpinned \"%s\" (it's still saved)",
+           sm->name);
+}
+
+/* Takes a sound out of the saved ones. Its file moves to Music/tinydaw/Unsaved sounds rather than
+ * being deleted, so projects that use it still open. */
+static void sound_unsave(int i)
+{
+    Sample *sm = &P.samples[i];
+    if (!sm->saved) return;
+    char d[1024], to[1024];
+    saved_dir(d, sizeof d);
+    snprintf(to, sizeof to, "%s", d);
+    char *slash = strrchr(to, '/');
+    if (slash) snprintf(slash + 1, sizeof to - (size_t)(slash + 1 - to), "Unsaved sounds");
+    else snprintf(to, sizeof to, "Unsaved sounds");
+    ensure_dir(to);
+    size_t l = strlen(to);
+    snprintf(to + l, sizeof to - l, "/%s", path_base(sm->path));
+    pin_set(path_base(sm->path), 0);
+    if (rename(sm->path, to) == 0) {
+        LOCK();
+        snprintf(sm->path, sizeof sm->path, "%.1023s", to);
+        UNLOCK();
+    } else {
+        remove(sm->path);                       /* another drive: the sound stays in this project's memory */
+    }
+    sm->saved = sm->pinned = 0;
+    status("\"%s\" isn't saved any more: it won't be in new projects", sm->name);
+}
+
 static void remove_sound(int i);
 
 /* The library row, pad or instrument slot under the pointer, if any (for Ctrl+C / Ctrl+V). */
@@ -5377,6 +5560,18 @@ static void cm_open(int kind, int idx)
     }
     cm.enabled[2] = has;
     cm.n = 3;
+    if (kind == CM_LIB && has) {                /* pin and save, before Remove */
+        snprintf(cm.label[4], sizeof cm.label[4], "%s", cm.label[2]);
+        cm.act[4] = cm.act[2];
+        cm.enabled[4] = 1;
+        snprintf(cm.label[2], sizeof cm.label[2], P.samples[s].pinned ? "Unpin" : "Pin to the top");
+        cm.act[2] = CMA_PIN;
+        cm.enabled[2] = 1;
+        snprintf(cm.label[3], sizeof cm.label[3], P.samples[s].saved ? "Forget the saved copy" : "Save for future sessions");
+        cm.act[3] = CMA_SAVE;
+        cm.enabled[3] = 1;
+        cm.n = 5;
+    }
     int w = 0;
     for (int i = 0; i < cm.n; i++) w = text_w(cm.label[i]) > w ? text_w(cm.label[i]) : w;
     w += 28;
@@ -5406,6 +5601,12 @@ static void cm_draw(void)
         case CMA_COPY: sound_copy(cm.kind, cm.idx); break;
         case CMA_PASTE: sound_paste(cm.kind, cm.idx); break;
         case CMA_REMOVE: remove_sound(cm.idx); break;
+        case CMA_PIN: sound_pin(cm.idx, !P.samples[cm.idx].pinned); break;
+        case CMA_SAVE:
+            if (P.samples[cm.idx].saved) sound_unsave(cm.idx);
+            else if (sound_save(cm.idx) == 0)
+                status("Saved \"%s\": it will be in the library of every project", P.samples[cm.idx].name);
+            break;
         case CMA_CLEAR:
             LOCK();
             if (cm.kind == CM_PAD) {
@@ -5429,8 +5630,11 @@ static void library_list(int x, int y, int w, int bottom)
     memset(lib_rects, 0, sizeof lib_rects);   /* only the rows drawn now can be hit */
     static int vis[MAX_SAMPLES];              /* pitched/reversed copies made for clips are hidden */
     int nvis = 0;
-    for (int i = 0; i < P.nsamples; i++)
-        if ((!P.samples[i].pitched || P.samples[i].listed) && !P.samples[i].removed && !P.samples[i].hidden) vis[nvis++] = i;
+    for (int pass = 0; pass < 2; pass++)         /* pinned sounds first */
+        for (int i = 0; i < P.nsamples; i++)
+            if ((!P.samples[i].pitched || P.samples[i].listed) && !P.samples[i].removed && !P.samples[i].hidden &&
+                (P.samples[i].pinned != 0) == (pass == 0))
+                vis[nvis++] = i;
     snprintf(buf, sizeof buf, "%d sound%s", nvis, nvis == 1 ? "" : "s");
     text(x, y, buf, DIM);
     y += font_h + 10;
@@ -5454,15 +5658,26 @@ static void library_list(int x, int y, int w, int bottom)
         int i = vis[row];
         SDL_Rect r = {x, y + (row - lib_scroll) * item_h, lw, item_h - 3};
         lib_rects[i] = r;
-        tip(r, "%s (%.2f s): click to hear it, drag it onto a track or a pad, right-click to copy, paste or remove",
-            P.samples[i].name, (double)P.samples[i].frames / SR);
+        tip(r, "%s (%.2f s%s): click to hear it, drag it onto a track or a pad, right-click to copy, paste, pin, save or remove",
+            P.samples[i].name, (double)P.samples[i].frames / SR,
+            P.samples[i].pinned ? ", pinned and saved" : P.samples[i].saved ? ", saved" : "");
         int hov = hit(r) && drag.kind == D_NONE;
         fill(r, P.preview == i ? tone(ACCENT, 0.45f) : hov ? PANEL3 : PANEL2);
         if (lib_flash == i && SDL_GetTicks() - lib_flash_at < 1500) outline(r, ACCENT);   /* just pasted */
         snprintf(buf, sizeof buf, "%.2fs", (double)P.samples[i].frames / SR);
         int dw = text_w(buf);
         SDL_Rect xr = {r.x + r.w - 24, r.y + 2, 20, r.h - 4};     /* remove: shown on the row under the mouse */
-        text_clip((SDL_Rect){r.x + 6, r.y, r.w - dw - 18 - (hov ? 24 : 0), r.h}, r.x + 8, r.y + (r.h - font_h) / 2,
+        int nx = r.x + 8;
+        if (P.samples[i].pinned) {               /* a pin: a head and its point */
+            fill((SDL_Rect){r.x, r.y, 3, r.h}, ACCENT);
+            disc_small(r.x + 12, r.y + r.h / 2 - 3, 3, ACCENT);
+            line(r.x + 12, r.y + r.h / 2, r.x + 12, r.y + r.h / 2 + 6, ACCENT);
+            nx = r.x + 22;
+        } else if (P.samples[i].saved) {         /* saved: a small dot */
+            disc_small(r.x + 10, r.y + r.h / 2, 2, DIM);
+            nx = r.x + 18;
+        }
+        text_clip((SDL_Rect){r.x + 6, r.y, r.w - dw - 18 - (hov ? 24 : 0), r.h}, nx, r.y + (r.h - font_h) / 2,
                   P.samples[i].name, TEXT);
         text(r.x + r.w - dw - 8 - (hov ? 24 : 0), r.y + (r.h - font_h) / 2, buf, DIM);
         if (hov) {
@@ -11178,7 +11393,7 @@ static int selftest(void)
         frame();
         r = lib_rects[a];                       /* right-click a library sound: the menu */
         sim(r.x + 10, r.y + 5, 0, 0, 1, 0);
-        int lib_menu = cm.open && cm.kind == CM_LIB && cm.idx == a && cm.act[2] == CMA_REMOVE;
+        int lib_menu = cm.open && cm.kind == CM_LIB && cm.idx == a && cm.act[cm.n - 1] == CMA_REMOVE;
         sim(cm.box.x - 50, cm.box.y - 50, 1, 1, 0, 0);    /* a click elsewhere closes it, doing nothing */
         check(lib_menu && !cm.open && !P.samples[a].removed, "right-clicking a library sound opens Copy, Paste, Remove");
         history_check();
@@ -12142,6 +12357,88 @@ static int selftest(void)
         undo_redo(0);
         check(drum_find(&P, id) != NULL, "and undo brings it back");
         show_panel(RI_SOUNDS);
+        new_project();
+        make_demo();
+        frame();
+        history_check();
+    }
+
+
+    /* ---- saved and pinned sounds (in a folder of the test's own) */
+    {
+        const char *td = getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
+        char root[700], sd[800];
+        snprintf(root, sizeof root, "%s/tinydaw-saved-%u", td, (unsigned)SDL_GetTicks() ^ (unsigned)time(NULL));
+        snprintf(sd, sizeof sd, "%s/Saved sounds", root);
+        SDL_setenv("TINYDAW_SAVED_DIR", sd, 1);
+        saved_enabled = 1;
+        pins_read = 0;
+        new_project();
+        make_demo();
+        show_panel(RI_SOUNDS);
+        sounds_sub = 0;
+        frame();
+        history_check();
+        int a = -1, b = -1;
+        for (int i = 0; i < P.nsamples; i++)
+            if (lib_rects[i].w) {
+                if (a < 0) a = i;
+                else if (b < 0) b = i;
+            }
+        char an[96], bn[96];
+        snprintf(an, sizeof an, "%s", P.samples[a].name);
+        snprintf(bn, sizeof bn, "%s", P.samples[b].name);
+#define CM_PICK(k) do { SDL_Rect mi = {cm.box.x + 4, cm.box.y + 4 + (k) * (font_h + 12), cm.box.w - 8, font_h + 12}; \
+                        sim(mi.x + 10, mi.y + 4, 1, 0, 0, 0); sim(mi.x + 10, mi.y + 4, 0, 1, 0, 0); } while (0)
+        SDL_Rect r = lib_rects[b];
+        sim(r.x + 30, r.y + 5, 0, 0, 1, 0);      /* right-click: Pin */
+        int five = cm.open && cm.n == 5 && cm.act[2] == CMA_PIN && cm.act[3] == CMA_SAVE && cm.act[4] == CMA_REMOVE;
+        CM_PICK(2);
+        frame();
+        check(five && P.samples[b].pinned && P.samples[b].saved && file_exists(P.samples[b].path) && in_saved_dir(P.samples[b].path),
+              "right-click > Pin keeps a sound and saves a copy of it");
+        check(lib_rects[b].y < lib_rects[a].y, "a pinned sound is at the top of the library");
+        r = lib_rects[a];
+        sim(r.x + 30, r.y + 5, 0, 0, 1, 0);      /* right-click: Save */
+        CM_PICK(3);
+        check(P.samples[a].saved && !P.samples[a].pinned && file_exists(P.samples[a].path), "Save keeps a copy without pinning");
+        new_project();                           /* a later session */
+        frame();
+        int qa = -1, qb = -1;
+        for (int i = 0; i < P.nsamples; i++) {
+            if (!strcmp(P.samples[i].name, an)) qa = i;
+            if (!strcmp(P.samples[i].name, bn)) qb = i;
+        }
+        check(qa >= 0 && qb >= 0 && P.samples[qa].saved && !P.samples[qa].pinned && P.samples[qb].pinned && !is_dirty(),
+              "saved and pinned sounds are in a new project's library, still pinned");
+        char moved[1024];
+        snprintf(moved, sizeof moved, "%s", qb >= 0 ? P.samples[qb].path : "");
+        r = lib_rects[qb];
+        sim(r.x + 30, r.y + 5, 0, 0, 1, 0);      /* right-click: Forget the saved copy */
+        CM_PICK(3);
+        int gone = qb >= 0 && !P.samples[qb].saved && !P.samples[qb].pinned && !file_exists(moved) && file_exists(P.samples[qb].path);
+        char unsaved_file[1024];
+        snprintf(unsaved_file, sizeof unsaved_file, "%s", P.samples[qb].path);
+        new_project();
+        int still = 0;
+        for (int i = 0; i < P.nsamples; i++) still |= !strcmp(P.samples[i].name, bn);
+        check(gone && !still, "Forget the saved copy takes it out of new projects, keeping the file elsewhere");
+        for (int i = 0; i < P.nsamples; i++)     /* tidy up */
+            if (P.samples[i].saved) {
+                remove(P.samples[i].path);
+                P.samples[i].saved = 0;
+            }
+        remove(unsaved_file);
+        char f[1100];
+        snprintf(f, sizeof f, "%s/pinned.txt", sd);
+        remove(f);
+        rmdir(sd);
+        snprintf(f, sizeof f, "%s/Unsaved sounds", root);
+        rmdir(f);
+        rmdir(root);
+#undef CM_PICK
+        saved_enabled = 0;
+        SDL_setenv("TINYDAW_SAVED_DIR", "", 1);
         new_project();
         make_demo();
         frame();
@@ -15260,6 +15557,8 @@ int main(int argc, char **argv)
         if (export_path || shot || test) fprintf(stderr, "%s\n", status_msg);
     }
 
+    saved_enabled = !export_path && !shot && !test;
+    saved_sync();
     history_reset();
     if (!loaded) mark_saved();
     if (save_path) {

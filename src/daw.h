@@ -155,6 +155,8 @@ typedef struct {
     SynthSound syn;
     int vocal;              /* made in the Singer: rebuilt from voc (needs eSpeak NG) */
     VocalSpec voc;
+    int saved;              /* a copy is in the Saved sounds folder: it's in every project's library */
+    int pinned;             /* kept at the top of the library (and saved) */
 } Sample;
 
 /* A placed region on the timeline that plays part of a sample. All positions in frames.
@@ -387,6 +389,8 @@ int sample_import(Project *p, const char *path, char *err, size_t errlen);
 int sample_bounce(Project *p, const int *clips, int n, const char *path, const char *name, char *err, size_t errlen);
 /* Writes a recording (stereo, the project rate) to `path` as a WAV and adds that file to the library. */
 int sample_record(Project *p, const float *buf, long frames, const char *path, const char *name, char *err, size_t errlen);
+/* Writes a sound as a WAV (32-bit float, so nothing is lost). */
+int sample_write_wav(const Sample *s, const char *path, char *err, size_t errlen);
 void sample_minmax(const Sample *s, long f0, long f1, float *lo, float *hi);
 
 /* A copy of sample `src` shifted by `semis` semitones and/or reversed; reuses an existing one.

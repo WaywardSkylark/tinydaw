@@ -91,6 +91,7 @@ Settings > **Keys** lists every shortcut.
 | Put a sound in the song | Drag it from the library onto a track |
 | Hear a sound first | Click it in the library (click again to stop) |
 | Remove a sound | The **×** on its row in the library, or right-click it > **Remove from the library**. Its clips go too; Ctrl+Z brings both back |
+| Keep a sound for later | Right-click it in the library > **Save for future sessions**: a copy goes in Music/tinydaw/Saved sounds, and every project's library has it. **Pin to the top** keeps it first in the list (and saves it). **Forget the saved copy** moves the file out to Unsaved sounds |
 | Copy a sound | Right-click a library sound, pad or the instrument slot > **Copy**, then right-click another > **Paste** (or Ctrl+C / Ctrl+V over them). Pad to pad copies its settings too |
 | Make a sound of clips | Drag clips onto the library: they become one new sound with their tracks' effects, saved as a WAV in `Music/tinydaw/Sounds` |
 | Move a clip | Drag it, in time and between tracks. Arrow keys nudge it |

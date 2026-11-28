@@ -1012,8 +1012,365 @@ def trap():
     return s
 
 
+# ---------------------------------------------------------------- 7. synthwave
+
+def synthwave():
+    s = Song2("Synthwave: Neon Coastline", 100)
+    # F# minor: F#m - D - A - E, a bar each. Gated snare, a pulsing bass and sixteenth arps under a
+    # retro lead, the pad and bass pumping with the kick, and a talkbox singing the chorus.
+    prog = [([54, 57, 61], 30), ([50, 54, 57], 26), ([49, 52, 57], 33), ([52, 56, 59], 28)]
+    kick = s.synth("Kick", "Floor kick", macros=(0.55, 0.45, 0.6, 0.4, 0.5))
+    snare = s.synth("Gated snare", "Break snare", seconds=0.5, macros=(0.5, 0.7, 0.8, 0.4, 0.5))
+    hat = s.synth("Hat", "Trap hat", seconds=0.1, macros=(0.5, 0.45, 0.5, 0.35, 0.5))
+    tom = s.synth("Tom", "Drum machine tom")
+    bass = s.synth("Synth bass", "Synth bass", seconds=0.4)
+    arp = s.synth("Arp", "Arp pluck", seconds=0.5)
+    lead = s.synth("Retro lead", "Retro lead", seconds=1.5)
+    kit(s, (kick, snare, hat, tom, bass, arp, lead))
+    pad = s.synth("Analog pad", "Analog pad", seconds=3)
+    riser = s.synth("Riser", "Riser", seconds=4)
+    impact = s.synth("Impact", "Impact")
+    l1 = [(61, 0, 0.5), (61, 0.5, 0.5), (64, 1, 1), (61, 2, 1.5), (59, 4, 0.5), (61, 4.5, 1), (59, 5.5, 0.5),
+          (57, 6, 0.5), (54, 6.5, 1.5)]
+    l2 = [(61, 8, 0.5), (61, 8.5, 0.5), (64, 9, 1), (66, 10, 1.5), (64, 12, 1), (61, 13, 0.5), (59, 13.5, 0.5),
+          (57, 14, 0.5), (54, 14.5, 1.5)]
+    vn = [(n, st, ln * 0.95) for n, st, ln in l1 + l2]
+    vox = s.vocal("Sung: neon coastline", "Ne-on coast-line, we drive through the night. "
+                  "Ne-on coast-line, hold on to the light.", vn, style=VS_TALKBOX, vibrato=0.25,
+                  bends=shape(vn, scoop=1.5, slide=True, fall=3.0))
+
+    t_kick = s.track("Kick", 0.85)
+    t_drums = s.track("Drums", 0.7, eq=(0, 1, 1), reverb=0.35)
+    t_bass = s.track("Bass", 0.7, filt=1, cutoff=1400, drive=0.15, duck=0.7)
+    t_arp = s.track("Arp", 0.5, pan=-0.25, delay=0.45, reverb=0.25, duck=0.4)
+    t_pad = s.track("Pad", 0.5, pan=0.2, filt=1, cutoff=2500, reverb=0.5, duck=0.6)
+    t_lead = s.track("Lead", 0.55, pan=0.1, delay=0.35, reverb=0.35)
+    t_vox = s.track("Talkbox", 0.75, delay=0.25, reverb=0.3)
+    t_fx = s.track("FX", 0.5, reverb=0.5)
+    s.fx.update(div=3, fb=0.45, tone=0.5, dlevel=0.6, ping=1, size=0.8, damp=0.3, rlevel=0.8, sc=t_kick, release=200)
+    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
+
+    verse = split_beat(s, t_kick, t_drums, "Verse", 16, (kick, "X.......X..o...."),
+                       [(snare, "....X.......X..."), (hat, "x.o.x.o.x.o.x.oo", "...............5")])
+    chorus = split_beat(s, t_kick, t_drums, "Chorus", 16, (kick, "X...X...X...X..."),
+                        [(snare, "....X.......X..."), (hat, "xoxoxoxoxoxoxoxo", ".5.5.5.5.5.5.5..")])
+    fill = split_beat(s, t_kick, t_drums, "Fill", 16, (kick, "X.......X......."),
+                      [(snare, "....X..........."), (tom, "........x.x.o.xX")])
+    bridge = s.drums(t_drums, "Bridge", 16, [(hat, "o.g.o.g.o.g.o.gg", "..5...5...5...55"), (tom, "..........g...o.", "..........5.....")])
+    s.drumclip(bridge, t_drums, s.bar(20), 16)
+    for b0, b1, beat in ((4, 11, verse), (11, 12, fill), (12, 19, chorus), (19, 20, fill), (24, 27, chorus), (27, 28, fill)):
+        place(s, beat, s.bar(b0), s.bar(b1) - s.bar(b0))
+    for b in range(28):
+        chord, root = prog[b % 4]
+        s.noteclip(pad, t_pad, s.bar(b), 4, [(n, 0, 4, 0.6) for n in chord] + [(root + 24, 0, 4, 0.4)])
+        tones = chord + [chord[0] + 12]
+        order = [0, 1, 2, 3, 2, 1] * 3
+        s.noteclip(arp, t_arp, s.bar(b), 4, [(tones[order[i]] + 12, i * 0.25, 0.22, 0.85 if i % 4 == 0 else 0.5)
+                                             for i in range(16)])
+        if b >= 4 and not 20 <= b < 22:
+            s.noteclip(bass, t_bass, s.bar(b), 4, [(root + (12 if i % 4 == 3 else 0), i * 0.5, 0.4, 0.9 if i % 2 == 0 else 0.6)
+                                                   for i in range(8)])
+    s.auto(t_pad, AUTO_CUTOFF, 0, lufs_cutoff(500))
+    s.auto(t_pad, AUTO_CUTOFF, s.bar(4), lufs_cutoff(2500))
+    melody = [(73, 0, 1.5), (71, 1.5, 0.5), (69, 2, 1), (66, 3, 1), (69, 4, 2), (73, 6, 2), (74, 8, 1.5), (73, 9.5, 0.5),
+              (71, 10, 2), (69, 12, 1), (68, 13, 1), (66, 14, 2)]
+    for start in (12, 16, 24):
+        s.noteclip(lead, t_lead, s.bar(start), 16, [(n, st, ln, 0.6 + 0.3 * (ln >= 1.5)) for n, st, ln in melody])
+    for start in (12, 24):
+        s.clip(vox, t_vox, s.bar(start + 4))
+    s.clip(riser, t_fx, s.bar(10), beats=8, fade_in=4)
+    s.clip(riser, t_fx, s.bar(22), beats=8, fade_in=4)
+    for b in (12, 24, 28):
+        s.clip(impact, t_fx, s.bar(b))
+    s.pads = [(kick, 0, 0.9, t_kick), (snare, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (tom, 0, 0.8, t_drums),
+              (arp, 0, 0.7, t_arp), (lead, 1, 0.8, t_lead), (vox, 0, 0.8, t_vox), (impact, 0, 0.9, t_fx)]
+    s.instrument = (lead, 69, t_lead)
+    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Verse")
+    s.section(12, 8, "Chorus")
+    s.section(20, 4, "Bridge")
+    s.section(24, 4, "Chorus")
+    return s
+
+
+# ---------------------------------------------------------------- 8. techno
+
+def techno():
+    s = Song2("Techno: Concrete Hours", 130)
+    # G minor. Four-on-the-floor, a rumbling bass, a stab every three sixteenths against the bar, an
+    # acid line whose filter opens over the peak, a robot voice, and the tempo pushed to 133 for the peak.
+    s.change(24, 133, 4, 4)
+    kick = s.synth("Industrial kick", "Industrial kick")
+    clap = s.synth("Clap", "Clap", macros=(0.45, 0.5, 0.6, 0.6, 0.5))
+    hat = s.synth("Hat", "Trap hat", seconds=0.1, macros=(0.4, 0.4, 0.5, 0.6, 0.5))
+    ohat = s.synth("Open hat", "Open hat", seconds=0.3, macros=(0.45, 0.5, 0.5, 0.5, 0.5))
+    rim = s.synth("Rim", "Rimshot")
+    rumble = s.synth("Rumble", "Rumble", seconds=0.5)
+    stab = s.synth("Hypnotic stab", "Hypnotic stab", seconds=0.6)
+    acid = s.synth("Acid line", "Acid line", seconds=0.4)
+    kit(s, (kick, clap, hat, ohat, rim, rumble, stab, acid))
+    laser = s.synth("Laser sweep", "Laser sweep", seconds=2)
+    impact = s.synth("Impact", "Impact")
+    rv = [(55, 0, 0.5), (55, 0.5, 0.5), (58, 1, 1.5), (55, 3, 0.75)]
+    robot = s.vocal("Sung: keep moving", "Keep mov-ing on", rv, style=VS_ROBOT, vibrato=0.0,
+                    bends=[(0.0, 0.0), (0.4, 0.0), (0.5, -5.0), (0.95, 0.0), (1.0, 0.0), (2.0, 0.0), (2.4, 3.0),
+                           (3.0, 0.0), (3.4, 0.0), (3.7, -12.0)])
+
+    t_kick = s.track("Kick", 0.9, drive=0.3)
+    t_drums = s.track("Drums", 0.65, eq=(0, -1, 2), reverb=0.15)
+    t_bass = s.track("Rumble", 0.7, filt=1, cutoff=300, reso=0.2, drive=0.4, duck=0.8, reverb=0.2)
+    t_stab = s.track("Stab", 0.5, pan=0.2, filt=2, cutoff=400, delay=0.45, reverb=0.4, duck=0.4)
+    t_acid = s.track("Acid", 0.5, pan=-0.15, filt=1, cutoff=600, reso=0.75, drive=0.5, delay=0.25, duck=0.5)
+    t_vox = s.track("Robot", 0.6, delay=0.5, reverb=0.4)
+    t_fx = s.track("FX", 0.5, reverb=0.6)
+    s.fx.update(div=5, fb=0.5, tone=0.4, dlevel=0.6, ping=1, size=0.85, damp=0.3, rlevel=0.75, sc=t_kick, release=140)
+    s.dynamics = (1, -22.0, 4.0, 6.0, 110.0, 7.0, 1, -1.0)
+
+    floor = s.drums(t_kick, "Four to the floor", 16, [(kick, "X...X...X...X...")])
+    intro = s.drums(t_drums, "Intro hats", 16, [(hat, "..x...x...x...x.", ""), (rim, "x..x..x..x..x..x", "5..4..6..4..5..3")])
+    groove = s.drums(t_drums, "Groove", 32, [(clap, "....X.......X.......X.......X.g.", "..............................5."),
+                                             (hat, "g.X.g.x.g.X.g.x.g.X.g.x.g.X.g.xg", "5...5...5...5...5...5...5...5..5"),
+                                             (rim, "x..x..x..x..x..x..x..x..x..x..x.", "5..4..6..4..5..3..6..4..5..4..7.")])
+    peak = s.drums(t_drums, "Peak", 32, [(clap, "....X.......X.......X.......X.oX"),
+                                         (hat, "gxXxgxxxgxXxgxxxgxXxgxxxgxXxgxXX", "5.......5.......5.......5......."),
+                                         (ohat, "..X...x...X...x...X...x...X...X."),
+                                         (rim, "x..x..x..x..x..x..x..x..x..x..x.", "7..5..7..5..7..5..7..5..7..5..9.")])
+    breakd = s.drums(t_drums, "Breakdown", 16, [(hat, "o.g.o.g.o.g.o.g.", "..4...4...4...4."), (rim, "x.....x.....x...", "6.....6.....6...")])
+    s.drumclip(floor, t_kick, 0, s.bar(16))
+    s.drumclip(floor, t_kick, s.bar(24), s.bar(32) - s.bar(24))
+    s.drumclip(intro, t_drums, 0, s.bar(8))
+    s.drumclip(groove, t_drums, s.bar(8), s.bar(16) - s.bar(8))
+    s.drumclip(breakd, t_drums, s.bar(16), s.bar(24) - s.bar(16))
+    s.drumclip(peak, t_drums, s.bar(24), s.bar(32) - s.bar(24))
+    for b in list(range(8, 16)) + list(range(24, 32)):     # the rumble: the three sixteenths after each kick
+        s.noteclip(rumble, t_bass, s.bar(b), 4, [(31, beat + k * 0.25, 0.22, v) for beat in range(4)
+                                                 for k, v in ((1, 0.95), (2, 0.6), (3, 0.75))])
+    stabs = [(n, i * 0.75, 0.3, 0.9 if i % 4 == 0 else 0.55) for i in range(int(16 / 0.75)) for n in (55, 58, 62)]
+    for b in range(8, 32, 4):
+        s.noteclip(stab, t_stab, s.bar(b), s.bar(b + 4) - s.bar(b), [x for x in stabs if x[1] < 16])
+    s.auto(t_stab, AUTO_CUTOFF, s.bar(8), lufs_cutoff(300))
+    s.auto(t_stab, AUTO_CUTOFF, s.bar(16), lufs_cutoff(1500))
+    acid_seq = [43, 43, 55, 43, 46, 43, 53, 43, 43, 50, 43, 55, 46, 43, 58, 41]
+    for b in range(16, 32, 2):
+        s.noteclip(acid, t_acid, s.bar(b), s.bar(b + 2) - s.bar(b),
+                   [(acid_seq[i % 16], i * 0.25, 0.22, 1.0 if i % 16 in (2, 6, 11, 14) else 0.5) for i in range(32)])
+    s.auto(t_acid, AUTO_CUTOFF, s.bar(16), lufs_cutoff(250))
+    s.auto(t_acid, AUTO_CUTOFF, s.bar(23), lufs_cutoff(1200))
+    s.auto(t_acid, AUTO_CUTOFF, s.bar(24), lufs_cutoff(600))
+    s.auto(t_acid, AUTO_CUTOFF, s.bar(30), lufs_cutoff(5000))
+    s.auto(t_acid, AUTO_CUTOFF, s.bar(32), lufs_cutoff(800))
+    for b in (12, 20, 26, 30):
+        s.clip(robot, t_vox, s.bar(b) + 2)
+    s.clip(laser, t_fx, s.bar(22), beats=8, fade_in=4)
+    s.clip(impact, t_fx, s.bar(24))
+    s.clip(impact, t_fx, s.bar(8), gain=-6)
+    s.pads = [(kick, 0, 0.9, t_kick), (clap, 0, 0.8, t_drums), (hat, 0, 0.7, t_drums), (ohat, 0, 0.7, t_drums),
+              (rim, 0, 0.8, t_drums), (rumble, 0, 0.9, t_bass), (stab, 0, 0.8, t_stab), (acid, 0, 0.8, t_acid),
+              (robot, 0, 0.8, t_vox), (laser, 0, 0.8, t_fx), (impact, 0, 0.9, t_fx)]
+    s.instrument = (acid, 43, t_acid)
+    s.loop = (1, s.frame(s.bar(24)), s.frame(s.bar(28)))
+    s.section(0, 8, "Intro")
+    s.section(8, 8, "Groove")
+    s.section(16, 8, "Breakdown")
+    s.section(24, 8, "Peak")
+    return s
+
+
+# ---------------------------------------------------------------- 9. pop
+
+def pop():
+    s = Song2("Pop: Paper Planes", 118)
+    # C major: C - G - Am - F. Piano verses, a supersaw chorus, Aria singing the verses and Lumi the
+    # chorus with Kai a third below, each line shaped with scoops, slides and fall-offs.
+    prog = [([60, 64, 67], 36), ([59, 62, 67], 31), ([60, 64, 69], 33), ([60, 65, 69], 29)]
+    kick = s.synth("Kick", "Floor kick", macros=(0.5, 0.5, 0.5, 0.35, 0.5))
+    snap = s.synth("Snap", "Snap")
+    clap = s.synth("Clap", "Clap")
+    hat = s.synth("Hat", "Trap hat", seconds=0.1, macros=(0.55, 0.45, 0.5, 0.3, 0.5))
+    piano = s.synth("Bright piano", "Bright piano", seconds=2)
+    pluck = s.synth("Pluck", "Pop pluck", seconds=0.6)
+    saw = s.synth("Supersaw", "Supersaw", seconds=2)
+    bass = s.synth("Bass", "Round bass", seconds=0.8)
+    kit(s, (kick, snap, clap, hat, piano, pluck, saw, bass))
+    riser = s.synth("Riser", "Riser", seconds=4)
+    impact = s.synth("Impact", "Impact")
+
+    r8 = [(0, 0.5), (0.5, 0.5), (1, 0.5), (1.5, 0.5), (2, 0.5), (2.5, 0.5), (3, 1), (4, 1.5)]
+    r7 = [(0, 0.5), (0.5, 0.5), (1, 1), (2, 0.5), (2.5, 0.5), (3, 1), (4, 2.5)]
+    vlines = [([64, 64, 67, 67, 69, 67, 64, 62], r8), ([60, 62, 64, 64, 62, 60, 62], r7),
+              ([64, 64, 67, 67, 69, 72, 71, 67], r8), ([69, 67, 64, 64, 62, 62, 60], r7)]
+    vnotes = []
+    for i, (ps, rh) in enumerate(vlines):
+        vnotes += [(p, i * 8 + st, ln * 0.95) for p, (st, ln) in zip(ps, rh)]
+    verse = s.vocal("Sung: verse", "Fold-ing up the morn-ing pa-per, write your name a-cross the wing. "
+                    "Throw it from the win-dow wait-ing, watch it catch the wind and sing.", vnotes, singer=AIRA,
+                    high=1, vibrato=0.4, bends=shape(vnotes, scoop=1.0, slide=True, fall=2.0))
+    c7 = [(0, 0.5), (0.5, 0.5), (1, 1.5), (3, 0.5), (3.5, 0.5), (4, 0.5), (4.5, 3)]
+    ca, cb = [72, 71, 72, 67, 69, 71, 72], [72, 71, 72, 76, 74, 72, 72]
+    cnotes = []
+    for i, ps in enumerate((ca, cb, ca, cb)):
+        cnotes += [(p, i * 8 + st, ln * 0.95) for p, (st, ln) in zip(ps, c7)]
+    C_MAJOR = [48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79]
+    below = lambda n: C_MAJOR[C_MAJOR.index(n) - 2] - 12 if n in C_MAJOR else n - 15
+    hnotes = [(below(n), st, ln) for n, st, ln in cnotes]
+    words = "Pa-per planes, we're fly-ing high, pa-per planes a-cross the sky. " * 2
+    chorus = s.vocal("Sung: chorus", words, cnotes, singer=LUMI, high=1, vibrato=0.45,
+                     bends=shape(cnotes, scoop=1.2, slide=True, fall=0))
+    harm = s.vocal("Sung: chorus low", words, hnotes, singer=KAI, vibrato=0.35, bends=shape(hnotes, scoop=0, slide=True, fall=0))
+
+    t_kick = s.track("Kick", 0.85)
+    t_drums = s.track("Drums", 0.65, eq=(0, 0, 1), reverb=0.2)
+    t_bass = s.track("Bass", 0.7, filt=1, cutoff=1200, duck=0.5)
+    t_piano = s.track("Piano", 0.6, pan=-0.15, eq=(-2, 0, 1), reverb=0.3)
+    t_pluck = s.track("Pluck", 0.45, pan=0.3, delay=0.4, reverb=0.25, duck=0.3)
+    t_saw = s.track("Supersaw", 0.45, filt=1, cutoff=6000, reverb=0.4, duck=0.6)
+    t_vox = s.track("Vocal", 0.85, delay=0.15, reverb=0.3)
+    t_harm = s.track("Harmony", 0.5, pan=0.2, reverb=0.4)
+    t_fx = s.track("FX", 0.5, reverb=0.5)
+    s.fx.update(div=3, fb=0.35, tone=0.6, dlevel=0.55, ping=1, size=0.7, damp=0.4, rlevel=0.75, sc=t_kick, release=170)
+    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
+
+    vbeat = split_beat(s, t_kick, t_drums, "Verse", 16, (kick, "X.......X.o....."),
+                       [(snap, "....X.......X..."), (hat, "..x...x...x...xg", "...............5")])
+    cbeat = split_beat(s, t_kick, t_drums, "Chorus", 32, (kick, "X...X...X...X...X...X...X...X.x."),
+                       [(clap, "....X.......X.......X.......X..."), (snap, "....X.......X.......X.......X.o.", "..............................6."),
+                        (hat, "x.x.x.x.x.x.x.xox.x.x.x.x.x.xoxo", "..............5...............5.")])
+    for b0, b1, beat in ((4, 12, vbeat), (12, 20, cbeat), (24, 32, cbeat)):
+        place(s, beat, s.bar(b0), s.bar(b1) - s.bar(b0))
+    s.drumclip(s.drums(t_drums, "Break claps", 16, [(clap, "....x.......x...", "....7.......7...")]), t_drums, s.bar(20), s.bar(24) - s.bar(20))
+    for b in range(32):
+        chord, root = prog[b % 4]
+        chor = 12 <= b < 20 or b >= 24
+        comp = [(0, 1.5, 0.85), (1.5, 0.5, 0.45), (2, 1.5, 0.7), (3.5, 0.5, 0.4)] if not chor else \
+               [(i * 0.5, 0.45, 0.75 if i % 2 == 0 else 0.45) for i in range(8)]
+        s.noteclip(piano, t_piano, s.bar(b), 4, [(n, at, ln, v - 0.05 * k) for at, ln, v in comp
+                                                 for k, n in enumerate(chord)])
+        if b >= 4 and not 20 <= b < 24:
+            pat = [(root, 0, 1.5, 0.9), (root, 1.5, 0.5, 0.55), (root + 12, 2, 1, 0.75), (root + 7, 3, 1, 0.6)]
+            s.noteclip(bass, t_bass, s.bar(b), 4, pat)
+        if chor:
+            s.noteclip(saw, t_saw, s.bar(b), 4, [(n + 12, 0, 3.9, 0.7) for n in chord])
+            s.noteclip(pluck, t_pluck, s.bar(b), 4, [((chord + [chord[0] + 12])[i % 4] + 12, i * 0.5, 0.4, 0.8 if i % 2 == 0 else 0.5)
+                                                     for i in range(8)])
+    s.clip(verse, t_vox, s.bar(4))
+    for b in (12, 24):
+        s.clip(chorus, t_vox, s.bar(b))
+        s.clip(harm, t_harm, s.bar(b))
+    s.clip(chorus, t_vox, s.bar(20), beats=16, gain=-2, fade_out=2)   # the chorus alone, over the break
+    s.clip(riser, t_fx, s.bar(10), beats=8, fade_in=4)
+    s.clip(riser, t_fx, s.bar(22), beats=8, fade_in=4)
+    for b in (12, 24):
+        s.clip(impact, t_fx, s.bar(b))
+    s.pads = [(kick, 0, 0.9, t_kick), (snap, 0, 0.9, t_drums), (clap, 0, 0.8, t_drums), (hat, 0, 0.7, t_drums),
+              (piano, 1, 0.8, t_piano), (pluck, 0, 0.7, t_pluck), (saw, 1, 0.7, t_saw), (bass, 0, 0.9, t_bass),
+              (verse, 0, 0.8, t_vox), (chorus, 0, 0.8, t_vox), (harm, 0, 0.7, t_harm), (riser, 0, 0.8, t_fx)]
+    s.instrument = (piano, 60, t_piano)
+    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Verse")
+    s.section(12, 8, "Chorus")
+    s.section(20, 4, "Break")
+    s.section(24, 8, "Chorus")
+    return s
+
+
+# ---------------------------------------------------------------- 10. chiptune
+
+def chiptune():
+    s = Song2("Chiptune: Pixel Quest", 150)
+    # C major: C - Am - F - G. A title screen, two levels (the second a whole step up), a boss fight
+    # in 3/4 at 170, and a victory jingle back at 150. Square-wave lead and fast arpeggios, a pulse
+    # bass jumping octaves, noise drums.
+    s.change(20, 170, 3, 4)
+    s.change(36, 150, 4, 4)
+    lead = s.synth("Square lead", "Square lead", seconds=1)
+    arp = s.synth("Chip arp", "Square lead", seconds=0.3, volume=0.6, macros=(0.7, 0.2, 0.3, 0.4, 0.5))
+    bass = s.synth("Pulse bass", "Pulse bass", seconds=0.4)
+    kick = s.synth("Kick", "Lo-fi kick", macros=(0.6, 0.3, 0.4, 0.6, 0.5))
+    noise = s.synth("Noise drum", "Noise drum")
+    kit(s, (lead, arp, bass, kick, noise))
+    hat = s.variant2("Noise hat", noise, 12)
+    coin = s.synth("Coin", "Coin")
+    zap = s.synth("Laser zap", "Laser zap")
+    sv = [(72, 0, 0.5), (76, 0.5, 1.5), (79, 2.5, 0.5), (84, 3, 0.5), (79, 3.5, 2)]
+    voice = s.vocal("Sung: press start", "Press start! Lev-el up!", sv, style=VS_ROBOT, high=1, vibrato=0.0,
+                    bends=[(0.0, -12.0), (0.3, 0.0), (2.0, 0.0), (2.4, 12.0), (2.5, 0.0), (5.0, 0.0), (5.5, 12.0)])
+
+    t_lead = s.track("Lead", 0.6, pan=0.1, delay=0.2)
+    t_arp = s.track("Arp", 0.45, pan=-0.3)
+    t_bass = s.track("Bass", 0.65)
+    t_drums = s.track("Drums", 0.7, eq=(0, 0, 1))
+    t_fx = s.track("FX", 0.5, reverb=0.3)
+    t_vox = s.track("Voice", 0.6, delay=0.3, reverb=0.2)
+    s.fx.update(div=4, fb=0.3, tone=0.6, dlevel=0.5, ping=1, size=0.4, damp=0.5, rlevel=0.5)
+    s.dynamics = (1, -16.0, 2.0, 10.0, 150.0, 3.0, 1, -1.0)
+
+    level = s.drums(t_drums, "Level", 16, [(kick, "X.......X.x....."), (noise, "....X.......X..o", "...............6"),
+                                           (hat, "x.x.x.x.x.x.x.xx", "..............5.")])
+    level2 = s.drums(t_drums, "Level 2", 16, [(kick, "X.....x.X.x....."), (noise, "....X..g....X.oX", ".......5........"),
+                                              (hat, "xgxgxgxgxgxgxgxg", ".5.5.5.5.5.5.5.5")])
+    boss = s.drums(t_drums, "Boss", 16, [(kick, "X.....X.x..."), (noise, "...X.....X.o"), (hat, "xxxxxxxxxxxx")])
+    win = s.drums(t_drums, "Win", 16, [(kick, "X...X...X...X..."), (noise, "....X.......XoXX"), (hat, "x.x.x.x.x.x.x.x.")])
+    s.drumclip(level, t_drums, s.bar(4), s.bar(12) - s.bar(4))
+    s.drumclip(level2, t_drums, s.bar(12), s.bar(20) - s.bar(12))
+    for b in range(20, 36):                         # 3/4: the pattern is cut at each bar's end
+        s.drumclip(boss, t_drums, s.bar(b), s.bar(b + 1) - s.bar(b))
+    s.drumclip(win, t_drums, s.bar(36), s.bar(42) - s.bar(36))
+
+    prog = [([60, 64, 67], 36), ([57, 60, 64], 33), ([53, 57, 60], 29), ([55, 59, 62], 31)]
+    for b in range(42):
+        boss_bar = 20 <= b < 36
+        up = 2 if 12 <= b < 20 else 0
+        chord, root = prog[(b // 2) % 4] if boss_bar else prog[b % 4]
+        if boss_bar:
+            chord, root = [n - 3 for n in chord], root - 3   # the boss, a minor third down: darker
+        length = s.bar(b + 1) - s.bar(b)
+        steps = int(round(length * 4))
+        tones = [n + up + 12 for n in chord] + [chord[0] + up + 24]
+        s.noteclip(arp, t_arp, s.bar(b), length, [(tones[i % 4], i * 0.25, 0.2, 0.9 if i % 4 == 0 else 0.5)
+                                                  for i in range(steps)])
+        if b >= 4:
+            s.noteclip(bass, t_bass, s.bar(b), length, [(root + up + (12 if i % 2 else 0), i * 0.5, 0.4, 0.9 if i % 2 == 0 else 0.6)
+                                                        for i in range(int(length * 2))])
+    tune = [(72, 0, 0.5), (74, 0.5, 0.5), (76, 1, 1), (79, 2, 1), (76, 3, 0.5), (74, 3.5, 0.5), (72, 4, 1.5),
+            (69, 6, 0.5), (72, 6.5, 0.5), (74, 7, 1), (72, 8, 0.5), (74, 8.5, 0.5), (76, 9, 1), (79, 10, 1),
+            (81, 11, 1), (79, 12, 1.5), (76, 13.5, 0.5), (74, 14, 2)]
+    for start in (4, 8):
+        s.noteclip(lead, t_lead, s.bar(start), 16, [(n, st, ln, 0.6 + 0.3 * (st % 2 == 0)) for n, st, ln in tune])
+    for start in (12, 16):
+        s.noteclip(lead, t_lead, s.bar(start), 16, [(n + 2, st, ln, 0.7 + 0.25 * (st % 2 == 0)) for n, st, ln in tune])
+    boss_tune = [(69, 0, 0.5), (72, 0.5, 0.5), (76, 1, 0.5), (75, 1.5, 0.5), (76, 2, 1), (69, 3, 0.5), (72, 3.5, 0.5),
+                 (77, 4, 0.5), (76, 4.5, 0.5), (74, 5, 1)]
+    for b in range(20, 36, 2):
+        s.noteclip(lead, t_lead, s.bar(b), s.bar(b + 2) - s.bar(b), [(n - 3, st, ln, 0.95 if st % 3 == 0 else 0.6)
+                                                                    for n, st, ln in boss_tune])
+    win_tune = [(72, 0, 0.5), (76, 0.5, 0.5), (79, 1, 0.5), (84, 1.5, 1.5), (83, 3, 0.5), (84, 3.5, 4.5)]
+    s.noteclip(lead, t_lead, s.bar(36), 8, [(n, st, ln, 0.9) for n, st, ln in win_tune])
+    s.noteclip(lead, t_lead, s.bar(38), 16, [(n, st, ln, 0.7) for n, st, ln in tune])
+    s.clip(voice, t_vox, s.bar(1))
+    s.clip(voice, t_vox, s.bar(36) + 2)
+    for b in (4, 12, 20, 36):
+        s.clip(coin, t_fx, s.bar(b))
+    for b in range(22, 36, 4):
+        s.clip(zap, t_fx, s.bar(b) + 2, gain=-4)
+    s.pads = [(kick, 0, 0.9, t_drums), (noise, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (lead, 1, 0.8, t_lead),
+              (arp, 0, 0.7, t_arp), (bass, 0, 0.9, t_bass), (coin, 0, 0.8, t_fx), (zap, 0, 0.8, t_fx),
+              (voice, 0, 0.8, t_vox)]
+    s.instrument = (lead, 72, t_lead)
+    s.loop = (1, s.frame(s.bar(20)), s.frame(s.bar(28)))
+    s.section(0, 4, "Title")
+    s.section(4, 8, "Level 1")
+    s.section(12, 8, "Level 2")
+    s.section(20, 16, "Boss (3/4)")
+    s.section(36, 6, "Victory")
+    return s
+
+
 if __name__ == "__main__":
     for name, song in (("house-late-train", house()), ("hiphop-corner-store", hiphop()),
                        ("experimental-glass-weather", experimental()), ("breakcore-static-bloom", breakcore()),
-                       ("rock-highway-lights", rock()), ("trap-midnight-hollow", trap())):
+                       ("rock-highway-lights", rock()), ("trap-midnight-hollow", trap()),
+                       ("synthwave-neon-coastline", synthwave()), ("techno-concrete-hours", techno()),
+                       ("pop-paper-planes", pop()), ("chiptune-pixel-quest", chiptune())):
         song.write(os.path.join(HERE, name + ".tdaw"))

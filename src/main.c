@@ -3802,7 +3802,7 @@ static int menu_item(SDL_Rect r, const char *label, const char *shortcut, int en
 /* ---- the example songs, from the examples folder next to the program */
 
 #include <dirent.h>
-static char example_path[8][1024], example_title[8][96];
+static char example_path[16][1024], example_title[16][96];
 static int nexamples, example_pick;
 
 static void examples_scan(void)
@@ -3817,7 +3817,7 @@ static void examples_scan(void)
     DIR *d = opendir(dir);
     if (!d) return;
     struct dirent *e;
-    while ((e = readdir(d)) && nexamples < 8) {
+    while ((e = readdir(d)) && nexamples < 16) {
         size_t n = strlen(e->d_name);
         if (n < 6 || strcmp(e->d_name + n - 5, ".tdaw")) continue;
         snprintf(example_path[nexamples], sizeof example_path[0], "%.900s/%.100s", dir, e->d_name);
@@ -11277,7 +11277,7 @@ static int selftest(void)
     /* the example songs open, sound right, and open as untitled copies */
     {
         examples_scan();
-        check(nexamples == 6, "the six example songs are found next to the program");
+        check(nexamples == 10, "the ten example songs are found next to the program");
         int good = 0;
         for (int i = 0; i < nexamples; i++) {
             Project *q = malloc(sizeof *q);

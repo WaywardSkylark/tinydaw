@@ -96,6 +96,9 @@ def main():
             shutil.copy2(os.path.join(ROOT, "examples", f), os.path.join(OUT, "examples"))
     bundle_espeak()
     shutil.copy2(os.path.join(ROOT, "README.md"), OUT)
+    os.makedirs(os.path.join(OUT, "docs"))              # the README links to the manual
+    for f in ("manual.md", "developers.md", "screenshot.png"):
+        shutil.copy2(os.path.join(ROOT, "docs", f), os.path.join(OUT, "docs"))
     shutil.copy2(os.path.join(HERE, "README-windows.txt"), OUT)
     zpath = os.path.join(HERE, "dist", NAME + ".zip")
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:

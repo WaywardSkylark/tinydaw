@@ -380,19 +380,27 @@ music draws it faster. Space plays and stops, the pad keys still work, and Esc l
 | Song | What's in it |
 |---|---|
 | House: Late Train | 124 BPM, A minor. Four-on-the-floor patterns (intro, groove, build, drop) with ghost hats that come and go, an off-beat bass and accented piano stabs that pump with the kick, a pad, a pluck answering the hook, and Lumi singing "Late train" with slides and fall-offs |
-| Hip-hop: Corner Store | 88 BPM, D minor. Swung boom-bap patterns with ghost snares, soft keys comped with feel (Dm9, Gm7, Bbmaj7, A7), an upright bass, a bell melody, vinyl crackle, and Kai singing the hook with scoops |
-| Experimental: Glass Weather | 96 BPM, F Lydian. The bar changes from 4/4 to 7/8 to 5/4 under a sixteen-step pattern whose hits only sometimes play, so it drifts and never repeats; glass bells falling five against four, drones, wind, and a choir line bending between its notes |
+| Hip-hop: Rooftop Static | 90 BPM, C minor (Cm9, Abmaj7, Fm9, G7). Swung boom-bap with ghost notes, soul-key stabs and an upright groove written from the chords, a flute answering in the hook with scoops, Kai singing the hook, drop-out fills, and the beat winding down like a tape stopping |
+| Experimental: Tidal Clockwork | 108 BPM. Clockwork in 5/4, a tide in 7/8, a waltz in 6/8, then home in 4/4, and the key moving from D Dorian to F# Lydian and back. Glass bells arpeggiated up and down from the chords, a shimmer pad, a flute line with vibrato, ticking percussion that bends down as it runs out, and wind rising in pitch |
 | Breakcore: Static Bloom | A half-time intro at 86 BPM, then 172 with chopped two-bar break patterns and rising stutter rolls, four bars of 7/8, and a faster run at 186. A shimmer pad and reese bass, a filter swept by automation, a robot voice leaping an octave, and the Loud master |
-| Rock: Highway Lights | 128 BPM, E minor. Verse and chorus beats with fills, double-tracked crunch guitars (palm-muted in the verse, open in the chorus), a picked bass, a guitar solo, and sung verses and choruses: Kai sings with scoops and slides, Aria harmonises |
+| Rock: Paper Lanterns | 140 BPM, D major, and the last chorus a step up in E. Doubled crunch guitars, palm-muted in the verse, a picked bass written from the chords, a sagging guitar solo, tom fills into each section, and Aria singing the chorus |
 | Trap: Midnight Hollow | 140 BPM, F minor, half-time. Two-bar drum patterns with hat bursts, triplet and thirty-second rolls, an 808 bassline and bell melody, an intro opening under a filter, and a talkbox tag that scoops and falls |
 | Synthwave: Neon Coastline | 100 BPM, F# minor. A gated snare, a pulsing bass and sixteenth arps under a retro lead, a pad and bass pumping with the kick, a filter opening over the intro, and a talkbox singing the chorus |
 | Techno: Concrete Hours | 130 BPM, G minor, pushed to 133 for the peak. Four-on-the-floor with a rumbling bass, a stab every three sixteenths against the bar, an acid line whose filter opens over the peak, and a robot voice |
 | Pop: Paper Planes | 118 BPM, C major. Piano verses and a supersaw chorus over C - G - Am - F; Aria sings the verses and Lumi the chorus with Kai a third below, each line shaped with scoops, slides and fall-offs |
 | Chiptune: Pixel Quest | 150 BPM, C major. A title screen, two levels (the second a whole step up), a boss fight in 3/4 at 170 and a victory jingle. Square-wave lead, fast arpeggios, a pulse bass jumping octaves and noise drums |
+| Lo-fi: Window Rain | 76 BPM, F major (Fmaj7, Em7, Dm9, Cmaj7). Lazy swung drums, held keys with a tape wobble (a vibrato pitch curve), a round bass on the roots, a flute that barely speaks, rain and vinyl |
+| Drum & Bass: Night Bus | 174 BPM, F minor. Two-step breaks with ghost snares, a rolling sub on the roots with a reese doubling it off the beat, a held pad opening under automation, a bell hook, snare rolls into each section, and the sub diving at the drop's end |
+| Jazz: Blue Lamp | 132 BPM swung, Bb major: ii-V-I-vi with a turnaround, then the last chorus up a minor third in Db. Ride, cross-stick and feathered kick, a walking upright bass, comping keys and a flowing flute, all written from the changes |
+| Ambient: Slow Tide | 70 BPM, E Lydian. A shimmer pad held, glass bells rising and falling, a choir singing a sparse line, a soft pulse, drones, and wind that swells and settles in pitch |
+| Disco: Mirror Ball | 120 BPM, A minor (Am7, D9, Gmaj7, Cmaj7). Four on the floor with off-beat open hats, an octave bass, chord stabs and held strings, a supersaw hook, builds into each section, and Lumi singing the chorus |
+| Afrobeats: Golden Hour | 104 BPM, G major. A rolling kick and rim pattern with shakers, a log-drum groove bass, plucks arpeggiating the chords, a vocal-like lead hook with scoops, and tom fills |
 
 Every drum part is a pattern you can open in the Drums panel, the kits and keys have velocity
 layers and round-robins, the sung lines have pitch curves, the parts are named on the arranger
-strip, and the chords are on the chord track (Chiptune changes key three times). Each sets up the pads with its own sounds too. `examples/make_examples.py` writes them.
+strip, and the chords are on the chord track (Chiptune changes key three times). The newer songs (Hip-hop,
+Rock, Experimental and the six after Chiptune) had their bass, chord and melody parts and their drum
+fills written by Create > Parts, from the command line (`--part`, `--fills`). Each sets up the pads with its own sounds too. `examples/make_examples.py` writes them.
 
 ## Settings
 
@@ -417,6 +425,8 @@ Linux and `%APPDATA%\tinydaw` on Windows.
 ./tinydaw --beat trap --export trap.wav   # render a genre beat (4 bars, its tempo and key)
 ./tinydaw song.tdaw --export song.flac --bits 24 --rate 96000
 ./tinydaw --demo --save demo.tdaw         # write a project without opening a window
+./tinydaw song.tdaw --part "bass,style=Walking,sound=Upright bass" --fills "style=Build" --save song.tdaw
+                                          # write parts and fills from the chord track (as Create > Parts)
 ./tinydaw --version
 ```
 

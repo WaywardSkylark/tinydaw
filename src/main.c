@@ -10155,6 +10155,8 @@ static const char *pt_names[PART_KINDS][65];
 static const int PT_LO[PART_KINDS] = {52, 28, 60}, PT_HI[PART_KINDS] = {72, 55, 81};
 static const char *const PT_TRACK[PART_KINDS] = {"Chords", "Bass", "Melody"};
 static int fl_style, fl_where, fl_track = -1;           /* fills: before each section / every 4 / every 8 bars */
+static int pt_force_preset = -1, pt_force_track = -1;   /* the command line's sound= and track= */
+static double pt_from = -1, pt_to = -1;                 /* the command line's bars=: beats */
 static double fl_busy = 0.5;
 static unsigned fl_seed = 1;
 static struct { int id, src, from, steps, bar; } fl_made[MAX_DRUMS];
@@ -10185,7 +10187,10 @@ static int pt_range(double *a, double *b)
     double ca = P.chords[0].at, cb = P.chords[P.nchords - 1].at + P.chords[P.nchords - 1].len;
     *a = ca;
     *b = cb;
-    if (pt_where == 1 && P.loop_end > P.loop_start) {
+    if (pt_from >= 0 && pt_to > pt_from) {
+        *a = pt_from;
+        *b = pt_to;
+    } else if (pt_where == 1 && P.loop_end > P.loop_start) {
         *a = meter_beats(&P, P.loop_start);
         *b = meter_beats(&P, P.loop_end);
     } else if (pt_where == 2) {
@@ -10203,7 +10208,8 @@ static int pt_sample(int kind, double longest)
 {
     int s = P.inst_sample;
     if (pt_sound[kind] == 0 && s >= 0 && s < P.nsamples && !P.samples[s].removed) return s;
-    int pi = pt_sound[kind] >= 1 && pt_sound[kind] <= pt_npre[kind] ? pt_pre[kind][pt_sound[kind] - 1] : pt_pre[kind][0];
+    int pi = pt_force_preset >= 0 ? pt_force_preset
+             : pt_sound[kind] >= 1 && pt_sound[kind] <= pt_npre[kind] ? pt_pre[kind][pt_sound[kind] - 1] : pt_pre[kind][0];
     int held = kind == PART_CHORDS && pt_style[kind] == 0;
     char name[96];
     snprintf(name, sizeof name, held ? "%s (held)" : "%s", SYNTH_PRESETS[pi].name);
@@ -10277,7 +10283,7 @@ static int part_make(int kind, int again)
     int c = pt_last[kind].clip;
     int reuse = again && c >= 0 && c < P.nclips && P.clips[c].pattern == pt_last[kind].pattern && pt_last[kind].pattern > 0;
     if (!reuse) {
-        c = clip_add(s, pt_free_track(fa, fb, PT_TRACK[kind]), fa, 0, fb - fa);
+        c = clip_add(s, pt_force_track >= 0 ? pt_force_track : pt_free_track(fa, fb, PT_TRACK[kind]), fa, 0, fb - fa);
         if (c < 0) return -1;
     }
     LOCK();
@@ -12818,7 +12824,7 @@ static int selftest(void)
     /* the example songs open, sound right, and open as untitled copies */
     {
         examples_scan();
-        check(nexamples == 10, "the ten example songs are found next to the program");
+        check(nexamples == 16, "the sixteen example songs are found next to the program");
         int good = 0, harm = 0, chip_keys = 0;
         for (int i = 0; i < nexamples; i++) {
             Project *q = malloc(sizeof *q);
@@ -12838,7 +12844,7 @@ static int selftest(void)
                 for (long pos = 0; pos < n; pos += 1024)
                     mixer_run(m, q, at + pos, 1, b + 2 * pos, (int)(n - pos < 1024 ? n - pos : 1024), -1, 0);
                 double r = test_rms(b, 0, n, 2);
-                if (q->nclips > 40 && end > 50L * SR && r > 0.02 && strstr(msg, "missing") == NULL) good++;
+                if (q->nclips > 20 && end > 50L * SR && r > 0.02 && strstr(msg, "missing") == NULL) good++;
                 else fprintf(stderr, "example %s: %d clips, %.1f s, rms %.3f: %s\n", example_title[i], q->nclips,
                              (double)end / SR, r, msg);
                 mixer_free(m);
@@ -12854,10 +12860,10 @@ static int selftest(void)
         if (nexamples) {
             int pick = 0;                       /* the one the tests after this were written against */
             for (int i = 0; i < nexamples; i++)
-                if (strstr(example_title[i], "Experimental")) pick = i;
+                if (strstr(example_title[i], "Disco")) pick = i;   /* (4/4 throughout, and 120 BPM: whole frames a beat) */
             snprintf(act_path, sizeof act_path, "%s", example_path[pick]);
             run_action(ACT_OPEN_EXAMPLE);
-            check(proj_path[0] == 0 && !is_dirty() && P.nclips > 40, "an example opens as an untitled copy, nothing to save yet");
+            check(proj_path[0] == 0 && !is_dirty() && P.nclips > 20, "an example opens as an untitled copy, nothing to save yet");
         }
     }
 
@@ -18895,6 +18901,125 @@ static void frame(void)
     tcheck_report("main window");
 }
 
+/* ---- the command line's --part and --fills: parts written into a project without a window, e.g.
+ *   --part "bass,style=Walking,busy=0.5,octave=0,seed=3,sound=Upright bass,bars=4-12,track=Bass,gain=-3"
+ *   --fills "style=Build,len=0.6,where=sections,track=Drums,seed=2"
+ * (sound is a Generator preset's name, bars are 1-based and the end is exclusive, track a track's name) */
+
+static int cli_track(const char *name)
+{
+    for (int t = 0; t < P.ntracks; t++)
+        if (!strcasecmp(P.tracks[t].name, name)) return t;
+    return -1;
+}
+
+static int cli_spec(const char *spec, int fills)
+{
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", spec);
+    int kind = -1, style = -1;
+    double busy = 0.5, gain = 0;
+    int octave = 0, where = 0, track = -1, bend = -1;
+    unsigned seed = 1;
+    pt_force_preset = pt_force_track = -1;
+    pt_from = pt_to = -1;
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) {
+            for (int k = 0; k < PART_KINDS; k++)
+                if (!strcasecmp(tok, (const char *[]){"chords", "bass", "melody"}[k])) kind = k;
+            if (kind < 0 && !fills) {
+                fprintf(stderr, "tinydaw: unknown part %s (chords, bass or melody)\n", tok);
+                return -1;
+            }
+            continue;
+        }
+        *eq = 0;
+        const char *k = tok, *v = eq + 1;
+        if (!strcmp(k, "style")) {
+            int n = fills ? FILL_KINDS : kind >= 0 ? PART_NSTYLES[kind] : 0;
+            for (int i = 0; i < n; i++)
+                if (!strcasecmp(v, fills ? FILL_STYLES[i] : PART_STYLES[kind][i])) style = i;
+            if (style < 0) {
+                fprintf(stderr, "tinydaw: unknown style %s\n", v);
+                return -1;
+            }
+        } else if (!strcmp(k, "busy") || !strcmp(k, "len")) busy = atof(v);
+        else if (!strcmp(k, "octave")) octave = atoi(v);
+        else if (!strcmp(k, "seed")) seed = (unsigned)atol(v);
+        else if (!strcmp(k, "gain")) gain = atof(v);
+        else if (!strcmp(k, "bend")) {
+            static const char *const BN[CBP_COUNT] = {"flat", "scoops", "fall-offs", "vibrato", "rise", "dive"};
+            for (int i = 0; i < CBP_COUNT; i++)
+                if (!strcasecmp(v, BN[i])) bend = i;
+            if (bend < 0) {
+                fprintf(stderr, "tinydaw: bend=%s: scoops, fall-offs, vibrato, rise or dive\n", v);
+                return -1;
+            }
+        }
+        else if (!strcmp(k, "where")) where = !strcmp(v, "4") ? 1 : !strcmp(v, "8") ? 2 : 0;
+        else if (!strcmp(k, "bars")) {
+            int a = 0, b = 0;
+            if (sscanf(v, "%d-%d", &a, &b) != 2 || a < 1 || b <= a) {
+                fprintf(stderr, "tinydaw: bars=%s: give them as first-end, like 5-13\n", v);
+                return -1;
+            }
+            pt_from = meter_beats(&P, meter_bar_frame(&P, a - 1));
+            pt_to = meter_beats(&P, meter_bar_frame(&P, b - 1));
+        } else if (!strcmp(k, "sound")) {
+            for (int i = 0; i < NSYNTH_PRESETS && pt_force_preset < 0; i++)
+                if (!strcasecmp(SYNTH_PRESETS[i].name, v)) pt_force_preset = i;
+            if (pt_force_preset < 0) {
+                fprintf(stderr, "tinydaw: no Generator sound called %s\n", v);
+                return -1;
+            }
+        } else if (!strcmp(k, "track")) {
+            track = cli_track(v);
+            if (track < 0) {
+                fprintf(stderr, "tinydaw: no track called %s\n", v);
+                return -1;
+            }
+        } else {
+            fprintf(stderr, "tinydaw: unknown setting %s\n", k);
+            return -1;
+        }
+    }
+    int rc = 0;
+    if (fills) {
+        fl_style = style >= 0 ? style : 0;
+        fl_busy = busy;
+        fl_where = where;
+        fl_track = track;
+        fl_seed = seed;
+        fl_n = 0;
+        rc = fills_make(0) > 0 ? 0 : -1;
+    } else {
+        if (kind < 0) {
+            fprintf(stderr, "tinydaw: --part needs chords, bass or melody first\n");
+            return -1;
+        }
+        pt_style[kind] = style >= 0 ? style : 0;
+        pt_busy[kind] = busy;
+        pt_octave[kind] = octave;
+        pt_seed[kind] = seed;
+        pt_where = 0;
+        pt_force_track = track;
+        int c = part_make(kind, 0);
+        if (c >= 0) P.clips[c].gain_db = (float)gain;
+        if (c >= 0 && bend > 0) {               /* a pitch bend preset on the part (part_make selected it) */
+            char keep[sizeof status_msg];
+            snprintf(keep, sizeof keep, "%s", status_msg);
+            cb_preset(bend);
+            snprintf(status_msg, sizeof status_msg, "%s", keep);
+        }
+        rc = c >= 0 ? 0 : -1;
+    }
+    pt_force_preset = pt_force_track = -1;
+    pt_from = pt_to = -1;
+    fprintf(rc ? stderr : stdout, "%s\n", status_msg);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     theme_apply(0);
@@ -18911,6 +19036,7 @@ int main(int argc, char **argv)
     const char *export_path = NULL, *shot = NULL, *save_path = NULL;
     int demo = 0, test = 0, format_given = 0;
     const char *beat_arg = NULL;
+    int has_parts = 0;
     project_init(&P);
     export_defaults(&EXO);
 
@@ -18918,6 +19044,11 @@ int main(int argc, char **argv)
         "usage: tinydaw [options] [project.tdaw] [audio files...]\n"
         "  --demo                 start with a two-bar demo beat\n"
         "  --beat GENRE           add a 4-bar beat (house, trap, rock, ... or a number)\n"
+        "  --part SPEC            write a part from the chord track, like\n"
+        "                         \"bass,style=Walking,busy=0.5,seed=3,sound=Upright bass,bars=5-13,track=Bass\"\n"
+        "                         (chords, bass or melody; also octave=-1..1, gain=dB, bend=vibrato...)\n"
+        "  --fills SPEC           drum fills, like \"style=Build,len=0.6,where=sections,track=Drums\"\n"
+        "                         (where: sections, 4 or 8 bars)\n"
         "  --project-rate HZ      engine rate: 44100 48000 88200 96000 176400 192000\n"
         "  --version              print the version\n"
         "  --save FILE.tdaw       save the project (after --demo, --beat, files) and exit\n"
@@ -18929,7 +19060,7 @@ int main(int argc, char **argv)
         "    --mono --stems --loop --normalize --no-dither\n";
     /* options that take a value */
     static const char *with_value[] = {"--save", "--export", "--screenshot", "--format", "--bits", "--rate",
-                                       "--quality", "--project-rate", "--beat"};
+                                       "--quality", "--project-rate", "--beat", "--part", "--fills"};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         int takes = 0;
@@ -18941,6 +19072,7 @@ int main(int argc, char **argv)
         if (!strcmp(a, "--demo")) demo = 1;
         else if (!strcmp(a, "--selftest")) test = 1;
         else if (!strcmp(a, "--beat")) beat_arg = v;
+        else if (!strcmp(a, "--part") || !strcmp(a, "--fills")) has_parts = 1;
         else if (!strcmp(a, "--export")) export_path = v;
         else if (!strcmp(a, "--save")) save_path = v;
         else if (!strcmp(a, "--screenshot")) shot = v;
@@ -19015,6 +19147,11 @@ int main(int argc, char **argv)
         place_beat(g, 0, -1);
         if (export_path) fprintf(stderr, "%s\n", status_msg);
     }
+    for (int i = 1; has_parts && i + 1 < argc; i++)   /* parts and fills, in the order given */
+        if (!strcmp(argv[i], "--part") || !strcmp(argv[i], "--fills")) {
+            if (cli_spec(argv[i + 1], !strcmp(argv[i], "--fills")) != 0) return 1;
+            i++;
+        }
     for (int i = 1; i < argc; i++) {
         int takes = 0;
         for (size_t k = 0; k < sizeof with_value / sizeof *with_value; k++) takes |= !strcmp(argv[i], with_value[k]);

@@ -198,6 +198,8 @@ class Song2(Song):
         self.instrument = (-1, 60, 0)
         self.drumpats = []
         self.key0, self.keychanges, self.harm = (0, 0), [], []
+        self.bends, self.cli = [], []                   # pitch curves; parts and fills for tinydaw to write
+        self._last = None                               # the last clip: (index, beat it starts at, offset frames)
 
     # ---- velocity layers and round-robins (made by tinydaw from the sound, kept out of the list)
     def layers(self, sample, nvel=3, nrr=2):
@@ -236,6 +238,7 @@ class Song2(Song):
         snd = self.drumpats[pid - 1]["rows"][0][0]
         start = self.frame(at)
         self.clips.append((snd, track, start, 0, self.frame(at + beats) - start, 0.0, 0, 0, -pid, 60))
+        self._last = (len(self.clips) - 1, at, 0)
 
     # ---- the chord track and the key
     SCALE_NAMES = ["Major", "Minor", "Harm. minor", "Mel. minor", "Dorian", "Phrygian", "Lydian", "Mixolydian",
@@ -263,6 +266,24 @@ class Song2(Song):
         at = self.bar(bar)
         self.harm.append((at, self.bar(bar + bars) - at, self._pc(root), self.SUFFIXES.index(suffix),
                           self._pc(bass) if bass else -1))
+
+    # ---- pitch curves, and parts tinydaw writes from the chord track
+    def bend(self, points, keep=1):
+        """A pitch curve on the clip just added: (beat from the clip's start, semitones) points. keep=0 bends
+        an audio clip like tape (speed with pitch)."""
+        idx, at, off = self._last
+        start = self.frame(at)
+        pts = [((self.frame(at + b) - start + off) / RATE, st) for b, st in sorted(points)]
+        self.bends.append((len(self.bends) + 1, keep, pts))
+        c = self.clips[idx]
+        self.clips[idx] = (c + (0, 0) if len(c) == 8 else c) + (len(self.bends),)
+
+    def part(self, spec):
+        """A part tinydaw writes from the chord track: "bass,style=Walking,seed=3,sound=...,bars=5-13,track=Bass"."""
+        self.cli += ["--part", spec]
+
+    def fills(self, spec):
+        self.cli += ["--fills", spec]
 
     # ---- the tempo map: quarter notes ("beats") and bars, to frames
     def _sections(self):
@@ -325,6 +346,7 @@ class Song2(Song):
         if fi + fo > length:
             fi = fo = length // 2
         self.clips.append((sample, track, start, off, length, gain, fi, fo))
+        self._last = (len(self.clips) - 1, at, off)
 
     def noteclip(self, sample, track, at, beats, notes, root=None):
         """A note clip at `at` for `beats`, playing `sample` pitched to each (note, start, length, vel)."""
@@ -336,6 +358,7 @@ class Song2(Song):
             a = self.frame(at + st) - start
             self.notes.append((pat, n, a, max(48, self.frame(at + st + ln) - self.frame(at + st)), vel))
         self.clips.append((sample, track, start, 0, self.frame(at + beats) - start, 0.0, 0, 0, pat, root))
+        self._last = (len(self.clips) - 1, at, 0)
 
     def auto(self, track, param, at, value):
         self.autos.append((track, param, self.frame(at), value))
@@ -417,8 +440,13 @@ class Song2(Song):
                                                            t(d["swing"]), d["name"]))
                     for r, (snd, vol, vel, pr) in enumerate(d["rows"]):
                         out.append("drow %d %d %s %s" % (r, snd, t(vol), " ".join("%d:%d" % vp for vp in zip(vel, pr))))
+                for bid, keep, pts in self.bends:            # pitch curves, before the clips that use them
+                    out.append("bend %d %d" % (bid, keep))
+                    for at, st in pts:
+                        out.append("bpt %s %s" % (t(at), t(st)))
                 for c in sorted(self.clips, key=lambda c: (c[2], c[1])):
                     extra = " %d %d" % (c[8], c[9]) if len(c) > 8 else ""
+                    extra += " %d" % c[10] if len(c) > 10 else ""
                     out.append("clip %d %d %d %d %d %s %d %d%s" % (c[0], c[1], c[2], c[3], c[4], t(c[5]), c[6], c[7], extra))
                 for n in self.notes:
                     out.append("note %d %d %d %d %s" % (n[0], n[1], n[2], n[3], t(n[4])))
@@ -586,165 +614,8 @@ def house():
     return s
 
 
-# ---------------------------------------------------------------- 2. hip-hop
-
-def hiphop():
-    s = Song2("Hip-hop: Corner Store", 88)
-    # D minor, a bar each: Dm9 - Gm7 - Bbmaj7 - A7. Swung sixteenths, ghost notes that come and go.
-    chords = [("Dm9", [50, 53, 57, 60, 64], 38), ("Gm7", [50, 55, 58, 62, 65], 31),
-              ("Bbmaj7", [50, 53, 57, 58, 62], 34), ("A7", [49, 52, 55, 57, 61], 33)]
-    kick = s.synth("Boom bap kick", "Boom bap kick")
-    snare = s.synth("Dusty snare", "Dusty snare")
-    hat = s.synth("Dusty hat", "Trap hat", seconds=0.14, macros=(0.35, 0.45, 0.45, 0.55, 0.5))
-    rim = s.synth("Rim", "Rimshot", macros=(0.4, 0.5, 0.5, 0.5, 0.5))
-    keys = s.synth("Soul keys", "Soul keys", seconds=2.5)
-    bass = s.synth("Upright bass", "Upright bass", seconds=1.2)
-    bell = s.synth("Glass bell", "Glass bell", seconds=2)
-    kit(s, (kick, snare, hat, rim, keys, bass, bell))
-    crackle = s.synth("Vinyl crackle", "Vinyl crackle", seconds=8)
-    air = {n: s.chord("%s air" % n, [x + 12 for x in notes[2:]], SINE, 4, 0.12, 300, 900) for n, notes, _ in chords}
-    hook_notes = [(57, 0, 0.5), (57, 0.5, 0.5), (60, 1, 1.5), (57, 3, 0.5), (55, 3.5, 1), (53, 4.5, 0.5), (50, 5, 2.5),
-                  (57, 8, 0.5), (60, 8.5, 1), (62, 9.5, 1), (60, 11, 0.5), (57, 11.5, 0.5), (55, 12, 1), (53, 13, 0.5),
-                  (50, 13.5, 2.5)]
-    hn = [(n, st, ln * 0.95) for n, st, ln in hook_notes]
-    hook = s.vocal("Sung: corner store", "Cor-ner store, the lights stay on. Late-night talk till the dark is gone.",
-                   hn, singer=KAI, vibrato=0.3, bends=shape(hn, scoop=1.5, slide=True, fall=2.0))
-
-    t_drums = s.track("Drums", 0.8, eq=(1, 0, 1), drive=0.2, reverb=0.08)
-    t_bass = s.track("Bass", 0.7, filt=1, cutoff=900, drive=0.1)
-    t_keys = s.track("Keys", 0.75, filt=1, cutoff=2600, reso=0.15, eq=(-3, 1, 0), drive=0.15, reverb=0.3)
-    t_air = s.track("Air", 0.35, pan=0.25, reverb=0.5)
-    t_bell = s.track("Bells", 0.45, pan=0.2, delay=0.38, reverb=0.35)
-    t_vox = s.track("Vocal", 0.8, delay=0.15, reverb=0.25)
-    t_vinyl = s.track("Vinyl", 0.45, filt=2, cutoff=2000, pan=-0.2)
-    s.fx.update(div=4, fb=0.42, tone=0.35, dlevel=0.6, ping=0, size=0.55, damp=0.6, rlevel=0.7)
-    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
-
-    verse = s.drums(t_drums, "Boom bap", 16, [(kick, "X......o.xX....."), (snare, "....X..g....X..g", ".......4.......6"),
-                                              (hat, "x.o.x.o.x.o.x.ox", "...............6"),
-                                              (rim, "..........g...g.", "..........5...3.")], swing=0.2)
-    hookd = s.drums(t_drums, "Boom bap B", 32, [(kick, "X......o.xX.....X.....x.x.X...o."),
-                                                (snare, "....X..g....X..g....X..g....X.oX", ".......5.......6.......5........"),
-                                                (hat, "x.o.x.o.x.o.x.oxx.o.x.o.x.o.xoxo", "...............6.............5.5"),
-                                                (rim, "..g.......g.......g.......g.....", "..4.......6.......4.......6.....")],
-                    swing=0.2)
-    brk = s.drums(t_drums, "Hats alone", 16, [(hat, "o.g.o.g.o.g.o.go", "..5...5...5...55"), (rim, "....g.......g...", "....6.......6...")],
-                  swing=0.2)
-    s.drumclip(verse, t_drums, s.bar(4), 32)
-    s.drumclip(hookd, t_drums, s.bar(12), 16)
-    s.drumclip(brk, t_drums, s.bar(16), 8)
-    s.drumclip(hookd, t_drums, s.bar(18), 16)
-
-    for b in range(0, 24, 2):
-        s.clip(crackle, t_vinyl, s.bar(b), beats=8, fade_in=1 if b == 0 else 0, fade_out=3 if b == 22 else 0)
-    for bar in range(24):
-        name, notes, root = chords[bar % 4]
-        comp = [(0, 1.5, 0.8), (1.75, 0.5, 0.45), (2.5, 1.4, 0.65)] if bar % 2 == 0 else \
-               [(0, 1.0, 0.75), (1.5, 0.5, 0.4), (2.25, 0.5, 0.55), (3, 1, 0.6)]
-        s.noteclip(keys, t_keys, s.bar(bar), 4, [(n, at, ln, v - 0.04 * i) for at, ln, v in comp
-                                                 for i, n in enumerate(notes)])
-        if 12 <= bar < 22:
-            s.clip(air[name], t_air, s.bar(bar), fade_in=1)
-        if 4 <= bar < 22 and not 16 <= bar < 18:
-            s.noteclip(bass, t_bass, s.bar(bar), 4, [(root, 0, 1.25, 0.9), (root + 7, 2.75, 0.5, 0.55),
-                                                     (root, 3.5, 0.5, 0.7)])
-    melody = [(0, 81, 1), (1.5, 79, 0.5), (2, 77, 1), (4, 74, 2), (8, 77, 1), (9, 79, 1), (10.5, 81, 0.5),
-              (11, 84, 1), (12, 81, 2)]
-    for start in (12, 18):
-        s.noteclip(bell, t_bell, s.bar(start), 16, [(n, at, ln, 0.5 + 0.1 * (k % 3)) for k, (at, n, ln) in enumerate(melody)])
-        s.clip(hook, t_vox, s.bar(start))
-    s.pads = [(kick, 0, 0.9, t_drums), (snare, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (rim, 0, 0.8, t_drums),
-              (bell, 0, 0.7, t_bell), (hook, 0, 0.8, t_vox), (crackle, 2, 0.6, t_vinyl)]
-    s.instrument = (keys, 60, t_keys)
-    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(16)))
-    s.section(0, 4, "Intro")
-    s.section(4, 8, "Verse")
-    s.section(12, 4, "Hook")
-    s.section(16, 2, "Break")
-    s.section(18, 4, "Hook")
-    s.section(22, 2, "Outro")
-    s.key("D Minor")
-    for bar in range(24):
-        s.harmony(bar, ["Dm9", "Gm7", "Bbmaj7", "A7"][bar % 4])
-    return s
 
 
-# ---------------------------------------------------------------- 3. experimental
-
-def experimental():
-    s = Song2("Experimental: Glass Weather", 96)
-    # F Lydian (the raised fourth, B, makes it float). The bar changes under the music: 4/4, then 7/8,
-    # then 5/4. The drum pattern is always sixteen steps, so it slides against each new bar, and most
-    # of its hits only happen some of the time: no two passes are the same.
-    s.change(8, 96, 7, 8)
-    s.change(16, 96, 5, 4)
-    s.change(24, 96, 4, 4)
-    drone_lo = s.gen("drone F1", SAW, 29, 8, 0.32, 1500, 1500)
-    drone_hi = s.gen("drone C2", SAW, 36, 8, 0.26, 1500, 1500)
-    glass = s.synth("Glass bell", "Glass bell", seconds=2.5)
-    kick = s.synth("Soft kick", "Lo-fi kick")
-    noise = s.synth("Noise hit", "Noise drum", macros=(0.6, 0.4, 0.5, 0.6, 0.5))
-    rim = s.synth("Rim", "Rimshot")
-    snap = s.synth("Snap", "Snap")
-    kit(s, (glass, kick, noise, rim, snap))
-    rglass = s.variant2("Glass bell reversed", glass, -12, 1)
-    wind = s.synth("Wind", "Wind", seconds=8)
-    sub = s.gen("sub F0", SINE, 17, 2, 0.6, 20, 600)
-    choir_notes = [(65, 0, 3), (69, 3, 3), (71, 6, 5), (72, 12, 3), (71, 15, 2), (69, 17, 6)]
-    choir_bends = [(0.0, -2.0), (1.0, 0.0), (2.6, 0.0), (2.99, 4.0), (3.0, 0.0), (5.4, 0.0), (5.99, 2.0), (6.0, 0.0),
-                   (9.0, 0.0), (10.5, 0.5), (11.0, 0.0), (14.4, 0.0), (14.99, -1.0), (15.0, 0.0), (16.6, 0.0),
-                   (16.99, -2.0), (17.0, 0.0), (21.0, 0.0), (23.0, -5.0)]
-    choir = s.vocal("Sung: glass weather", "Rain on glass, slow-ly fall-ing", choir_notes, style=VS_CHOIR,
-                    high=1, vibrato=0.6, volume=0.7, bends=choir_bends)
-
-    t_lo = s.track("Drone low", 0.7, pan=-0.35, filt=3, cutoff=420, reso=0.7, drive=0.6, reverb=0.25, duck=0.5)
-    t_hi = s.track("Drone high", 0.6, pan=0.35, filt=3, cutoff=640, reso=0.7, drive=0.5, reverb=0.25, duck=0.5)
-    t_glass = s.track("Glass", 0.6, pan=0.1, delay=0.45, reverb=0.6)
-    t_rev = s.track("Glass reversed", 0.45, pan=-0.2, filt=1, cutoff=3000, reverb=0.5)
-    t_wind = s.track("Wind", 0.5, filt=3, cutoff=2400, reso=0.85, reverb=0.4)
-    t_kit = s.track("Drums", 0.65, eq=(0, -2, 2), drive=0.3, reverb=0.2, delay=0.15)
-    t_choir = s.track("Choir", 0.6, pan=-0.1, reverb=0.7)
-    t_sub = s.track("Sub", 0.7, duck=0.4)
-    s.fx.update(div=3, fb=0.58, tone=0.45, dlevel=0.75, ping=1, size=0.92, damp=0.25, rlevel=0.9, sc=t_kit, release=260)
-    s.dynamics = (1, -20.0, 2.0, 20.0, 250.0, 2.0, 1, -1.0)   # gentle glue, and a limiter
-
-    end = s.bar(28)
-    at = 0.0
-    while at < end:                                 # drones breathe in eight-beat swells
-        s.clip(drone_lo, t_lo, at, beats=min(8, end - at), fade_in=1, fade_out=1)
-        if at >= 8:
-            s.clip(drone_hi, t_hi, at + 4 if at + 12 <= end else at, beats=min(8, end - at), fade_in=1, fade_out=1)
-        at += 8
-    for b in (0, 6, 14, 22):
-        s.clip(wind, t_wind, s.bar(b), fade_in=3, fade_out=3)
-    # glass falling in fives against the bar, louder then softer: the layers change its colour
-    lyd = [77, 81, 83, 84, 88, 84, 83, 81]
-    notes, k, at = [], 0, 0.0
-    while at < s.bar(24) - s.bar(4):
-        notes.append((lyd[(k * 3) % 8], at, 1.0, 0.35 + 0.55 * abs(math.sin(k * 0.45))))
-        k, at = k + 1, at + 1.25
-    s.noteclip(glass, t_glass, s.bar(4), s.bar(24) - s.bar(4), notes)
-    for i, b in enumerate(range(6, 26, 2)):         # reversed glass rising into the bar lines
-        s.clip(rglass, t_rev, s.bar(b) - 2, beats=2, fade_in=0.5)
-    pulse = s.drums(t_kit, "Weather", 16, [(kick, "X.....o...x.....", "......6...7....."),
-                                           (noise, "....x..g....x.g.", ".......4......53"),
-                                           (rim, "..g.g..o.g.g.o..", "..3.4..6.3.4.5.."),
-                                           (snap, ".......x......x.", ".......5......6.")])
-    s.drumclip(pulse, t_kit, s.bar(8), s.bar(24) - s.bar(8))
-    for at in range(int(s.bar(8)), int(s.bar(24)), 7):   # the sub every seven beats, against everything
-        s.clip(sub, t_sub, at)
-    s.clip(choir, t_choir, s.bar(16))
-    s.clip(choir, t_choir, s.bar(24) - 2, gain=-4)
-    s.pads = [(glass, 0, 0.8, t_glass), (rglass, 0, 0.8, t_rev), (kick, 0, 0.8, t_kit), (noise, 0, 0.8, t_kit),
-              (rim, 0, 0.8, t_kit), (snap, 0, 0.8, t_kit), (sub, 0, 0.9, t_sub), (wind, 1, 0.7, t_wind),
-              (drone_lo, 1, 0.7, t_lo), (drone_hi, 1, 0.7, t_hi), (choir, 0, 0.7, t_choir)]
-    s.instrument = (glass, 79, t_glass)
-    s.section(0, 8, "Fog")
-    s.section(8, 8, "Glass (7/8)")
-    s.section(16, 8, "Choir (5/4)")
-    s.section(24, 4, "Clearing")
-    s.key("F Lydian")
-    return s
 
 
 # ---------------------------------------------------------------- 4. breakcore
@@ -852,119 +723,6 @@ def breakcore():
     return s
 
 
-# ---------------------------------------------------------------- 5. rock with vocals
-
-def rock():
-    s = Song2("Rock: Highway Lights", 128)
-    # E minor: Em - C - G - D. Intro, verse (sung), chorus (sung, with harmony), a guitar solo, chorus.
-    guitar_patch = dict(wave=0, wave2=1, mix2=0.55, voices=2, detune=9, width=0.6, filter=1, cutoff=2600, reso=0.2,
-                        fenv=0.6, fdecay=0.25, attack=0.003, decay=0.35, sustain=0.75, release=0.12, drive=0.95)
-    lead_patch = dict(guitar_patch, voices=1, vibrato=22, lfo_hz=5.5, cutoff=3400, mix2=0.4, sustain=0.85)
-    kick = s.synth("Rock kick", "Boom bap kick", macros=(0.6, 0.4, 0.6, 0.45, 0.5))
-    snare = s.synth("Rock snare", "Break snare", seconds=0.35, macros=(0.55, 0.6, 0.6, 0.5, 0.5))
-    hat = s.synth("Closed hat", "Trap hat", seconds=0.15, macros=(0.45, 0.55, 0.5, 0.4, 0.5))
-    ohat = s.synth("Open hat", "Open hat", seconds=0.5)
-    tom = s.synth("Tom", "Drum machine tom", macros=(0.45, 0.5, 0.6, 0.4, 0.5))
-    crash = s.synth("Crash", "Open hat", seconds=1.6, volume=0.75, macros=(0.6, 0.95, 0.8, 0.6, 0.5))
-    bass = s.synth("Picked bass", "Synth bass", seconds=0.5, macros=(0.55, 0.4, 0.6, 0.65, 0.5))
-    gtr = s.synth("Crunch guitar", patch=guitar_patch, note=52, seconds=2.2, volume=0.75)
-    lead = s.synth("Lead guitar", patch=lead_patch, note=64, seconds=2.2, volume=0.75)
-    kit(s, (kick, snare, hat, ohat, tom, bass, gtr, lead))
-
-    t_kick = s.track("Drums", 0.85, eq=(1, 0, 1), reverb=0.15)
-    t_snare = t_hats = t_kick
-    t_bass = s.track("Bass", 0.7, filt=1, cutoff=1600, drive=0.2)
-    t_gl = s.track("Guitar L", 0.55, pan=-0.6, eq=(-2, 1, 0))
-    t_gr = s.track("Guitar R", 0.55, pan=0.6, eq=(-2, 1, 0))
-    t_lead = s.track("Lead guitar", 0.55, pan=0.1, delay=0.25, reverb=0.3)
-    t_vox = s.track("Vocal", 0.85, delay=0.12, reverb=0.3)
-    t_harm = s.track("Harmony", 0.55, pan=-0.25, reverb=0.4)
-    t_cym = s.track("Cymbals", 0.45, pan=-0.2, reverb=0.2)
-    s.fx.update(div=4, fb=0.3, tone=0.5, dlevel=0.5, ping=0, size=0.65, damp=0.45, rlevel=0.7)
-    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)   # Glue
-
-    verse = s.drums(t_kick, "Verse beat", 32, [(kick, "X.....x.X.......X.......x.X....."),
-                                               (snare, "....X..g....X.......X......gX..g", ".......5...........6.......4..5"),
-                                               (hat, "X.x.x.x.X.x.x.x.X.x.x.x.X.x.x.xo")])
-    chorus = s.drums(t_kick, "Chorus beat", 32, [(kick, "X.....x.X.x.....X.....x.X.x...x."),
-                                                 (snare, "....X.......X.......X.......X..g", "...............................5"),
-                                                 (hat, "X...x...X...x...X...x...X...x..."),
-                                                 (ohat, "..x...x...x...x...x...x...x...x.")])
-    fill = s.drums(t_kick, "Fill", 16, [(kick, "X.......X......."), (snare, "....X.......gogx"),
-                                         (tom, "........x.o.....")])
-    s.drumclip(verse, t_kick, s.bar(0), s.bar(12))
-    for (b0, b1, pid) in ((12, 19, chorus), (19, 20, fill), (20, 23, verse), (23, 24, fill), (24, 31, chorus), (31, 32, fill)):
-        s.drumclip(pid, t_kick, s.bar(b0), s.bar(b1) - s.bar(b0))
-    for b in (4, 12, 20, 24, 32):
-        s.clip(crash, t_cym, s.bar(b))
-    s.clip(kick, t_kick, s.bar(32))
-    prog = [40, 36, 43, 38]
-    def power(root):
-        r = root + 12
-        return [r, r + 7, r + 12]
-    for b in range(32):
-        root = prog[b % 4]
-        chor = 12 <= b < 20 or 24 <= b < 32
-        s.noteclip(bass, t_bass, s.bar(b), 4, [(root, i * 0.5, 0.45, 0.95 if i % 4 == 0 else 0.75 if i % 2 == 0 else 0.55)
-                                               for i in range(8)])
-        for tr, shift in ((t_gl, 0), (t_gr, 0.01)):
-            if chor or b < 4:
-                notes = [(n, shift, 3.9, 0.9) for n in power(root)]
-            else:                                    # palm-muted: accents on the beat, lighter between
-                notes = [(n, i * 0.5 + shift, 0.3, 0.85 if i % 2 == 0 else 0.5) for i in range(8) for n in power(root)[:2]]
-            s.noteclip(gtr, tr, s.bar(b), 4, notes)
-    s.auto(t_gl, AUTO_VOLUME, 0, 0.0)
-    s.auto(t_gl, AUTO_VOLUME, s.bar(2), 0.37)
-    s.auto(t_gr, AUTO_VOLUME, 0, 0.0)
-    s.auto(t_gr, AUTO_VOLUME, s.bar(2), 0.37)
-    solo = [(64, 0, 1.5), (67, 1.5, 0.5), (69, 2, 1), (71, 3, 1), (74, 4, 2), (71, 6, 1), (69, 7, 1),
-            (67, 8, 1.5), (64, 9.5, 0.5), (67, 10, 1), (69, 11, 1), (71, 12, 1), (69, 13, 0.5), (67, 13.5, 0.5),
-            (66, 14, 1), (64, 15, 1)]
-    s.noteclip(lead, t_lead, s.bar(20), 16, [(n, st, ln, 0.6 + 0.35 * (ln >= 1)) for n, st, ln in solo])
-
-    verse_words = ("Head-lights burn-ing on the road to-night. Ci-ty fad-ing in the rear-view light. "
-                   "En-gine roar-ing as the stars come out. No-thing left to lose and no-thing left to doubt.")
-    r9 = [(0, 0.5), (0.5, 0.5), (1, 0.5), (1.5, 0.5), (2, 0.5), (2.5, 0.5), (3, 1), (4, 0.5), (4.5, 2.5)]
-    r11 = [(0, 0.5), (0.5, 0.5), (1, 0.5), (1.5, 0.5), (2, 1), (3, 0.5), (3.5, 0.5), (4, 0.5), (4.5, 0.5),
-           (5, 0.5), (5.5, 2)]
-    lines = [([52, 52, 55, 55, 57, 55, 59, 57, 55], r9), ([59, 59, 57, 55, 54, 52, 55, 54, 52], r9),
-             ([52, 55, 57, 59, 57, 55, 62, 59, 57], r9), ([59, 59, 57, 55, 57, 55, 54, 54, 52, 50, 52], r11)]
-    vnotes = []
-    for li, (pitches, rhythm) in enumerate(lines):
-        vnotes += [(p, li * 8 + st, ln * 0.95) for p, (st, ln) in zip(pitches, rhythm)]
-    chorus_words = "Hold on, we're run-ning to the light. Hold on, we're a-live to-night. " * 2
-    ca = [(62, 0, 1), (64, 1, 1), (62, 2.5, 0.5), (64, 3, 0.5), (67, 3.5, 0.5), (66, 4, 0.5), (64, 4.5, 0.5), (64, 5, 2.5)]
-    cb = [(62, 0, 1), (64, 1, 1), (62, 2.5, 0.5), (59, 3, 0.5), (62, 3.5, 1.5), (59, 5, 0.5), (64, 5.5, 2.5)]
-    cnotes = []
-    for rep in range(2):
-        cnotes += [(n, rep * 16 + st, ln * 0.95) for n, st, ln in ca]
-        cnotes += [(n, rep * 16 + 8 + st, ln * 0.95) for n, st, ln in cb]
-    E_MINOR = [52, 54, 55, 57, 59, 60, 62, 64, 66, 67, 69, 71, 72, 74, 76, 78, 79, 81, 83, 84]
-    third = lambda n: E_MINOR[E_MINOR.index(n) + 2] if n in E_MINOR else n + 3
-    harmony = [(third(n) + 12, st, ln) for n, st, ln in cnotes]
-    v = s.vocal("Sung: verse", verse_words, vnotes, singer=KAI, bends=shape(vnotes, scoop=1.0, slide=False, fall=2.0))
-    c = s.vocal("Sung: chorus", chorus_words, cnotes, singer=KAI, bends=shape(cnotes, scoop=1.5, slide=True, fall=0))
-    h = s.vocal("Sung: chorus harmony", chorus_words, harmony, singer=AIRA, high=1, vibrato=0.35,
-                bends=shape(harmony, scoop=0, slide=True, fall=0))
-    s.clip(v, t_vox, s.bar(4))
-    s.clip(c, t_vox, s.bar(12))
-    s.clip(h, t_harm, s.bar(12))
-    s.clip(c, t_vox, s.bar(24))
-    s.clip(h, t_harm, s.bar(24))
-    s.pads = [(kick, 0, 0.9, t_kick), (snare, 0, 0.9, t_snare), (hat, 0, 0.7, t_hats), (ohat, 0, 0.7, t_hats),
-              (tom, 0, 0.8, t_snare), (crash, 0, 0.8, t_cym), (bass, 0, 0.9, t_bass), (gtr, 1, 0.8, t_gl),
-              (lead, 1, 0.8, t_lead), (v, 0, 0.8, t_vox), (c, 0, 0.8, t_vox), (h, 0, 0.7, t_harm)]
-    s.instrument = (gtr, 52, t_gl)
-    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
-    s.section(0, 4, "Intro")
-    s.section(4, 8, "Verse")
-    s.section(12, 8, "Chorus")
-    s.section(20, 4, "Solo")
-    s.section(24, 8, "Chorus")
-    s.key("E Minor")
-    for b in range(32):
-        s.harmony(b, ["Em", "C", "G", "D"][b % 4])
-    return s
 
 
 # ---------------------------------------------------------------- 6. trap
@@ -1436,10 +1194,538 @@ def chiptune():
     return s
 
 
+# ---------------------------------------------------------------- the songs made with the chord track
+# These lay down the sounds, the mix, the drums, the chords and key, the sections and any sung lines,
+# then ask tinydaw (--part, --fills) to write the bass, chord and melody parts and the drum fills from
+# the chord track, the way Create > Parts does. Pitch curves (s.bend) bend clips the way Mixer > Clip does.
+
+def beats_every(s, pair_or_pid, track, b0, b1, every=1):
+    """A drum pattern (or a kick/drums pair from split_beat) as clips `every` bars long over bars [b0, b1)."""
+    for b in range(b0, b1, every):
+        e = min(b + every, b1)
+        if isinstance(pair_or_pid, tuple):
+            place(s, pair_or_pid, s.bar(b), s.bar(e) - s.bar(b))
+        else:
+            s.drumclip(pair_or_pid, track, s.bar(b), s.bar(e) - s.bar(b))
+
+
+def harmony_loop(s, b0, b1, names, bars=1):
+    """Chords on the chord track, `names` round and round, each `bars` long, over bars [b0, b1)."""
+    for i, b in enumerate(range(b0, b1, bars)):
+        s.harmony(b, names[i % len(names)], min(bars, b1 - b))
+
+
+# ---------------------------------------------------------------- 2. hip-hop
+
+def hiphop():
+    s = Song2("Hip-hop: Rooftop Static", 90)
+    # C minor: Cm9 - Abmaj7 - Fm9 - G7, a bar each. Swung boom-bap, soul-key stabs and an upright
+    # groove written from the chords, a flute answering in the hook, Kai on the hook, and the beat
+    # slowing to a stop at the end (a tape-style bend on the drums).
+    kick = s.synth("Kick", "Boom bap kick", macros=(0.5, 0.45, 0.6, 0.45, 0.5))
+    snare = s.synth("Snare", "Dusty snare", seconds=0.4)
+    hat = s.synth("Hat", "Trap hat", seconds=0.12, macros=(0.4, 0.5, 0.45, 0.35, 0.5))
+    rim = s.synth("Rim", "Rimshot")
+    kit(s, (kick, snare, hat, rim))
+    crackle = s.synth("Vinyl", "Vinyl crackle", seconds=8)
+    hook_notes = [(67, 0, 0.75), (70, 1, 0.5), (72, 1.5, 1.5), (70, 4, 0.75), (67, 5, 0.5), (65, 5.5, 1),
+                  (63, 6.5, 1.25)]
+    hook = s.vocal("Sung: rooftop", "Up on the roof, the sta-tic hums", hook_notes, singer=KAI, vibrato=0.3,
+                   bends=shape(hook_notes, scoop=1.2, fall=2.5))
+
+    t_drums = s.track("Drums", 0.8, eq=(1, 0, -1), reverb=0.12)
+    t_keys = s.track("Keys", 0.6, filt=1, cutoff=3000, reso=0.1, drive=0.15, reverb=0.3)
+    t_bass = s.track("Bass", 0.75, eq=(2, 0, -2))
+    t_flute = s.track("Flute", 0.45, pan=0.3, delay=0.3, reverb=0.4)
+    t_vox = s.track("Vocal", 0.85, delay=0.15, reverb=0.3)
+    t_vinyl = s.track("Vinyl", 0.3, filt=2, cutoff=600)
+    s.fx.update(div=4, fb=0.3, tone=0.4, dlevel=0.5, ping=1, size=0.55, damp=0.5, rlevel=0.6)
+    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
+
+    groove = s.drums(t_drums, "Boom bap", 16, [(kick, "X.....x...X..x..", ".........5....5."),
+                                                (snare, "....X..g....X..g", ".......4.......5"),
+                                                (hat, "x.x.x.x.x.x.x.xo", "..........5....."),
+                                                (rim, "..........g.....", "..........4.....")], swing=0.12)
+    intro = s.drums(t_drums, "Intro", 16, [(hat, "x.x.x.x.x.x.x.x."), (rim, "....g.......g...")], swing=0.12)
+    beats_every(s, intro, t_drums, 0, 4)
+    beats_every(s, groove, t_drums, 4, 27)
+    s.drumclip(groove, t_drums, s.bar(27), 4)          # the last bar: the beat winds down like a tape stopping
+    s.bend([(0, 0), (2, -3), (4, -24)], keep=0)
+    for b in range(0, 28, 4):
+        s.clip(crackle, t_vinyl, s.bar(b), beats=16)
+    harmony_loop(s, 0, 28, ["Cm9", "Abmaj7", "Fm9", "G7"])
+    s.key("C Minor")
+    for b in (12, 20):
+        s.clip(hook, t_vox, s.bar(b))
+        s.clip(hook, t_vox, s.bar(b + 4))
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Verse")
+    s.section(12, 8, "Hook")
+    s.section(20, 4, "Verse")
+    s.section(24, 4, "Outro")
+    s.part("chords,style=Stabs,busy=0.35,seed=2,sound=Soul keys,track=Keys")
+    s.part("bass,style=Groove,busy=0.6,seed=4,sound=Upright bass,bars=5-28,track=Bass")
+    s.part("melody,style=Sparse,busy=0.45,seed=7,sound=Flute lead,bars=13-21,track=Flute,bend=scoops")
+    s.fills("style=Drop-out,len=0.3,where=sections,track=Drums,seed=3")
+    s.pads = [(kick, 0, 0.9, t_drums), (snare, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (rim, 0, 0.8, t_drums),
+              (hook, 0, 0.8, t_vox)]
+    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
+    return s
+
+
+# ---------------------------------------------------------------- 5. rock
+
+def rock():
+    s = Song2("Rock: Paper Lanterns", 140)
+    # D major: D - A - Bm - G in the verse, G - D - A - Bm in the chorus, and the last chorus a step up
+    # in E (a key change). Doubled crunch guitars, a picked bass written from the chords, tom fills
+    # before each section, and Aria singing the chorus.
+    guitar_patch = dict(wave=0, wave2=1, mix2=0.55, voices=2, detune=9, filter=1, cutoff=2600, reso=0.2,
+                        fenv=0.6, fdecay=0.25, attack=0.003, decay=0.35, sustain=0.75, release=0.12, drive=0.95)
+    lead_patch = dict(guitar_patch, voices=1, vibrato=22, lfo_hz=5.5, cutoff=3400, mix2=0.4, sustain=0.85)
+    kick = s.synth("Rock kick", "Boom bap kick", macros=(0.6, 0.4, 0.6, 0.45, 0.5))
+    snare = s.synth("Rock snare", "Break snare", seconds=0.35, macros=(0.55, 0.6, 0.6, 0.5, 0.5))
+    hat = s.synth("Closed hat", "Trap hat", seconds=0.15, macros=(0.45, 0.55, 0.5, 0.4, 0.5))
+    tom = s.synth("Tom", "Drum machine tom", macros=(0.45, 0.5, 0.6, 0.4, 0.5))
+    crash = s.synth("Crash", "Open hat", seconds=1.6, volume=0.75, macros=(0.6, 0.95, 0.8, 0.6, 0.5))
+    gtr = s.synth("Crunch guitar", patch=guitar_patch, note=52, seconds=2.2, volume=0.75)
+    lead = s.synth("Lead guitar", patch=lead_patch, note=64, seconds=2.2, volume=0.75)
+    kit(s, (kick, snare, hat, tom, gtr, lead))
+    cn = [(74, 0, 1), (73, 1, 0.5), (71, 1.5, 1.5), (69, 4, 1), (71, 5, 0.5), (73, 5.5, 2)]
+    cn2 = [(n + 2, st, ln) for n, st, ln in cn]
+    chorus_v = s.vocal("Sung: lanterns", "Pa-per lan-terns, light the way", cn, singer=AIRA, high=1, vibrato=0.4,
+                       bends=shape(cn, scoop=1.0, fall=2.0))
+    chorus_up = s.vocal("Sung: lanterns (up)", "Pa-per lan-terns, light the way", cn2, singer=AIRA, high=1,
+                        vibrato=0.4, bends=shape(cn2, scoop=1.0, fall=2.0))
+
+    t_drums = s.track("Drums", 0.85, eq=(1, 0, 1), reverb=0.15)
+    t_bass = s.track("Bass", 0.7, filt=1, cutoff=1600, drive=0.2)
+    t_gl = s.track("Guitar L", 0.5, pan=-0.6, eq=(-2, 1, 0))
+    t_gr = s.track("Guitar R", 0.5, pan=0.6, eq=(-2, 1, 0))
+    t_lead = s.track("Lead guitar", 0.5, pan=0.1, delay=0.25, reverb=0.3)
+    t_vox = s.track("Vocal", 0.85, delay=0.12, reverb=0.3)
+    t_cym = s.track("Cymbals", 0.4, pan=-0.2, reverb=0.2)
+    s.fx.update(div=4, fb=0.3, tone=0.5, dlevel=0.5, ping=0, size=0.65, damp=0.45, rlevel=0.7)
+    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
+
+    verse = s.drums(t_drums, "Verse beat", 16, [(kick, "X.....x.X......."), (snare, "....X.......X..g", "...............5"),
+                                                 (hat, "X.x.x.x.X.x.x.x."), (tom, "................")])
+    chorus = s.drums(t_drums, "Chorus beat", 16, [(kick, "X.....x.X.x....."), (snare, "....X.......X..."),
+                                                   (hat, "X.X.X.X.X.X.X.X."), (tom, "................")])
+    beats_every(s, verse, t_drums, 0, 12)
+    beats_every(s, chorus, t_drums, 12, 20)
+    beats_every(s, verse, t_drums, 20, 24)
+    beats_every(s, chorus, t_drums, 24, 32)
+    for b in (4, 12, 20, 24, 32):
+        s.clip(crash, t_cym, s.bar(b))
+    s.key("D Major")
+    s.key("E Major", 24)
+    harmony_loop(s, 0, 12, ["D", "A", "Bm", "G"])
+    harmony_loop(s, 12, 20, ["G", "D", "A", "Bm"])
+    harmony_loop(s, 20, 24, ["D", "A", "Bm", "G"])
+    harmony_loop(s, 24, 32, ["A", "E", "B", "C#m"])
+    s.harmony(32, "E", 1)
+    roots = {"D": 38, "A": 45, "Bm": 47, "G": 43, "E": 40, "B": 47, "C#m": 37}
+    for b, c in enumerate(["D", "A", "Bm", "G"] * 3 + ["G", "D", "A", "Bm"] * 2 + ["D", "A", "Bm", "G"] +
+                          ["A", "E", "B", "C#m"] * 2 + ["E"]):
+        r = roots[c] + 12
+        palm = b < 12 or 20 <= b < 24
+        notes = [(n, i * 0.5, 0.4, 0.85 if i % 2 == 0 else 0.6) for i in range(8) for n in ((r, r + 7) if palm else ())] if palm \
+            else [(n, 0, 3.8, 0.85) for n in (r, r + 7, r + 12)]
+        if b == 32:
+            notes = [(n, 0, 3.8, 0.9) for n in (r, r + 7, r + 12)]
+        for tr, shift in ((t_gl, 0), (t_gr, 0.01)):
+            s.noteclip(gtr, tr, s.bar(b) + shift, 4, notes)
+    for b in (12, 16, 24, 28):
+        s.clip(chorus_v if b < 24 else chorus_up, t_vox, s.bar(b))
+    s.noteclip(lead, t_lead, s.bar(20), 16, [(74, 0, 2, 0.8), (76, 2, 1, 0.7), (78, 3, 3, 0.85), (76, 6, 1, 0.6),
+                                              (74, 7, 1, 0.6), (73, 8, 2, 0.8), (71, 10, 2, 0.7), (69, 12, 4, 0.9)])
+    s.bend([(0, -1.5), (0.15, 0), (12, 0), (16, -2)])   # scooped in, sagging off at the end
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Verse")
+    s.section(12, 8, "Chorus")
+    s.section(20, 4, "Break")
+    s.section(24, 8, "Chorus (up)")
+    s.section(32, 1, "End")
+    s.part("bass,style=Pulse,busy=0.7,seed=1,sound=Synth bass,bars=5-34,track=Bass,gain=-2")
+    s.fills("style=Toms,len=0.5,where=sections,track=Drums,seed=5")
+    s.pads = [(kick, 0, 0.9, t_drums), (snare, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (tom, 0, 0.8, t_drums),
+              (crash, 0, 0.8, t_cym), (chorus_v, 0, 0.8, t_vox)]
+    s.instrument = (lead, 64, t_lead)
+    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
+    return s
+
+
+# ---------------------------------------------------------------- 3. experimental
+
+def experimental():
+    s = Song2("Experimental: Tidal Clockwork", 108, 5, 4)
+    # Clockwork in 5/4, a tide in 7/8, a waltz in 6/8, then home in 4/4. D Dorian, then F# Lydian from the
+    # 7/8 on and back. Glass bells arpeggiated up and down from the chords, a drone held under them, a
+    # melody flowing over it with vibrato, ticking percussion that bends down as it fades, and wind rising.
+    s.change(8, 108, 7, 8)
+    s.change(16, 108, 6, 8)
+    s.change(24, 108, 4, 4)
+    tick = s.synth("Tick", "Rimshot", macros=(0.7, 0.3, 0.3, 0.3, 0.5))
+    knock = s.synth("Knock", "Lo-fi kick", macros=(0.4, 0.5, 0.5, 0.3, 0.5))
+    hat = s.synth("Shaker", "Trap hat", seconds=0.1, macros=(0.6, 0.6, 0.4, 0.2, 0.5))
+    kit(s, (tick, knock, hat))
+    wind = s.synth("Wind", "Wind", seconds=10)
+    drone = s.synth("Drone", "Drone", seconds=12)
+    t_perc = s.track("Clockwork", 0.6, pan=-0.15, reverb=0.3, delay=0.25)
+    t_bell = s.track("Bells", 0.5, pan=0.25, delay=0.35, reverb=0.5)
+    t_pad = s.track("Pad", 0.45, reverb=0.6)
+    t_lead = s.track("Lead", 0.5, pan=0.05, delay=0.3, reverb=0.45)
+    t_drone = s.track("Drone", 0.35, filt=1, cutoff=900)
+    t_wind = s.track("Wind", 0.35, pan=0.3, reverb=0.5)
+    s.fx.update(div=6, fb=0.5, tone=0.4, dlevel=0.6, ping=1, size=0.9, damp=0.25, rlevel=0.85)
+
+    five = s.drums(t_perc, "Clock (5/4)", 32, [(tick, "x.x.x.x.x.x.x.x.x.x.", "..6...6...6...6....."),
+                                                (knock, "X.....x...X.....x...", ".....................", 0.9),
+                                                (hat, ".x.x.x.x.x.x.x.x.x.x", "5.5.5.5.5.5.5.5.5.5.")])
+    seven = s.drums(t_perc, "Tide (7/8)", 16, [(tick, "x.x.xx.x.x.x.x", "..6..5..6..5.."),
+                                                (knock, "X.....x.......", ""), (hat, ".xxx.xx.xxx.xx", "5..5..5..5..5.")])
+    six = s.drums(t_perc, "Waltz (6/8)", 16, [(tick, "x.....x.....", ""), (knock, "X...........", ""),
+                                               (hat, "..x.x...x.x.", "..6.6...6.6.")])
+    four = s.drums(t_perc, "Home (4/4)", 16, [(tick, "x.x.x.x.x.x.x.x.", "..6...6...6...6."),
+                                               (knock, "X.......X.......", ""), (hat, ".x.x.x.x.x.x.x.x", "5.5.5.5.5.5.5.5.")])
+    for b in range(8):
+        s.drumclip(five, t_perc, s.bar(b), s.bar(b + 1) - s.bar(b))
+    for b in range(8, 16):
+        s.drumclip(seven, t_perc, s.bar(b), s.bar(b + 1) - s.bar(b))
+    for b in range(16, 24):
+        s.drumclip(six, t_perc, s.bar(b), s.bar(b + 1) - s.bar(b))
+    for b in range(24, 30):
+        s.drumclip(four, t_perc, s.bar(b), s.bar(b + 1) - s.bar(b))
+    s.drumclip(four, t_perc, s.bar(30), s.bar(32) - s.bar(30))   # the clock running down
+    s.bend([(0, 0), (4, -2), (8, -12)])
+    s.key("D Dorian")
+    s.key("F# Lydian", 8)
+    s.key("D Dorian", 24)
+    harmony_loop(s, 0, 8, ["Dm9", "G6", "Cmaj7", "Am7"], 2)
+    harmony_loop(s, 8, 16, ["F#maj7", "G#/F#", "D#m7", "C#sus4"], 2)
+    harmony_loop(s, 16, 24, ["Emaj7", "F#", "D#m7", "G#m7"], 2)
+    harmony_loop(s, 24, 32, ["Dm9", "G6", "Bbmaj7", "Asus4"], 2)
+    for b in range(0, 32, 4):
+        s.clip(drone, t_drone, s.bar(b), beats=s.bar(b + 4) - s.bar(b), fade_in=1, fade_out=1)
+    for b in (6, 14, 22):
+        s.clip(wind, t_wind, s.bar(b), beats=s.bar(b + 2) - s.bar(b), fade_in=2)
+        s.bend([(0, -5), (s.bar(b + 2) - s.bar(b), 7)], keep=0)
+    s.section(0, 8, "Clockwork (5/4)")
+    s.section(8, 8, "Tide (7/8)")
+    s.section(16, 8, "Waltz (6/8)")
+    s.section(24, 8, "Home")
+    s.part("chords,style=Arp up & down,busy=0.6,seed=1,sound=Glass bell,track=Bells,octave=1")
+    s.part("chords,style=Held,seed=1,sound=Shimmer pad,track=Pad")
+    s.part("melody,style=Flowing,busy=0.4,seed=9,sound=Flute lead,bars=9-31,track=Lead,bend=vibrato")
+    s.pads = [(tick, 0, 0.8, t_perc), (knock, 0, 0.9, t_perc), (hat, 0, 0.7, t_perc), (wind, 0, 0.6, t_wind)]
+    s.loop = (1, s.frame(s.bar(8)), s.frame(s.bar(16)))
+    return s
+
+
+# ---------------------------------------------------------------- 11. lo-fi
+
+def lofi():
+    s = Song2("Lo-fi: Window Rain", 76)
+    # F major: Fmaj7 - Em7 - Dm9 - Cmaj7, a bar each. Lazy swung drums, held keys with a tape wobble (a
+    # vibrato on their pitch curve), a round bass on the roots, a flute that barely speaks, rain at the
+    # window and vinyl underneath.
+    kick = s.synth("Kick", "Lo-fi kick")
+    snare = s.synth("Snare", "Dusty snare", seconds=0.4, macros=(0.35, 0.6, 0.5, 0.5, 0.5))
+    hat = s.synth("Hat", "Trap hat", seconds=0.1, macros=(0.3, 0.5, 0.4, 0.4, 0.5))
+    kit(s, (kick, snare, hat))
+    rain = s.synth("Rain", "Wind", seconds=10, macros=(0.75, 0.6, 0.6, 0.5, 0.5))
+    crackle = s.synth("Vinyl", "Vinyl crackle", seconds=8)
+    t_drums = s.track("Drums", 0.75, filt=1, cutoff=4500, eq=(1, 0, -3), reverb=0.15)
+    t_keys = s.track("Keys", 0.6, filt=1, cutoff=2400, drive=0.1, reverb=0.35)
+    t_bass = s.track("Bass", 0.7, eq=(2, -1, -3))
+    t_flute = s.track("Flute", 0.4, pan=0.25, delay=0.35, reverb=0.5)
+    t_rain = s.track("Rain", 0.3, filt=1, cutoff=3000, pan=-0.2)
+    t_vinyl = s.track("Vinyl", 0.25, filt=2, cutoff=700)
+    s.fx.update(div=4, fb=0.4, tone=0.3, dlevel=0.5, ping=1, size=0.7, damp=0.6, rlevel=0.7, sc=t_drums, release=220)
+    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
+    groove = s.drums(t_drums, "Lazy", 16, [(kick, "X......x..X.....", ".......5........"),
+                                            (snare, "....X.......X..g", "...............4"),
+                                            (hat, "x.xgx.x.x.xgx.xg", "...5.......5...5")], swing=0.18)
+    sparse = s.drums(t_drums, "Sparse", 16, [(kick, "X.........X....."), (hat, "x...x...x...x...")], swing=0.18)
+    beats_every(s, sparse, t_drums, 0, 4)
+    beats_every(s, groove, t_drums, 4, 20)
+    beats_every(s, sparse, t_drums, 20, 24)
+    for b in range(0, 24, 4):
+        s.clip(crackle, t_vinyl, s.bar(b), beats=16)
+        s.clip(rain, t_rain, s.bar(b), beats=16, fade_in=1 if b == 0 else 0, fade_out=4 if b == 20 else 0)
+    s.key("F Major")
+    harmony_loop(s, 0, 24, ["Fmaj7", "Em7", "Dm9", "Cmaj7"])
+    s.section(0, 4, "Rain")
+    s.section(4, 8, "A")
+    s.section(12, 8, "B")
+    s.section(20, 4, "Fade")
+    s.part("chords,style=Held,seed=1,sound=Lo-fi keys,track=Keys,bend=vibrato")
+    s.part("bass,style=Roots,seed=1,sound=Round bass,bars=5-21,track=Bass")
+    s.part("melody,style=Sparse,busy=0.35,seed=12,sound=Flute lead,bars=13-21,track=Flute,bend=scoops")
+    s.fills("style=Drop-out,len=0.2,where=8,track=Drums,seed=2")
+    s.pads = [(kick, 0, 0.9, t_drums), (snare, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (rain, 0, 0.6, t_rain)]
+    s.loop = (1, s.frame(s.bar(4)), s.frame(s.bar(12)))
+    return s
+
+
+# ---------------------------------------------------------------- 12. drum & bass
+
+def dnb():
+    s = Song2("Drum & Bass: Night Bus", 174)
+    # F minor: Fm - Db - Bbm - C, two bars each. A filtered intro, then two-step breaks with ghost snares,
+    # a rolling sub on the roots with a reese doubling it, a held pad, a bell hook, snare rolls into each
+    # section, and the sub diving at the drop's end.
+    kick = s.synth("Kick", "Floor kick", macros=(0.6, 0.4, 0.5, 0.45, 0.5))
+    snare = s.synth("Snare", "Break snare", seconds=0.35)
+    hat = s.synth("Hat", "Trap hat", seconds=0.08)
+    kit(s, (kick, snare, hat))
+    sub_drop = s.synth("Sub drop", "Sub drop", seconds=3)
+    riser = s.synth("Riser", "Riser", seconds=4)
+    t_kick = s.track("Kick", 0.85)
+    t_drums = s.track("Drums", 0.7, eq=(0, 1, 2), reverb=0.15)
+    t_sub = s.track("Sub", 0.75, duck=0.7)
+    t_reese = s.track("Reese", 0.45, filt=1, cutoff=1500, reso=0.3, drive=0.4, duck=0.6)
+    t_pad = s.track("Pad", 0.45, reverb=0.6, duck=0.5)
+    t_bell = s.track("Bells", 0.45, pan=0.2, delay=0.4, reverb=0.45)
+    t_fx = s.track("FX", 0.5, reverb=0.5)
+    s.fx.update(div=3, fb=0.45, tone=0.45, dlevel=0.5, ping=1, size=0.8, damp=0.35, rlevel=0.75, sc=t_kick, release=120)
+    s.dynamics = (1, -22.0, 4.0, 6.0, 110.0, 7.0, 1, -1.0)
+    two = split_beat(s, t_kick, t_drums, "Two-step", 32, (kick, "X.........X.......X.....x.X....."),
+                     [(snare, "....X..g.g..X.......X..g.g..X..g", "......5.5..............5.5.....4"),
+                      (hat, "x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.", "..5...5...5...5...5...5...5...5.")])
+    intro = s.drums(t_drums, "Intro hats", 16, [(hat, "x.x.x.x.x.x.x.x."), (snare, "............X...")])
+    beats_every(s, intro, t_drums, 0, 8)
+    beats_every(s, two, t_drums, 8, 24)
+    beats_every(s, intro, t_drums, 24, 28)
+    beats_every(s, two, t_drums, 28, 40)
+    s.auto(t_pad, AUTO_CUTOFF, 0, lufs_cutoff(400))
+    s.auto(t_pad, AUTO_CUTOFF, s.bar(8), lufs_cutoff(8000))
+    s.clip(riser, t_fx, s.bar(6), beats=8, fade_in=4)
+    s.clip(riser, t_fx, s.bar(26), beats=8, fade_in=4)
+    s.clip(sub_drop, t_fx, s.bar(23))
+    s.bend([(0, 0), (6, -12)], keep=0)
+    s.key("F Minor")
+    harmony_loop(s, 0, 40, ["Fm", "Db", "Bbm", "C"], 2)
+    s.section(0, 8, "Intro")
+    s.section(8, 16, "Drop")
+    s.section(24, 4, "Break")
+    s.section(28, 12, "Drop")
+    s.part("chords,style=Held,seed=1,sound=Shimmer pad,track=Pad")
+    s.part("bass,style=Roots,seed=1,sound=Rolling sub,bars=9-25,track=Sub")
+    s.part("bass,style=Roots,seed=1,sound=Rolling sub,bars=29-41,track=Sub")
+    s.part("bass,style=Off-beat,busy=0.6,seed=2,sound=Reese,bars=9-25,track=Reese,octave=1")
+    s.part("bass,style=Off-beat,busy=0.6,seed=2,sound=Reese,bars=29-41,track=Reese,octave=1")
+    s.part("melody,style=Hook,busy=0.5,seed=21,sound=Glass bell,bars=9-41,track=Bells,octave=1")
+    s.fills("style=Snare roll,len=0.6,where=sections,track=Drums,seed=4")
+    s.pads = [(kick, 0, 0.9, t_kick), (snare, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (sub_drop, 0, 0.9, t_fx),
+              (riser, 0, 0.8, t_fx)]
+    s.loop = (1, s.frame(s.bar(8)), s.frame(s.bar(16)))
+    return s
+
+
+# ---------------------------------------------------------------- 13. jazz
+
+def jazz():
+    s = Song2("Jazz: Blue Lamp", 132)
+    # Bb major: ii - V - I - vi (Cm7 F7 Bbmaj7 Gm7), then the turnaround, and the last chorus up a minor
+    # third in Db. A swung ride, cross-stick and feathered kick, a walking upright bass, comping keys,
+    # and a flowing flute line, all written from the changes.
+    ride = s.synth("Ride", "Open hat", seconds=0.6, macros=(0.6, 0.6, 0.4, 0.3, 0.5))
+    hat = s.synth("Hi-hat foot", "Trap hat", seconds=0.08, macros=(0.3, 0.4, 0.4, 0.3, 0.5))
+    stick = s.synth("Cross-stick", "Rimshot")
+    kick = s.synth("Kick", "Lo-fi kick", macros=(0.4, 0.5, 0.4, 0.3, 0.5))
+    kit(s, (ride, hat, stick, kick))
+    t_drums = s.track("Drums", 0.7, reverb=0.25)
+    t_bass = s.track("Bass", 0.8, eq=(2, 0, -2))
+    t_keys = s.track("Keys", 0.55, pan=-0.2, reverb=0.3)
+    t_flute = s.track("Flute", 0.5, pan=0.25, reverb=0.35, delay=0.15)
+    s.fx.update(div=4, fb=0.25, tone=0.5, dlevel=0.4, ping=0, size=0.6, damp=0.45, rlevel=0.6)
+    swing = s.drums(t_drums, "Swing", 16, [(ride, "x...x.xx....x.xx", "......4.......4."),
+                                            (hat, "....x.......x..."),
+                                            (stick, "........g.......", "........4......."),
+                                            (kick, "g.......g.......", "4.......4.......")], swing=0.33)
+    brush = s.drums(t_drums, "Brushes", 16, [(ride, "x...x...x...x..."), (hat, "....x.......x...")], swing=0.33)
+    beats_every(s, brush, t_drums, 0, 4)
+    beats_every(s, swing, t_drums, 4, 36)
+    s.key("Bb Major")
+    s.key("Db Major", 28)
+    head = ["Cm7", "F7", "Bbmaj7", "Gm7", "Cm7", "F7", "Bbmaj7", "Bbmaj7"]
+    harmony_loop(s, 0, 4, ["Bbmaj7", "Gm7", "Cm7", "F7"])
+    harmony_loop(s, 4, 28, head)
+    harmony_loop(s, 28, 36, ["Ebm7", "Ab7", "Dbmaj7", "Bbm7", "Ebm7", "Ab7", "Dbmaj7", "Dbmaj7"])
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Head")
+    s.section(12, 8, "Solo")
+    s.section(20, 8, "Head")
+    s.section(28, 8, "Out (Db)")
+    s.part("bass,style=Walking,seed=3,sound=Upright bass,bars=5-37,track=Bass")
+    s.part("chords,style=Stabs,busy=0.25,seed=5,sound=Smooth keys,track=Keys")
+    s.part("melody,style=Flowing,busy=0.55,seed=31,sound=Flute lead,bars=5-37,track=Flute,bend=scoops")
+    s.fills("style=Toms,len=0.3,where=8,track=Drums,seed=6")
+    s.pads = [(ride, 0, 0.8, t_drums), (hat, 0, 0.7, t_drums), (stick, 0, 0.8, t_drums), (kick, 0, 0.9, t_drums)]
+    s.loop = (1, s.frame(s.bar(4)), s.frame(s.bar(12)))
+    return s
+
+
+# ---------------------------------------------------------------- 14. ambient
+
+def ambient():
+    s = Song2("Ambient: Slow Tide", 70)
+    # E major leaning Lydian: Emaj7 - C#m7 - Amaj7(#11 in the bells) - Bsus4, two bars each. A shimmer pad
+    # held, glass bells rising and falling, a choir singing a sparse line, a soft pulse, and wind that
+    # swells up and falls back (its pitch rising and settling with it).
+    pulse = s.synth("Pulse", "Lo-fi kick", macros=(0.3, 0.7, 0.4, 0.2, 0.5))
+    shaker = s.synth("Shaker", "Trap hat", seconds=0.12, macros=(0.5, 0.7, 0.3, 0.2, 0.5))
+    kit(s, (pulse, shaker))
+    wind = s.synth("Wind", "Wind", seconds=12)
+    drone = s.synth("Drone", "Drone", seconds=12)
+    t_pulse = s.track("Pulse", 0.45, reverb=0.4)
+    t_pad = s.track("Pad", 0.55, reverb=0.7)
+    t_bell = s.track("Bells", 0.45, pan=0.3, delay=0.45, reverb=0.6)
+    t_choir = s.track("Choir", 0.45, pan=-0.2, reverb=0.7)
+    t_drone = s.track("Drone", 0.35, filt=1, cutoff=700)
+    t_wind = s.track("Wind", 0.35, reverb=0.6, pan=0.2)
+    s.fx.update(div=6, fb=0.55, tone=0.35, dlevel=0.6, ping=1, size=0.95, damp=0.2, rlevel=0.9)
+    tide = s.drums(t_pulse, "Tide", 16, [(pulse, "X.......x.......", "........6......."),
+                                          (shaker, "..x...x...x...x.", "..7...5...7...5.")])
+    beats_every(s, tide, t_pulse, 4, 20)
+    for b in range(0, 24, 4):
+        s.clip(drone, t_drone, s.bar(b), beats=16, fade_in=2, fade_out=2)
+    for b in (2, 10, 18):
+        s.clip(wind, t_wind, s.bar(b), beats=20, fade_in=6, fade_out=6)
+        s.bend([(0, -3), (10, 2), (20, -1)], keep=1)
+    s.key("E Lydian")
+    harmony_loop(s, 0, 24, ["Emaj7", "C#m7", "Amaj7", "Bsus4"], 2)
+    s.section(0, 4, "Low water")
+    s.section(4, 16, "Tide")
+    s.section(20, 4, "Ebb")
+    s.part("chords,style=Held,seed=1,sound=Shimmer pad,track=Pad")
+    s.part("chords,style=Arp up & down,busy=0.3,seed=1,sound=Glass bell,track=Bells,octave=1")
+    s.part("melody,style=Sparse,busy=0.3,seed=40,sound=Choir aah,bars=5-21,track=Choir,bend=scoops")
+    s.pads = [(pulse, 0, 0.8, t_pulse), (shaker, 0, 0.7, t_pulse), (wind, 0, 0.6, t_wind), (drone, 0, 0.6, t_drone)]
+    s.loop = (1, s.frame(s.bar(4)), s.frame(s.bar(12)))
+    return s
+
+
+# ---------------------------------------------------------------- 15. disco
+
+def disco():
+    s = Song2("Disco: Mirror Ball", 120)
+    # A minor: Am7 - D9 - Gmaj7 - Cmaj7, a bar each. Four on the floor with open hats on the off-beats, an
+    # octave bass, chord stabs and held strings, a supersaw hook, builds into each section, and Lumi
+    # singing the chorus.
+    kick = s.synth("Kick", "Floor kick")
+    clap = s.synth("Clap", "Clap")
+    hat = s.synth("Hat", "Trap hat", seconds=0.1)
+    ohat = s.synth("Open hat", "Open hat", seconds=0.35)
+    kit(s, (kick, clap, hat, ohat))
+    riser = s.synth("Riser", "Riser", seconds=4)
+    impact = s.synth("Impact", "Impact")
+    hn = [(76, 0, 0.5), (76, 0.5, 0.5), (74, 1, 0.5), (72, 1.5, 1), (69, 3, 1), (72, 4, 0.5), (74, 4.5, 1), (76, 5.5, 2)]
+    hook = s.vocal("Sung: mirror ball", "Mir-ror ball, spin me round, turn the lights up", hn, singer=LUMI, high=1,
+                   vibrato=0.35, bends=shape(hn, scoop=1.0, fall=3.0))
+    t_kick = s.track("Kick", 0.85)
+    t_drums = s.track("Drums", 0.7, eq=(0, 1, 2), reverb=0.15)
+    t_bass = s.track("Bass", 0.7, duck=0.5, drive=0.15)
+    t_stab = s.track("Stabs", 0.5, pan=-0.2, delay=0.25, reverb=0.25, duck=0.4)
+    t_str = s.track("Strings", 0.4, pan=0.2, reverb=0.5, duck=0.5)
+    t_lead = s.track("Lead", 0.45, pan=0.1, delay=0.3, reverb=0.35)
+    t_vox = s.track("Vocal", 0.85, delay=0.2, reverb=0.35)
+    t_fx = s.track("FX", 0.45, reverb=0.5)
+    s.fx.update(div=3, fb=0.35, tone=0.55, dlevel=0.5, ping=1, size=0.7, damp=0.4, rlevel=0.7, sc=t_kick, release=160)
+    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
+    floor = split_beat(s, t_kick, t_drums, "Floor", 16, (kick, "X...X...X...X..."),
+                       [(clap, "....X.......X..."), (hat, "x.x.x.x.x.x.x.x.", "...5...5...5...5"),
+                        (ohat, "..x...x...x...x.")])
+    intro = s.drums(t_drums, "Intro", 16, [(hat, "x.x.x.x.x.x.x.x."), (ohat, "..x...x...x...x.")])
+    beats_every(s, intro, t_drums, 0, 4)
+    beats_every(s, floor, t_drums, 4, 32)
+    for b in (2, 10, 18):
+        s.clip(riser, t_fx, s.bar(b), beats=8, fade_in=4)
+    for b in (4, 12, 20):
+        s.clip(impact, t_fx, s.bar(b))
+    s.key("A Minor")
+    harmony_loop(s, 0, 32, ["Am7", "D9", "Gmaj7", "Cmaj7"])
+    for b in (12, 16, 24, 28):
+        s.clip(hook, t_vox, s.bar(b))
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Verse")
+    s.section(12, 8, "Chorus")
+    s.section(20, 4, "Break")
+    s.section(24, 8, "Chorus")
+    s.part("bass,style=Octaves,busy=0.6,seed=1,sound=Synth bass,bars=5-33,track=Bass")
+    s.part("chords,style=Stabs,busy=0.7,seed=3,sound=Chord stab,track=Stabs")
+    s.part("chords,style=Held,seed=1,sound=Silk pad,bars=5-33,track=Strings")
+    s.part("melody,style=Hook,busy=0.6,seed=17,sound=Supersaw,bars=5-13,track=Lead,octave=1,bend=scoops")
+    s.fills("style=Build,len=0.6,where=sections,track=Drums,seed=8")
+    s.pads = [(kick, 0, 0.9, t_kick), (clap, 0, 0.9, t_drums), (hat, 0, 0.7, t_drums), (ohat, 0, 0.7, t_drums),
+              (riser, 0, 0.8, t_fx), (impact, 0, 0.9, t_fx), (hook, 0, 0.8, t_vox)]
+    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
+    return s
+
+
+# ---------------------------------------------------------------- 16. afrobeats
+
+def afrobeats():
+    s = Song2("Afrobeats: Golden Hour", 104)
+    # G major: Gmaj7 - Em7 - Cmaj7 - D, a bar each. A rolling kick and rim pattern, shakers on the 16ths,
+    # a log-drum groove bass, plucks arpeggiating the chords, a vocal-like lead hook, and tom fills.
+    kick = s.synth("Kick", "Floor kick", macros=(0.45, 0.5, 0.5, 0.35, 0.5))
+    rim = s.synth("Rim", "Rimshot")
+    shaker = s.synth("Shaker", "Trap hat", seconds=0.08, macros=(0.6, 0.6, 0.4, 0.3, 0.5))
+    tom = s.synth("Tom", "Drum machine tom")
+    clap = s.synth("Clap", "Clap")
+    kit(s, (kick, rim, shaker, tom, clap))
+    t_drums = s.track("Drums", 0.75, eq=(1, 0, 1), reverb=0.15)
+    t_bass = s.track("Log drum", 0.7, eq=(2, 1, -2), drive=0.15)
+    t_pluck = s.track("Plucks", 0.45, pan=-0.25, delay=0.3, reverb=0.3)
+    t_keys = s.track("Keys", 0.4, pan=0.2, reverb=0.4)
+    t_lead = s.track("Lead", 0.5, pan=0.1, delay=0.3, reverb=0.35)
+    s.fx.update(div=3, fb=0.4, tone=0.5, dlevel=0.5, ping=1, size=0.65, damp=0.4, rlevel=0.6)
+    s.dynamics = (1, -18.0, 2.5, 15.0, 180.0, 3.0, 1, -1.0)
+    groove = s.drums(t_drums, "Golden", 16, [(kick, "X..x..x...X..x..", ".............5.."),
+                                              (rim, "...x..x....x..x.", "......6........5"),
+                                              (shaker, "xxxxxxxxxxxxxxxx", "5.5.5.5.5.5.5.5."),
+                                              (clap, "....x.......x...", ""), (tom, "................")])
+    lite = s.drums(t_drums, "Light", 16, [(rim, "...x..x....x..x."), (shaker, "x.xxx.xxx.xxx.xx", "5.5.5.5.5.5.5.5.")])
+    beats_every(s, lite, t_drums, 0, 4)
+    beats_every(s, groove, t_drums, 4, 28)
+    s.key("G Major")
+    harmony_loop(s, 0, 28, ["Gmaj7", "Em7", "Cmaj7", "D"])
+    s.section(0, 4, "Intro")
+    s.section(4, 8, "Verse")
+    s.section(12, 8, "Hook")
+    s.section(20, 8, "Hook")
+    s.part("bass,style=Groove,busy=0.7,seed=6,sound=Round bass,bars=5-29,track=Log drum")
+    s.part("chords,style=Arp up,busy=0.4,seed=1,sound=Pop pluck,track=Plucks,octave=1")
+    s.part("chords,style=Pulse,busy=0.3,seed=1,sound=Smooth keys,bars=13-29,track=Keys")
+    s.part("melody,style=Hook,busy=0.55,seed=44,sound=Ee lead,bars=13-29,track=Lead,bend=scoops")
+    s.fills("style=Toms,len=0.5,where=sections,track=Drums,seed=9")
+    s.pads = [(kick, 0, 0.9, t_drums), (rim, 0, 0.8, t_drums), (shaker, 0, 0.7, t_drums), (tom, 0, 0.8, t_drums),
+              (clap, 0, 0.9, t_drums)]
+    s.loop = (1, s.frame(s.bar(12)), s.frame(s.bar(20)))
+    return s
+
+
 if __name__ == "__main__":
-    for name, song in (("house-late-train", house()), ("hiphop-corner-store", hiphop()),
-                       ("experimental-glass-weather", experimental()), ("breakcore-static-bloom", breakcore()),
-                       ("rock-highway-lights", rock()), ("trap-midnight-hollow", trap()),
+    import subprocess
+    tinydaw = os.path.join(ROOT, "tinydaw.exe" if os.name == "nt" else "tinydaw")
+    for name, song in (("house-late-train", house()), ("hiphop-rooftop-static", hiphop()),
+                       ("experimental-tidal-clockwork", experimental()), ("breakcore-static-bloom", breakcore()),
+                       ("rock-paper-lanterns", rock()), ("trap-midnight-hollow", trap()),
                        ("synthwave-neon-coastline", synthwave()), ("techno-concrete-hours", techno()),
-                       ("pop-paper-planes", pop()), ("chiptune-pixel-quest", chiptune())):
-        song.write(os.path.join(HERE, name + ".tdaw"))
+                       ("pop-paper-planes", pop()), ("chiptune-pixel-quest", chiptune()),
+                       ("lofi-window-rain", lofi()), ("dnb-night-bus", dnb()), ("jazz-blue-lamp", jazz()),
+                       ("ambient-slow-tide", ambient()), ("disco-mirror-ball", disco()),
+                       ("afrobeats-golden-hour", afrobeats())):
+        path = os.path.join(HERE, name + ".tdaw")
+        song.write(path)
+        if song.cli:                                 # the parts and fills, written by tinydaw from the chord track
+            r = subprocess.run([tinydaw, path] + song.cli + ["--save", path], capture_output=True, text=True)
+            if r.returncode:
+                raise SystemExit("%s: %s" % (name, r.stderr.strip()))
+            lines = open(path).read().split("\n")       # tinydaw's save has no title: put it back
+            lines = [ln for ln in lines if not ln.startswith(("title ", "saved-by "))]
+            lines[1:1] = ["saved-by tinydaw %s (examples/make_examples.py)" % VERSION, "title %s" % song.title]
+            open(path, "w").write("\n".join(lines))

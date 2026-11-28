@@ -6,7 +6,7 @@ controller or a MIDI keyboard, and record what you play or sing.
 
 ![tinydaw playing the House example song](docs/screenshot.png)
 
-- **Ready to play:** ten example songs, 30 drum beats and a Theory panel with scales, chords and
+- **Ready to play:** sixteen example songs, 30 drum beats and a Theory panel with scales, chords and
   progressions you can add in one click.
 - **Makes its own sounds:** 62 synth sounds across 12 styles, shaped with plain controls like
   *brightness* and *grit*. It also loads WAV, FLAC, OGG and MP3 files.
@@ -47,8 +47,9 @@ Hold the mouse over anything to see what it does. Settings > **Keys** lists ever
 
 ## Example songs
 
-House, Hip-hop, Experimental, Breakcore, Rock, Trap, Synthwave, Techno, Pop and Chiptune. Each is
-a complete song with drum patterns, sung parts and a mix, so you can open one to see how it's made.
+Sixteen of them: House, Hip-hop, Experimental, Breakcore, Rock, Trap, Synthwave, Techno, Pop,
+Chiptune, Lo-fi, Drum & Bass, Jazz, Ambient, Disco and Afrobeats. Each is a complete song with its
+chords, drum patterns and a mix, so you can open one to see how it's made.
 
 ## More
 

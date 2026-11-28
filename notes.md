@@ -7,6 +7,33 @@ way they are.
 
 ## Unreleased (after 0.8.0)
 
+### 2026-11-27: Sixteen example songs, made with the new tools
+
+Asked for: replace Hip-hop, Rock and Experimental with new songs using the new tools, and fill the
+remaining example slots (the menu holds 16).
+
+- New: Hip-hop: Rooftop Static, Rock: Paper Lanterns (key change up a step), Experimental: Tidal
+  Clockwork (5/4, 7/8, 6/8, 4/4, two key changes), Lo-fi: Window Rain, Drum & Bass: Night Bus,
+  Jazz: Blue Lamp (walking bass, key change up a minor third), Ambient: Slow Tide, Disco: Mirror
+  Ball, Afrobeats: Golden Hour. The old Corner Store, Highway Lights and Glass Weather are gone.
+- **How they're made:** `make_examples.py` writes the base (sounds, mix, drum patterns, chords and
+  key, sections, sung lines, pitch curves via `Song2.bend`), then runs tinydaw on the file with
+  `--part` and `--fills` to write the parts with the real generators, and `--save`s it in place.
+  So `make` must have built `./tinydaw` before the script runs.
+- **New command-line options:** `--part "kind,style=,busy=,octave=,seed=,sound=,bars=a-b,track=,gain=,bend="`
+  and `--fills "style=,len=,where=sections|4|8,track=,seed="`, run in order after the project
+  loads. `bend=` puts an editor preset (scoops, fall-offs, vibrato, rise, dive) on the part.
+  Implemented by `cli_spec` in main.c through overrides (`pt_force_preset`, `pt_force_track`,
+  `pt_from/pt_to`) on the same `part_make` and `fills_make` the panel uses.
+- **Self-test changes:** it expects 16 examples, and an example needs more than 20 clips, not 40,
+  because generated parts are a few long clips, not many short ones. The tests that open an example
+  and keep working in it now use Disco: 4/4 throughout, and at 120 BPM a beat is a whole number of frames (the tests compare
+  exact positions; Lo-fi at 76 BPM was a frame off); the new Experimental starts
+  in 5/4 and broke 25 later checks.
+- **Gotcha:** main.c takes about 100 s to compile at -O2. Editing it while a build runs leaves a
+  binary newer than the source, which `make` then won't rebuild. Touch the file or remove
+  `tinydaw` if a change seems missing.
+
 ### 2026-11-27: Pitch bend on any clip
 
 Asked for: the Singer's drawn pitch curve should work on everything, as one of the Mixer tools. The

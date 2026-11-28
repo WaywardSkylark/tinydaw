@@ -11289,7 +11289,7 @@ static int selftest(void)
                 for (long pos = 0; pos < n; pos += 1024)
                     mixer_run(m, q, at + pos, 1, b + 2 * pos, (int)(n - pos < 1024 ? n - pos : 1024), -1, 0);
                 double r = test_rms(b, 0, n, 2);
-                if (q->nclips > 100 && end > 50L * SR && r > 0.02 && strstr(msg, "missing") == NULL) good++;
+                if (q->nclips > 40 && end > 50L * SR && r > 0.02 && strstr(msg, "missing") == NULL) good++;
                 else fprintf(stderr, "example %s: %d clips, %.1f s, rms %.3f: %s\n", example_title[i], q->nclips,
                              (double)end / SR, r, msg);
                 mixer_free(m);
@@ -11306,7 +11306,7 @@ static int selftest(void)
                 if (strstr(example_title[i], "Experimental")) pick = i;
             snprintf(act_path, sizeof act_path, "%s", example_path[pick]);
             run_action(ACT_OPEN_EXAMPLE);
-            check(proj_path[0] == 0 && !is_dirty() && P.nclips > 100, "an example opens as an untitled copy, nothing to save yet");
+            check(proj_path[0] == 0 && !is_dirty() && P.nclips > 40, "an example opens as an untitled copy, nothing to save yet");
         }
     }
 
@@ -17082,6 +17082,13 @@ int main(int argc, char **argv)
                 P.playhead = 0;
                 UNLOCK();
                 drum_place(d, 2);
+            }
+        }
+        if (getenv("TINYDAW_SHOT_DRUMPAT")) {    /* a song's own drum pattern (its id) in the Drums panel */
+            const DrumPat *d = drum_find_c(&P, atoi(getenv("TINYDAW_SHOT_DRUMPAT")));
+            if (d) {
+                sel_track = d->track;
+                drums_show(d->id);
             }
         }
         if (getenv("TINYDAW_SHOT_TIP")) {        /* "x,y": the mouse held still there, its tooltip showing */

@@ -560,7 +560,10 @@ int project_load(Project *p, const char *path, char *msg, size_t msglen)
     p->playing = 0;
     p->preview = -1;
     const char *base = path_base(path);
-    int n = snprintf(msg, msglen, "Opened %s (%d clips, %d sounds)", base, p->nclips, p->nsamples);
+    int listed = 0;                              /* the sounds the library shows (not layers or copies) */
+    for (int i = 0; i < p->nsamples; i++)
+        listed += !p->samples[i].hidden && !p->samples[i].removed && (!p->samples[i].pitched || p->samples[i].listed);
+    int n = snprintf(msg, msglen, "Opened %s (%d clips, %d sounds)", base, p->nclips, listed);
     if (missing && n > 0 && (size_t)n < msglen)
         n += snprintf(msg + n, msglen - n, " - %d audio file%s missing, playing as silence", missing, missing == 1 ? "" : "s");
     if (unsung && n > 0 && (size_t)n < msglen)

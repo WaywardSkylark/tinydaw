@@ -363,14 +363,16 @@ music draws it faster. Space plays and stops, the pad keys still work, and Esc l
 
 | Song | What's in it |
 |---|---|
-| House: Late Train | 124 BPM, A minor. Four-on-the-floor drums, an off-beat bass and chord stabs that pump with the kick, a pad, a lead with ping-pong delay, and a riser and snare roll into the drop |
-| Hip-hop: Corner Store | 88 BPM, D minor. Swung boom-bap drums, an 808-style bass, soft keys (Dm9, Gm7, Bbmaj7, A7), a bell melody and tape hiss |
-| Experimental: Glass Weather | 96 BPM, F Lydian. Resonant drones, glass bells falling five against four into long echoes, reversed bells, wind, and drums that loop every 3.5 beats so they drift against the bar |
-| Breakcore: Static Bloom | A half-time intro at 86 BPM, then 172 with chopped breaks and rising stutter rolls, four bars of 7/8, and a faster run at 186. A shimmer pad and reese bass in note clips, a filter swept by automation, vocal chops, and the Loud master |
-| Rock: Highway Lights | 128 BPM, E minor. Double-tracked crunch guitars (palm-muted in the verse, open in the chorus), a picked bass, a guitar solo, and sung verses and choruses: Kai sings, Aria harmonises |
-| Trap: Midnight Hollow | 140 BPM, F minor, half-time. An 808 bassline and bell melody in note clips, hat rolls in sixteenths, thirty-seconds and triplets, an intro opening under a filter, and a talkbox vocal tag |
+| House: Late Train | 124 BPM, A minor. Four-on-the-floor patterns (intro, groove, build, drop) with ghost hats that come and go, an off-beat bass and accented piano stabs that pump with the kick, a pad, a pluck answering the hook, and Lumi singing "Late train" with slides and fall-offs |
+| Hip-hop: Corner Store | 88 BPM, D minor. Swung boom-bap patterns with ghost snares, soft keys comped with feel (Dm9, Gm7, Bbmaj7, A7), an upright bass, a bell melody, vinyl crackle, and Kai singing the hook with scoops |
+| Experimental: Glass Weather | 96 BPM, F Lydian. The bar changes from 4/4 to 7/8 to 5/4 under a sixteen-step pattern whose hits only sometimes play, so it drifts and never repeats; glass bells falling five against four, drones, wind, and a choir line bending between its notes |
+| Breakcore: Static Bloom | A half-time intro at 86 BPM, then 172 with chopped two-bar break patterns and rising stutter rolls, four bars of 7/8, and a faster run at 186. A shimmer pad and reese bass, a filter swept by automation, a robot voice leaping an octave, and the Loud master |
+| Rock: Highway Lights | 128 BPM, E minor. Verse and chorus beats with fills, double-tracked crunch guitars (palm-muted in the verse, open in the chorus), a picked bass, a guitar solo, and sung verses and choruses: Kai sings with scoops and slides, Aria harmonises |
+| Trap: Midnight Hollow | 140 BPM, F minor, half-time. Two-bar drum patterns with hat bursts, triplet and thirty-second rolls, an 808 bassline and bell melody, an intro opening under a filter, and a talkbox tag that scoops and falls |
 
-Each sets up the pads with its own sounds too. `examples/make_examples.py` writes them.
+Every drum part is a pattern you can open in the Drums panel, the kits and keys have velocity
+layers and round-robins, the sung lines have pitch curves, and the parts are named on the arranger
+strip. Each sets up the pads with its own sounds too. `examples/make_examples.py` writes them.
 
 ## Settings
 
